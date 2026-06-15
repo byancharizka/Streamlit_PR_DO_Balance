@@ -182,9 +182,8 @@ df_do_f['Nominal'] = pd.to_numeric(df_do_f['Nominal'], errors='coerce').fillna(0
 df_pr_f['PIC Procurement'] = df_pr_f['PIC Procurement'].fillna('Unassigned')
 
 
-# --- AGREGASI FINAL UNTUK DASHBOARD ---
+# --- AGREGASI FINAL UNTUK DASHBOARD PR ---
 total_pr_unpr = df_pr_f['Nominal'].sum()
-total_do_unpr = df_do_f['Nominal'].sum()
 
 
 def metric_card(label, value):
@@ -233,8 +232,8 @@ with c2: metric_card("Rata-rata Nominal", f"Rp {avg_nominal_pr:,.0f}")
 
 
 c1, c2, c3 = st.columns(3)
-with c1: metric_card("Total Item PR", f"{total_pr_rows:,}")
-with c2: metric_card("Total Dokumen PR", f"{total_pr_count:,}")
+with c1: metric_card("Total Dokumen PR", f"{total_pr_count:,}")
+with c2: metric_card("Total Item PR", f"{total_pr_rows:,}")
 with c3: metric_card("PIC Terbanyak", top_pic)
 
 
@@ -425,3 +424,38 @@ search_pr = st.sidebar.text_input("Cari No. PR:")
 if search_pr:
     result = df_pr_f[df_pr_f['No. PR'].str.contains(search_pr, case=False, na=False)]
     st.write("Hasil Pencarian:", result)
+
+st.markdown("---") # Garis pembatas
+
+
+
+# --- AGREGASI FINAL UNTUK DASHBOARD PR ---
+total_do_unpr = df_do_f['Nominal'].sum()
+
+
+def metric_card(label, value):
+    # Menggunakan HTML untuk membungkus metric
+    st.markdown(f"""
+    <div class="metric-card">
+        <div style="color: #666; font-size: 0.9rem;">{label}</div>
+        <div style="font-size: 1.5rem; font-weight: bold; color: #333;">{value}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# --- STATUS PR ---
+# Menghitung angka-angka kunci untuk ringkasan di atas
+total_do_count = df_do_f['No. DO'].nunique()
+total_do_rows = len(df_do_f)
+avg_nominal_do = df_do_f['Nominal'].mean()
+
+
+st.subheader("📊Detail Outstanding DO")
+c1, c2 = st.columns(2)
+with c1: metric_card("DO Balance", f"Rp {total_do_unpr:,.0f}")
+with c2: metric_card("Rata-rata Nominal", f"Rp {avg_nominal_do:,.0f}")
+
+
+c1, c2 = st.columns(2)
+with c1: metric_card("Total Dokumen DO", f"{total_do_count:,}")
+with c2: metric_card("Total Item DO", f"{total_do_rows:,}")
