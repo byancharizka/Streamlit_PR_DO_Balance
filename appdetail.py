@@ -129,11 +129,42 @@ def apply_realization_filter(df, date_range):
 
     return df
 
+
+def apply_cumulative_filter(df, end_date):
+    """
+    Mengambil SEMUA data dari awal hingga batas end_date.
+    Data masa lalu (Januari) akan ikut, data masa depan (Maret) akan dibuang.
+    """
+    if df.empty or 'transaction_date' not in df.columns:
+        return df
+    
+    df = df.copy()
+    # Konversi ke datetime dan hilangkan timezone
+    df['transaction_date'] = pd.to_datetime(df['transaction_date']).dt.tz_localize(None)
+    
+    # Ambil batas akhir hari (23:59:59)
+    upper_limit = pd.to_datetime(end_date).replace(hour=23, minute=59, second=59)
+    
+    # Filter hanya berdasarkan batas atas
+    return df[df['transaction_date'] <= upper_limit]
+
+
+if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) == 2:
+    # Misal user pilih 1 Feb - 28 Feb di Sidebar
+    # start_date = 2026-02-01 (Kita abaikan ini)
+    # end_date = 2026-02-28 (Ini yang kita pakai)
+    report_end_date = selected_date_range[1]
+    
+    # Semua dokumen diproses secara akumulatif
+    df_pr_f = apply_cumulative_filter(df_pr, report_end_date)
+    df_po_f = apply_cumulative_filter(df_po, report_end_date)
+    df_do_f = apply_cumulative_filter(df_do, report_end_date)
+
 # --- 5. EKSEKUSI ---
 #df_so_real = apply_realization_filter(df_so, selected_date_range)
-df_pr_real = apply_realization_filter(df_pr, selected_date_range)
-df_po_real = apply_realization_filter(df_po, selected_date_range)
-df_do_real = apply_realization_filter(df_do, selected_date_range)
+#df_pr_real = apply_realization_filter(df_pr, selected_date_range)
+#df_po_real = apply_realization_filter(df_po, selected_date_range)
+#df_do_real = apply_realization_filter(df_do, selected_date_range)
 
 # Cek data PR apakah data berhasil dimuat
 #if not df_pr_real.empty:
@@ -145,13 +176,13 @@ df_do_real = apply_realization_filter(df_do, selected_date_range)
 
 
 # Konversi kolom Nominal ke float
-df_pr_real['Nominal'] = pd.to_numeric(df_pr_real['Nominal'], errors='coerce').fillna(0.0).astype(float)
-df_do_real['Nominal'] = pd.to_numeric(df_do_real['Nominal'], errors='coerce').fillna(0.0).astype(float)
+df_pr_f['Nominal'] = pd.to_numeric(df_pr_f['Nominal'], errors='coerce').fillna(0.0).astype(float)
+df_do_f['Nominal'] = pd.to_numeric(df_do_f['Nominal'], errors='coerce').fillna(0.0).astype(float)
 
 
 # --- AGREGASI FINAL UNTUK DASHBOARD ---
-total_pr_unpr = df_pr_real['Nominal'].sum()
-total_do_unpr = df_do_real['Nominal'].sum()
+total_pr_unpr = df_pr_f['Nominal'].sum()
+total_do_unpr = df_do_f['Nominal'].sum()
 
 
 def metric_card(label, value):
@@ -166,10 +197,10 @@ def metric_card(label, value):
 
 # --- STATUS PR ---
 # Menghitung angka-angka kunci untuk ringkasan di atas
-total_pr_count = df_pr_real['No. PR'].nunique()
-total_pr_rows = len(df_pr_real)
-avg_nominal_pr = df_pr_real['Nominal'].mean()
-top_pic = df_pr_real.groupby('PIC Procurement')['No. PR'].count().idxmax() if not df_pr_real.empty else "-"
+total_pr_count = df_pr_f['No. PR'].nunique()
+total_pr_rows = len(df_pr_f)
+avg_nominal_pr = df_pr_f['Nominal'].mean()
+top_pic = df_pr_f.groupby('PIC Procurement')['No. PR'].count().idxmax() if not df_pr_f.empty else "-"
 
 st.subheader("📊Detail Outstanding PR")
 c1, c2 = st.columns(2)
@@ -187,9 +218,9 @@ with c3: metric_card("PIC Terbanyak", top_pic)
 
 
 # --- AGREGASI STATUS PR ---
-#if not df_pr_real.empty and 'Status' in df_pr_real.columns:
+#if not df_pr_f.empty and 'Status' in df_pr_f.columns:
 # Mengelompokkan berdasarkan Status
-pr_summary = df_pr_real.groupby('Status').agg(
+pr_summary = df_pr_f.groupby('Status').agg(
 Total_PR=('No. PR', 'nunique'),     # Menghitung jumlah unik nomor PR
 Total_Amount=('Nominal', 'sum')     # Menjumlahkan nominal
 ).reset_index()
@@ -272,10 +303,17 @@ st.plotly_chart(fig, use_container_width=True)
 
 
 # --- ANALISIS PIC PROCUREMENT TERBANYAK PER STATUS ---
-if not df_pr_real.empty and 'PIC Procurement' in df_pr_real.columns:
+# --- PEMBERSIHAN DATA (TAMBAHKAN SEBELUM PROSES FILTER) ---
+
+# Mengisi nilai NaN atau kosong dengan nama yang Anda pilih
+df_pr_f['PIC Procurement'] = df_pr_f['PIC Procurement'].fillna('Unassigned')
+
+# Jika ternyata isinya bukan NaN tapi string kosong (""), gunakan ini:
+df_pr_f.loc[df_pr_f['PIC Procurement'] == "", 'PIC Procurement'] = 'Unassigned'
+if not df_pr_f.empty and 'PIC Procurement' in df_pr_f.columns:
     
     # 1. Grouping berdasarkan PIC dan Status, lalu hitung jumlah baris (atau unique No. PR)
-    pic_summary = df_pr_real.groupby(['PIC Procurement', 'Status']).agg(
+    pic_summary = df_pr_f.groupby(['PIC Procurement', 'Status']).agg(
         Jumlah_PR=('No. PR', 'count')
     ).reset_index()
 
@@ -334,16 +372,16 @@ else:
 # --- FITUR DOWNLOAD EXCEL PER PIC ---
 st.subheader("📥 Download Data PR per PIC")
 
-if not df_pr_real.empty and 'PIC Procurement' in df_pr_real.columns:
+if not df_pr_f.empty and 'PIC Procurement' in df_pr_f.columns:
     # Ambil list unik PIC yang ada di data
-    list_pic = df_pr_real['PIC Procurement'].unique().tolist()
+    list_pic = df_pr_f['PIC Procurement'].unique().tolist()
     
     # Dropdown untuk memilih PIC
     selected_pic = st.selectbox("Pilih PIC Procurement:", list_pic)
     
     if selected_pic:
         # Filter data berdasarkan PIC yang dipilih
-        df_filtered = df_pr_real[df_pr_real['PIC Procurement'] == selected_pic]
+        df_filtered = df_pr_f[df_pr_f['PIC Procurement'] == selected_pic]
         
         # Konversi ke Excel di memori (menggunakan BytesIO)
         from io import BytesIO
@@ -364,5 +402,5 @@ else:
 
 search_pr = st.sidebar.text_input("Cari No. PR:")
 if search_pr:
-    result = df_pr_real[df_pr_real['No. PR'].str.contains(search_pr, case=False, na=False)]
+    result = df_pr_f[df_pr_f['No. PR'].str.contains(search_pr, case=False, na=False)]
     st.write("Hasil Pencarian:", result)
