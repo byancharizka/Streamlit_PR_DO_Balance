@@ -178,6 +178,8 @@ if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) =
 # Konversi kolom Nominal ke float
 df_pr_f['Nominal'] = pd.to_numeric(df_pr_f['Nominal'], errors='coerce').fillna(0.0).astype(float)
 df_do_f['Nominal'] = pd.to_numeric(df_do_f['Nominal'], errors='coerce').fillna(0.0).astype(float)
+# Mengisi nilai NaN atau kosong dengan nama yang Anda pilih
+df_pr_f['PIC Procurement'] = df_pr_f['PIC Procurement'].fillna('Unassigned')
 
 
 # --- AGREGASI FINAL UNTUK DASHBOARD ---
@@ -200,7 +202,29 @@ def metric_card(label, value):
 total_pr_count = df_pr_f['No. PR'].nunique()
 total_pr_rows = len(df_pr_f)
 avg_nominal_pr = df_pr_f['Nominal'].mean()
-top_pic = df_pr_f.groupby('PIC Procurement')['No. PR'].count().idxmax() if not df_pr_f.empty else "-"
+# --- LOGIKA PIC TERBANYAK (DOKUMEN UNIK) ---
+
+# 1. Pastikan PIC kosong sudah jadi 'Unassigned'
+df_pr_f['PIC Procurement'] = df_pr_f['PIC Procurement'].fillna('Unassigned')
+df_pr_f.loc[df_pr_f['PIC Procurement'] == "", 'PIC Procurement'] = 'Unassigned'
+
+# 2. Filter hanya untuk PIC yang bertugas
+df_assigned = df_pr_f[df_pr_f['PIC Procurement'] != 'Unassigned']
+
+# 3. Hitung jumlah DOKUMEN PR UNIK per PIC (menggunakan nunique)
+pic_counts = df_assigned.groupby('PIC Procurement')['No. PR'].nunique().sort_values(ascending=False)
+
+# 4. Ambil daftar PIC
+list_pic_urut = pic_counts.index.tolist()
+
+# 5. Tentukan top_pic
+if len(list_pic_urut) >= 1:
+    top_pic = list_pic_urut[0]  # Juara 1 (Faqih)
+else:
+    top_pic = "Tidak ada"
+
+# Debugging (Opsional): Tampilkan di bawah st.write untuk memastikan angkanya benar
+# st.write("Data debug untuk PIC:", pic_counts)
 
 st.subheader("📊Detail Outstanding PR")
 c1, c2 = st.columns(2)
@@ -305,16 +329,13 @@ st.plotly_chart(fig, use_container_width=True)
 # --- ANALISIS PIC PROCUREMENT TERBANYAK PER STATUS ---
 # --- PEMBERSIHAN DATA (TAMBAHKAN SEBELUM PROSES FILTER) ---
 
-# Mengisi nilai NaN atau kosong dengan nama yang Anda pilih
-df_pr_f['PIC Procurement'] = df_pr_f['PIC Procurement'].fillna('Unassigned')
-
 # Jika ternyata isinya bukan NaN tapi string kosong (""), gunakan ini:
 df_pr_f.loc[df_pr_f['PIC Procurement'] == "", 'PIC Procurement'] = 'Unassigned'
 if not df_pr_f.empty and 'PIC Procurement' in df_pr_f.columns:
     
     # 1. Grouping berdasarkan PIC dan Status, lalu hitung jumlah baris (atau unique No. PR)
     pic_summary = df_pr_f.groupby(['PIC Procurement', 'Status']).agg(
-        Jumlah_PR=('No. PR', 'count')
+        Jumlah_PR=('No. PR', 'nunique')
     ).reset_index()
 
     # 2. Urutkan berdasarkan jumlah terbanyak
