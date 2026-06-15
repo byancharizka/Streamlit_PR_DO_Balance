@@ -370,8 +370,8 @@ if not df_pr_f.empty and 'PIC Procurement' in df_pr_f.columns:
     st.plotly_chart(fig_pic, use_container_width=True)
     
     # 4. Tampilkan tabel detailnya
-    st.write("Tabel Detail PIC:")
-    st.table(pic_summary)
+    #st.write("Tabel Detail PIC:")
+    #st.table(pic_summary)
 
 else:
     st.info("Data PIC Procurement tidak tersedia atau kolom tidak ditemukan.")
