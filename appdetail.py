@@ -178,8 +178,6 @@ if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) =
 # Konversi kolom Nominal ke float
 df_pr_f['Nominal'] = pd.to_numeric(df_pr_f['Nominal'], errors='coerce').fillna(0.0).astype(float)
 df_do_f['Nominal'] = pd.to_numeric(df_do_f['Nominal'], errors='coerce').fillna(0.0).astype(float)
-# Mengisi nilai NaN atau kosong dengan nama yang Anda pilih
-df_pr_f['PIC Procurement'] = df_pr_f['PIC Procurement'].fillna('Unassigned')
 
 
 # --- AGREGASI FINAL UNTUK DASHBOARD PR ---
@@ -218,7 +216,7 @@ list_pic_urut = pic_counts.index.tolist()
 
 # 5. Tentukan top_pic
 if len(list_pic_urut) >= 1:
-    top_pic = list_pic_urut[0]  # Juara 1 (Faqih)
+    top_pic = list_pic_urut[0]
 else:
     top_pic = "Tidak ada"
 
@@ -448,6 +446,25 @@ def metric_card(label, value):
 total_do_count = df_do_f['No. DO'].nunique()
 total_do_rows = len(df_do_f)
 avg_nominal_do = df_do_f['Nominal'].mean()
+# 1. Pastikan PIC kosong sudah jadi 'Unassigned'
+df_do_f['PIC Purchasing'] = df_do_f['PIC Purchasing'].fillna('Unassigned')
+df_do_f.loc[df_do_f['PIC Purchasing'] == "", 'PIC Purchasing'] = 'Unassigned'
+
+# 2. Filter hanya untuk PIC yang bertugas
+df_assigned2 = df_do_f[df_do_f['PIC Purchasing'] != 'Unassigned']
+
+# 3. Hitung jumlah DOKUMEN PR UNIK per PIC (menggunakan nunique)
+pic_counts2 = df_assigned2.groupby('PIC Purchasing')['No. DO'].nunique().sort_values(ascending=False)
+
+# 4. Ambil daftar PIC
+list_pic_urut2 = pic_counts2.index.tolist()
+
+# 5. Tentukan top_pic
+if len(list_pic_urut2) >= 1:
+    top_pic2 = list_pic_urut2[0]
+else:
+    top_pic2 = "Tidak ada"
+
 
 
 st.subheader("📊Detail Outstanding DO")
@@ -456,6 +473,9 @@ with c1: metric_card("DO Balance", f"Rp {total_do_unpr:,.0f}")
 with c2: metric_card("Rata-rata Nominal", f"Rp {avg_nominal_do:,.0f}")
 
 
-c1, c2 = st.columns(2)
+c1, c2, c3 = st.columns(3)
 with c1: metric_card("Total Dokumen DO", f"{total_do_count:,}")
 with c2: metric_card("Total Item DO", f"{total_do_rows:,}")
+with c3: metric_card("PIC Terbanyak", top_pic2)
+
+
