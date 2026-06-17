@@ -21,10 +21,10 @@ st.set_page_config(layout="wide", page_title="SIBIMA Performance Dashboard")
 st.markdown("""
     <style>
     .block-container {
-        padding-top: 3rem;
+        padding-top: 0.5rem;
         padding-bottom: 1rem;
-        padding-left: 5rem;
-        padding-right: 5rem;
+        padding-left: 3rem;
+        padding-right: 3rem;
         max-width: 100%;
     }
     [data-testid="stMetricValue"] {
@@ -44,6 +44,18 @@ st.markdown("""
         box-shadow: 2px 2px 10px rgba(0,0,0,0.05);
         text-align: center;
         margin: 10px 0;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+
+st.markdown("""
+    <style>
+    /* Membuat garis vertikal di tengah */
+    .vertical-line {
+        border-left: 2px solid #555;
+        height: 100%;
+        margin: 0 20px;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -93,19 +105,38 @@ df_pr = df_pr.rename(columns={'Tgl. PR': 'transaction_date'})
 df_do = df_do.rename(columns={'Tgl. DO': 'transaction_date'})
 
 
-# --- 3. HANDLING INPUT TANGGAL ---
-st.sidebar.header("📅 Filter period")
 
-start_default = date(2026, 2, 1) # Diubah ke Feb agar sesuai case
+# Header Dashboard
+st.title("SIBIMA Performance Dashboard")
+start_default = date(2026, 1, 1) # Diubah ke Feb agar sesuai case
 end_default = date.today()
 
-selected_date_range = st.sidebar.date_input(
-    "Select Date Range:",
-    value=(start_default, end_default),
-    max_value=date.today()
-)
+# Gunakan rasio kolom [2, 1, 1] agar filter punya ruang proporsional
+col_head1, col_head2, col_head3, col_head4 = st.columns([1, 1, 1, 1])
 
-# --- 4. FUNGSI FILTER ---
+with col_head1:
+    # Filter Date
+    selected_date_range = st.date_input(
+        "Select Date Range 📅:", 
+        value=(start_default, end_default),
+        max_value=date.today()
+    )
+
+#with col_head2:
+    # Cari by No.PR
+    #search_pr = st.text_input("Cari No. PR 🔍:")
+
+#with col_head3:
+    # Cari by status
+    #search_pic = st.text_input("Cari PIC 🔍:")
+
+#with col_head4:
+    # Cari by Status
+    #search_status = st.text_input("Cari Status 🔍:")
+
+
+# --- HANDLING INPUT TANGGAL ---
+# --- FUNGSI FILTER ---
 def apply_realization_filter(df, date_range):
     if df.empty: 
         return df
@@ -159,6 +190,7 @@ if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) =
     df_pr_f = apply_cumulative_filter(df_pr, report_end_date)
     df_po_f = apply_cumulative_filter(df_po, report_end_date)
     df_do_f = apply_cumulative_filter(df_do, report_end_date)
+
 
 # --- 5. EKSEKUSI ---
 #df_so_real = apply_realization_filter(df_so, selected_date_range)
@@ -223,259 +255,306 @@ else:
 # Debugging (Opsional): Tampilkan di bawah st.write untuk memastikan angkanya benar
 # st.write("Data debug untuk PIC:", pic_counts)
 
-st.subheader("📊Detail Outstanding PR")
-c1, c2 = st.columns(2)
-with c1: metric_card("PR Balance", f"Rp {total_pr_unpr:,.0f}")
-with c2: metric_card("Rata-rata Nominal", f"Rp {avg_nominal_pr:,.0f}")
 
 
-c1, c2, c3 = st.columns(3)
-with c1: metric_card("Total Dokumen PR", f"{total_pr_count:,}")
-with c2: metric_card("Total Item PR", f"{total_pr_rows:,}")
-with c3: metric_card("PIC Terbanyak", top_pic)
 
 
-#st.markdown("---") # Garis pembatas
+# --- MAIN LAYOUT DENGAN PEMBATAS ---
+#col_kiri, col_tengah, col_kanan = st.columns([1, 0.05, 1])
+col_kiri, col_kanan = st.columns([1, 1])
 
-
-# --- AGREGASI STATUS PR ---
-#if not df_pr_f.empty and 'Status' in df_pr_f.columns:
-# Mengelompokkan berdasarkan Status
-pr_summary = df_pr_f.groupby('Status').agg(
-Total_PR=('No. PR', 'nunique'),     # Menghitung jumlah unik nomor PR
-Total_Amount=('Nominal', 'sum')     # Menjumlahkan nominal
-).reset_index()
-
-
-# Tentukan warna untuk setiap status agar konsisten di seluruh dashboard
-status_colors = {
-    "Complete": "#00CC96",   # Hijau
-    "In Progress": "#f2e6ac", # Kuning
-    "Approved": "#f6a27e",    # Oranye
-    # Tambahkan status lain jika ada
-}
-
-# --- VISUALISASI PIE CHART ---
-if not pr_summary.empty:
-    st.subheader("🍩Proporsi Nominal PR per Status")
+with col_kiri:
+    # Bungkus dalam container dengan border
+    with st.container(border=True):
+        st.subheader("📊Detail Outstanding NPR")
+        # Card Ringkasan NPR
+        c1, c2 = st.columns(2)
+        with c1: metric_card("NPR Outstanding", f"{total_pr_count:,}")
+        with c2: metric_card("Total Item", f"{total_pr_count:,}")
     
-    fig_pie = px.pie(
-        pr_summary, 
-        values='Total_Amount', 
-        names='Status', 
-        color='Status',
-        color_discrete_map=status_colors, # Menggunakan mapping warna yang sama
-        hole=0.4, # Membuat tampilan menjadi Donut Chart (opsional)
-        title="Persentase Distribusi Nominal PR"
-    )
+        c1, c2, c3 = st.columns(3)
+        with c1: metric_card("Total Dokumen NPR", f"{total_pr_count:,}")
+        with c2: metric_card("Total Item NPR", f"{total_pr_rows:,}")
+        with c3: metric_card("PIC Terbanyak", top_pic)
+        
+
+# --- SISI KANAN: DETAIL & ANALISIS ---
+with col_kanan:
+    with st.container(border=True):
+        #st.subheader("📋Detail Outstanding PR")
+        st.subheader("📊Detail Outstanding PR")
+
+        c1, c2 = st.columns(2)
+        with c1: metric_card("PR Balance", f"Rp {total_pr_unpr:,.0f}")
+        with c2: metric_card("Rata-rata Nominal", f"Rp {avg_nominal_pr:,.0f}")
     
-    # Mengatur tampilan agar lebih bersih
-    fig_pie.update_traces(
-        textinfo='percent+value', # Menampilkan persentase dan nilai
-        texttemplate='%{percent:.1%} <br>(Rp %{value:,.0f})'
-    )
-    
-    st.plotly_chart(fig_pie, use_container_width=True)
-
-
-st.subheader("🔍Analisis Status PR")
-    
-    # Menampilkan tabel ringkasan
-    #st.table(pr_summary)
-    
-    # Opsional: Menampilkan dengan format Rupiah yang lebih cantik di tabel
-pr_summary_display = pr_summary.copy()
-pr_summary_display['Total_Amount'] = pr_summary_display['Total_Amount'].apply(lambda x: f"Rp {x:,.0f}")
-st.write(pr_summary_display)
-
-#else:
-    #st.info("Data PR tidak tersedia atau kolom 'Status' tidak ditemukan.")
-
-
-# --- VISUALISASI BAR CHART DENGAN WARNA BERBEDA ---
-
-
-fig = px.bar(
-    pr_summary, 
-    x='Status', 
-    y='Total_Amount', 
-    color='Status',
-    color_discrete_map=status_colors, # Konsistensi warna
-    title="Distribusi Nominal PR per Status"
-)
-
-# 1. Update traces untuk angka di atas bar (format ribuan/jutaan penuh)
-fig.update_traces(
-    texttemplate='Rp %{y:,.0f}', # Menggunakan format ribuan (,) dengan 0 desimal
-    textposition='outside'
-)
-
-# 2. Update layout untuk menghilangkan legenda warna dan mengatur sumbu Y
-fig.update_layout(
-    showlegend=False,              # Menghilangkan legenda warna di samping
-    yaxis=dict(
-        tickformat=',.0f',         # Format sumbu Y agar muncul angka penuh
-        title="Total Nominal (Rp)"
-    )
-)
-
-st.plotly_chart(fig, use_container_width=True)
+        c1, c2, c3 = st.columns(3)
+        with c1: metric_card("Total Dokumen PR", f"{total_pr_count:,}")
+        with c2: metric_card("Total Item PR", f"{total_pr_rows:,}")
+        with c3: metric_card("PIC Terbanyak", top_pic)
 
 
 
-# --- ANALISIS PIC PROCUREMENT TERBANYAK PER STATUS ---
-# --- PEMBERSIHAN DATA (TAMBAHKAN SEBELUM PROSES FILTER) ---
-
-# Jika ternyata isinya bukan NaN tapi string kosong (""), gunakan ini:
-df_pr_f.loc[df_pr_f['PIC Procurement'] == "", 'PIC Procurement'] = 'Unassigned'
-if not df_pr_f.empty and 'PIC Procurement' in df_pr_f.columns:
-    
-    # 1. Grouping berdasarkan PIC dan Status, lalu hitung jumlah baris (atau unique No. PR)
-    pic_summary = df_pr_f.groupby(['PIC Procurement', 'Status']).agg(
-        Jumlah_PR=('No. PR', 'nunique')
+    # --- AGREGASI STATUS PR ---
+    #if not df_pr_f.empty and 'Status' in df_pr_f.columns:
+    # Mengelompokkan berdasarkan Status
+    pr_summary = df_pr_f.groupby('Status').agg(
+    Total_PR=('No. PR', 'nunique'),     # Menghitung jumlah unik nomor PR
+    Total_Amount=('Nominal', 'sum')     # Menjumlahkan nominal
     ).reset_index()
 
-    # 2. Urutkan berdasarkan jumlah terbanyak
-    pic_summary = pic_summary.sort_values(by='Jumlah_PR', ascending=False)
 
-    st.subheader("👤Analisis PIC Procurement per Status")
+    # Tentukan warna untuk setiap status agar konsisten di seluruh dashboard
+    status_colors = {
+        "Complete": "#00CC96",   # Hijau
+        "In Progress": "#f2e6ac", # Kuning
+        "Approved": "#f6a27e",    # Oranye
+        # Tambahkan status lain jika ada
+    }
+
+    # --- VISUALISASI PIE CHART ---
+    if not pr_summary.empty:
+        with st.container(border=True):
+            st.subheader("🍩Proporsi Nominal PR per Status")
     
-    # 3. Tampilkan dalam bentuk Bar Chart
-    fig_pic = px.bar(
-    pic_summary, 
-    x='PIC Procurement', 
-    y='Jumlah_PR', 
-    color='Status',
-    color_discrete_map=status_colors, # Warna akan mengikuti mapping yang sama
-    title="Jumlah PR per PIC Procurement",
-    )
-
-    fig_pic.update_traces(
-        texttemplate='%{y}',           
-        textposition='inside',         
-        textfont_size=10,
-        textangle=0                    # <--- TAMBAHKAN INI: Memaksa sudut teks 0 derajat (tegak lurus)
-    )
-
+            fig_pie = px.pie(
+                pr_summary, 
+                values='Total_Amount', 
+                names='Status', 
+                color='Status',
+                color_discrete_map=status_colors, # Menggunakan mapping warna yang sama
+                hole=0.4, # Membuat tampilan menjadi Donut Chart (opsional)
+                title="Persentase Distribusi Nominal PR"
+             )
     
-    fig_pic.update_layout(
-        xaxis_title="PIC Procurement",
-        yaxis_title="Jumlah PR",
-        legend_title="Status PR",
-        # --- TAMBAHKAN KONFIGURASI DI BAWAH INI ---
-        uniformtext_mode='hide',       # Menyembunyikan teks jika batang terlalu sempit
-        uniformtext_minsize=8          # Ukuran font minimum agar tetap terbaca
-    )
+            # Mengatur tampilan agar lebih bersih
+            fig_pie.update_traces(
+             textinfo='percent+value', # Menampilkan persentase dan nilai
+                texttemplate='%{percent:.1%} <br>(Rp %{value:,.0f})'
+            )
     
-    st.plotly_chart(fig_pic, use_container_width=True)
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+
+    with st.container(border=True):    
+        st.subheader("🔍Analisis Status PR")
     
-    # 4. Tampilkan tabel detailnya
-    #st.write("Tabel Detail PIC:")
-    #st.table(pic_summary)
+        # Opsional: Menampilkan dengan format Rupiah yang lebih cantik di tabel
+        pr_summary_display = pr_summary.copy()
+        pr_summary_display['Total_Amount'] = pr_summary_display['Total_Amount'].apply(lambda x: f"Rp {x:,.0f}")
+        st.write(pr_summary_display)
 
-else:
-    st.info("Data PIC Procurement tidak tersedia atau kolom tidak ditemukan.")
-
-
-# Tambahkan ini setelah eksekusi data
-#df_pr_real['month'] = df_pr_real['transaction_date'].dt.to_period('M').astype(str)
-#trend_data = df_pr_real.groupby('month')['Nominal'].sum().reset_index()
-
-#st.subheader("Tren Nominal PR Bulanan")
-#fig_trend = px.line(trend_data, x='month', y='Nominal', markers=True, title="Tren PR per Bulan")
-#st.plotly_chart(fig_trend, use_container_width=True)
+        #else:
+            #st.info("Data PR tidak tersedia atau kolom 'Status' tidak ditemukan.")
 
 
+        # --- VISUALISASI BAR CHART DENGAN WARNA BERBEDA ---
 
-# --- FITUR DOWNLOAD EXCEL PER PIC ---
-st.subheader("📥 Download Data PR per PIC")
 
-if not df_pr_f.empty and 'PIC Procurement' in df_pr_f.columns:
-    # Ambil list unik PIC yang ada di data
-    list_pic = df_pr_f['PIC Procurement'].unique().tolist()
-    
-    # Dropdown untuk memilih PIC
-    selected_pic = st.selectbox("Pilih PIC Procurement:", list_pic)
-    
-    if selected_pic:
-        # Filter data berdasarkan PIC yang dipilih
-        df_filtered = df_pr_f[df_pr_f['PIC Procurement'] == selected_pic]
-        
-        # Konversi ke Excel di memori (menggunakan BytesIO)
-        from io import BytesIO
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df_filtered.to_excel(writer, index=False, sheet_name='Data_PR')
-            
-        # Tombol download
-        st.download_button(
-            label=f"Download Data {selected_pic}.xlsx",
-            data=output.getvalue(),
-            file_name=f"Data_PR_{selected_pic}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        fig = px.bar(
+            pr_summary, 
+            x='Status', 
+            y='Total_Amount', 
+            color='Status',
+            color_discrete_map=status_colors, # Konsistensi warna
+            title="Distribusi Nominal PR per Status"
         )
-else:
-    st.info("Data tidak tersedia untuk fitur download.")
 
+        # 1. Update traces untuk angka di atas bar (format ribuan/jutaan penuh)
+        fig.update_traces(
+            texttemplate='Rp %{y:,.0f}', # Menggunakan format ribuan (,) dengan 0 desimal
+            textposition='outside'
+        )
 
-search_pr = st.sidebar.text_input("Cari No. PR:")
-if search_pr:
-    result = df_pr_f[df_pr_f['No. PR'].str.contains(search_pr, case=False, na=False)]
-    st.write("Hasil Pencarian:", result)
+        # 2. Update layout untuk menghilangkan legenda warna dan mengatur sumbu Y
+        fig.update_layout(
+            showlegend=False,              # Menghilangkan legenda warna di samping
+            yaxis=dict(
+                tickformat=',.0f',         # Format sumbu Y agar muncul angka penuh
+                title="Total Nominal (Rp)"
+            )
+        )
 
-st.markdown("---") # Garis pembatas
-
-
-
-# --- AGREGASI FINAL UNTUK DASHBOARD PR ---
-total_do_unpr = df_do_f['Nominal'].sum()
-
-
-def metric_card(label, value):
-    # Menggunakan HTML untuk membungkus metric
-    st.markdown(f"""
-    <div class="metric-card">
-        <div style="color: #666; font-size: 0.9rem;">{label}</div>
-        <div style="font-size: 1.5rem; font-weight: bold; color: #333;">{value}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-
-# --- STATUS PR ---
-# Menghitung angka-angka kunci untuk ringkasan di atas
-total_do_count = df_do_f['No. DO'].nunique()
-total_do_rows = len(df_do_f)
-avg_nominal_do = df_do_f['Nominal'].mean()
-# 1. Pastikan PIC kosong sudah jadi 'Unassigned'
-df_do_f['PIC Purchasing'] = df_do_f['PIC Purchasing'].fillna('Unassigned')
-df_do_f.loc[df_do_f['PIC Purchasing'] == "", 'PIC Purchasing'] = 'Unassigned'
-
-# 2. Filter hanya untuk PIC yang bertugas
-df_assigned2 = df_do_f[df_do_f['PIC Purchasing'] != 'Unassigned']
-
-# 3. Hitung jumlah DOKUMEN PR UNIK per PIC (menggunakan nunique)
-pic_counts2 = df_assigned2.groupby('PIC Purchasing')['No. DO'].nunique().sort_values(ascending=False)
-
-# 4. Ambil daftar PIC
-list_pic_urut2 = pic_counts2.index.tolist()
-
-# 5. Tentukan top_pic
-if len(list_pic_urut2) >= 1:
-    top_pic2 = list_pic_urut2[0]
-else:
-    top_pic2 = "Tidak ada"
+        st.plotly_chart(fig, use_container_width=True)
 
 
 
-st.subheader("📊Detail Outstanding DO")
-c1, c2 = st.columns(2)
-with c1: metric_card("DO Balance", f"Rp {total_do_unpr:,.0f}")
-with c2: metric_card("Rata-rata Nominal", f"Rp {avg_nominal_do:,.0f}")
+    # --- ANALISIS PIC PROCUREMENT TERBANYAK PER STATUS ---
+    # --- PEMBERSIHAN DATA (TAMBAHKAN SEBELUM PROSES FILTER) ---
+
+    # Jika ternyata isinya bukan NaN tapi string kosong (""), gunakan ini:
+    df_pr_f.loc[df_pr_f['PIC Procurement'] == "", 'PIC Procurement'] = 'Unassigned'
+    if not df_pr_f.empty and 'PIC Procurement' in df_pr_f.columns:
+    
+        # 1. Grouping berdasarkan PIC dan Status, lalu hitung jumlah baris (atau unique No. PR)
+        pic_summary = df_pr_f.groupby(['PIC Procurement', 'Status']).agg(
+            Jumlah_PR=('No. PR', 'nunique')
+        ).reset_index()
+
+        # 2. Urutkan berdasarkan jumlah terbanyak
+        pic_summary = pic_summary.sort_values(by='Jumlah_PR', ascending=False)
+
+        with st.container(border=True):
+            st.subheader("👤Analisis PIC Procurement per Status")
+    
+            # 3. Tampilkan dalam bentuk Bar Chart
+            fig_pic = px.bar(
+            pic_summary, 
+            x='PIC Procurement', 
+            y='Jumlah_PR', 
+            color='Status',
+            color_discrete_map=status_colors, # Warna akan mengikuti mapping yang sama
+            title="Jumlah PR per PIC Procurement",
+            )
+
+            fig_pic.update_traces(
+                texttemplate='%{y}',           
+                textposition='inside',         
+                textfont_size=10,
+                textangle=0                    # <--- TAMBAHKAN INI: Memaksa sudut teks 0 derajat (tegak lurus)
+            )
+
+    
+            fig_pic.update_layout(
+                xaxis_title="PIC Procurement",
+                yaxis_title="Jumlah PR",
+                legend_title="Status PR",
+                # --- TAMBAHKAN KONFIGURASI DI BAWAH INI ---
+                uniformtext_mode='hide',       # Menyembunyikan teks jika batang terlalu sempit
+                uniformtext_minsize=8          # Ukuran font minimum agar tetap terbaca
+            )
+    
+            st.plotly_chart(fig_pic, use_container_width=True)
+    
+            # 4. Tampilkan tabel detailnya
+            #st.write("Tabel Detail PIC:")
+            #st.table(pic_summary)
+
+    else:
+        st.info("Data PIC Procurement tidak tersedia atau kolom tidak ditemukan.")
 
 
-c1, c2, c3 = st.columns(3)
-with c1: metric_card("Total Dokumen DO", f"{total_do_count:,}")
-with c2: metric_card("Total Item DO", f"{total_do_rows:,}")
-with c3: metric_card("PIC Terbanyak", top_pic2)
+
+
+    # --- FITUR DOWNLOAD EXCEL PER PIC ---
+    with st.container(border=True):
+        st.subheader("📥 Download Data PR per PIC")
+
+        if not df_pr_f.empty and 'PIC Procurement' in df_pr_f.columns:
+            # Ambil list unik PIC yang ada di data
+            list_pic = df_pr_f['PIC Procurement'].unique().tolist()
+    
+            # Dropdown untuk memilih PIC
+            selected_pic = st.selectbox("Pilih PIC Procurement:", list_pic)
+    
+            if selected_pic:
+                # Filter data berdasarkan PIC yang dipilih
+                df_filtered = df_pr_f[df_pr_f['PIC Procurement'] == selected_pic]
+        
+                # Konversi ke Excel di memori (menggunakan BytesIO)
+                from io import BytesIO
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    df_filtered.to_excel(writer, index=False, sheet_name='Data_PR')
+            
+                # Tombol download
+                st.download_button(
+                    label=f"Download Data {selected_pic}.xlsx",
+                    data=output.getvalue(),
+                    file_name=f"Data_PR_{selected_pic}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+        else:
+            st.info("Data tidak tersedia untuk fitur download.")
+
+
+
+
+
+    # --- FITUR DOWNLOAD EXCEL TERFILTER (PERIODE + STATUS) ---
+    with st.container(border=True):
+        st.subheader("📥 Download Data PR (Periode & Status)")
+
+        if not df_pr_f.empty:
+            # 1. Pilih Status (Bisa pilih banyak)
+            all_statuses = df_pr_f['Status'].unique().tolist()
+            selected_statuses = st.multiselect("Pilih Status untuk di-download:", all_statuses, default=all_statuses)
+    
+            # 2. Filter data berdasarkan Status yang dipilih
+            df_download = df_pr_f[df_pr_f['Status'].isin(selected_statuses)]
+    
+            if not df_download.empty:
+                # Konversi ke Excel di memori
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    df_download.to_excel(writer, index=False, sheet_name='Data_PR')
+            
+                # Tombol download
+                st.download_button(
+                    label=f"Download {len(df_download)} Baris Data (Filtered).xlsx",
+                    data=output.getvalue(),
+                    file_name=f"Data_PR_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+                st.write(f"Menampilkan {len(df_download)} baris data yang akan di-download.")
+            else:
+                st.warning("Tidak ada data yang sesuai dengan filter yang dipilih.")
+        else:
+            st.info("Data tidak tersedia untuk fitur download.")
+
+
+
+
+    # --- AGREGASI FINAL UNTUK DASHBOARD PR ---
+    total_do_unpr = df_do_f['Nominal'].sum()
+
+
+    def metric_card(label, value):
+        # Menggunakan HTML untuk membungkus metric
+        st.markdown(f"""
+        <div class="metric-card">
+            <div style="color: #666; font-size: 0.9rem;">{label}</div>
+            <div style="font-size: 1.5rem; font-weight: bold; color: #333;">{value}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+
+    # --- STATUS DO ---
+    # Menghitung angka-angka kunci untuk ringkasan di atas
+    total_do_count = df_do_f['No. DO'].nunique()
+    total_do_rows = len(df_do_f)
+    avg_nominal_do = df_do_f['Nominal'].mean()
+    # 1. Pastikan PIC kosong sudah jadi 'Unassigned'
+    df_do_f['PIC Purchasing'] = df_do_f['PIC Purchasing'].fillna('Unassigned')
+    df_do_f.loc[df_do_f['PIC Purchasing'] == "", 'PIC Purchasing'] = 'Unassigned'
+
+    # 2. Filter hanya untuk PIC yang bertugas
+    df_assigned2 = df_do_f[df_do_f['PIC Purchasing'] != 'Unassigned']
+
+    # 3. Hitung jumlah DOKUMEN PR UNIK per PIC (menggunakan nunique)
+    pic_counts2 = df_assigned2.groupby('PIC Purchasing')['No. DO'].nunique().sort_values(ascending=False)
+
+    # 4. Ambil daftar PIC
+    list_pic_urut2 = pic_counts2.index.tolist()
+
+    # 5. Tentukan top_pic
+    if len(list_pic_urut2) >= 1:
+        top_pic2 = list_pic_urut2[0]
+    else:
+        top_pic2 = "Tidak ada"
+
+
+
+    with st.container(border=True):
+        st.subheader("📊Detail Outstanding DO")
+        c1, c2 = st.columns(2)
+        with c1: metric_card("DO Balance", f"Rp {total_do_unpr:,.0f}")
+        with c2: metric_card("Rata-rata Nominal", f"Rp {avg_nominal_do:,.0f}")
+
+
+        c1, c2, c3 = st.columns(3)
+        with c1: metric_card("Total Dokumen DO", f"{total_do_count:,}")
+        with c2: metric_card("Total Item DO", f"{total_do_rows:,}")
+        with c3: metric_card("PIC Terbanyak", top_pic2)
 
 
