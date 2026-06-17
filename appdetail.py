@@ -97,6 +97,8 @@ def get_api_data(endpoint, start_date_override=None):
 df_pr = get_api_data("pr-balance")
 df_po = get_api_data("po-balance")
 df_do = get_api_data("do-balance")
+df_npr = get_api_data("outstanding-npr")
+df_pur = get_api_data("outstanding-pur")
 
 # Mengubah kolom 'Tgl ...' menjadi 'transaction_date'
 #df_so = df_so.rename(columns={'tanggal': 'transaction_date'})
@@ -263,23 +265,8 @@ else:
 #col_kiri, col_tengah, col_kanan = st.columns([1, 0.05, 1])
 col_kiri, col_kanan = st.columns([1, 1])
 
+# --- SISI KIRI: DETAIL & ANALISIS ---
 with col_kiri:
-    # Bungkus dalam container dengan border
-    with st.container(border=True):
-        st.subheader("📊Detail Outstanding NPR")
-        # Card Ringkasan NPR
-        c1, c2 = st.columns(2)
-        with c1: metric_card("NPR Outstanding", f"{total_pr_count:,}")
-        with c2: metric_card("Total Item", f"{total_pr_count:,}")
-    
-        c1, c2, c3 = st.columns(3)
-        with c1: metric_card("Total Dokumen NPR", f"{total_pr_count:,}")
-        with c2: metric_card("Total Item NPR", f"{total_pr_rows:,}")
-        with c3: metric_card("PIC Terbanyak", top_pic)
-        
-
-# --- SISI KANAN: DETAIL & ANALISIS ---
-with col_kanan:
     with st.container(border=True):
         #st.subheader("📋Detail Outstanding PR")
         st.subheader("📊Detail Outstanding PR")
@@ -557,4 +544,17 @@ with col_kanan:
         with c2: metric_card("Total Item DO", f"{total_do_rows:,}")
         with c3: metric_card("PIC Terbanyak", top_pic2)
 
+
+
+
+
+with col_kanan:
+    # Bungkus dalam container dengan border
+    with st.container(border=True):
+        st.subheader("📊Detail Outstanding NPR")
+        # Card Ringkasan NPR
+        c1, c2 = st.columns(2)
+        with c1: metric_card("NPR Outstanding", f"{total_pr_count:,}")
+        with c2: metric_card("PIC Terbanyak", top_pic)
+        
 
