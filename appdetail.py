@@ -605,7 +605,7 @@ with col_kanan:
         pic_summary3 = pic_summary3.sort_values(by='Jumlah_PUR', ascending=False)
 
         with st.container(border=True):
-            st.subheader("👤Analisis PIC PUR per Status")
+            st.subheader("👤Analisis PIC PUR")
     
             # 3. Tampilkan dalam bentuk Bar Chart
             fig_pic3 = px.bar(
@@ -614,7 +614,7 @@ with col_kanan:
             y='Jumlah_PUR', 
             #color='Status',
             #color_discrete_map=status_colors, # Warna akan mengikuti mapping yang sama
-            title="Jumlah PR per PIC PUR",
+            title="Jumlah PUR per PIC PUR",
             )
 
             fig_pic3.update_traces(
@@ -642,3 +642,35 @@ with col_kanan:
 
     else:
         st.info("Data PIC PUR tidak tersedia atau kolom tidak ditemukan.")
+
+
+    # --- FITUR DOWNLOAD EXCEL PUR PER PIC ---
+    with st.container(border=True):
+        st.subheader("📥 Download Data PUR per PIC")
+
+        if not df_pur_f.empty and 'PIC' in df_pur_f.columns:
+            # Ambil list unik PIC yang ada di data
+            list_pic3 = df_pur_f['PIC'].unique().tolist()
+    
+            # Dropdown untuk memilih PIC
+            selected_pic3 = st.selectbox("Pilih PIC PUR:", list_pic3)
+    
+            if selected_pic3:
+                # Filter data berdasarkan PIC yang dipilih
+                df_filtered3 = df_pur_f[df_pur_f['PIC'] == selected_pic3]
+        
+                # Konversi ke Excel di memori (menggunakan BytesIO)
+                from io import BytesIO
+                output3 = BytesIO()
+                with pd.ExcelWriter(output3, engine='xlsxwriter') as writer:
+                    df_filtered3.to_excel(writer, index=False, sheet_name='Data_PUR')
+            
+                # Tombol download
+                st.download_button(
+                    label=f"Download Data {selected_pic3}.xlsx",
+                    data=output3.getvalue(),
+                    file_name=f"Data_PUR_{selected_pic3}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+        else:
+            st.info("Data tidak tersedia untuk fitur download.")
