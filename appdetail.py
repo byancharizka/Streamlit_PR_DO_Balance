@@ -126,17 +126,18 @@ with col_head1:
         max_value=date.today()
     )
 
-#with col_head2:
-    # Cari by No.PR
-    #search_pr = st.text_input("Cari No. PR 🔍:")
+# --- FILTER PENCARIAN ---
+col_head2, col_head3, col_head4 = st.columns([1, 1, 1])
 
-#with col_head3:
-    # Cari by status
-    #search_pic = st.text_input("Cari PIC 🔍:")
+with col_head2:
+    search_number = st.text_input("Cari Nomor Dokumen 🔍:", placeholder="No. PR / No. DO / No. NPR / No. PUR")
 
-#with col_head4:
-    # Cari by Status
-    #search_status = st.text_input("Cari Status 🔍:")
+with col_head3:
+    search_status = st.text_input("Cari Status 🔍:", placeholder="Complete / In Progress / Approved")
+
+with col_head4:
+    search_pic = st.text_input("Cari PIC 🔍:", placeholder="PIC Procurement / PIC Purchasing / PIC PUR")
+
 
 
 # --- HANDLING INPUT TANGGAL ---
@@ -213,6 +214,38 @@ if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) =
     #st.write("Data DO Loaded:", df_do_real)
 
 
+# --- FILTER DATA BERDASARKAN INPUT ---
+def apply_search_filter(df, search_number=None, search_status=None, search_pic=None):
+    if df.empty:
+        return df
+    df = df.copy()
+
+    # Filter nomor dokumen (cek di semua kolom nomor yang mungkin ada)
+    if search_number:
+        df = df[
+            df.apply(lambda row: search_number.lower() in str(row).lower(), axis=1)
+        ]
+
+    # Filter status
+    if search_status and 'Status' in df.columns:
+        df = df[df['Status'].str.contains(search_status, case=False, na=False)]
+
+    # Filter PIC
+    if search_pic and any(col in df.columns for col in ['PIC Procurement','PIC Purchasing','PIC']):
+        for col in ['PIC Procurement','PIC Purchasing','PIC']:
+            if col in df.columns:
+                df = df[df[col].str.contains(search_pic, case=False, na=False)]
+
+    return df
+
+# Contoh penggunaan untuk PR
+df_pr_f = apply_search_filter(df_pr_f, search_number, search_status, search_pic)
+df_do_f = apply_search_filter(df_do_f, search_number, search_status, search_pic)
+df_npr_f = apply_search_filter(df_npr_f, search_number, search_status, search_pic)
+df_pur_f = apply_search_filter(df_pur_f, search_number, search_status, search_pic)
+
+
+
 # Konversi kolom Nominal ke float
 df_pr_f['Nominal'] = pd.to_numeric(df_pr_f['Nominal'], errors='coerce').fillna(0.0).astype(float)
 df_po_f['Nominal'] = pd.to_numeric(df_po_f['Nominal'], errors='coerce').fillna(0.0).astype(float)
@@ -275,7 +308,7 @@ col_kiri, col_kanan = st.columns([1, 1])
 with col_kiri:
     with st.container(border=True):
         #st.subheader("📋Detail Outstanding PR")
-        st.subheader("📊Detail Outstanding")
+        st.subheader("📊Detail Outstanding PR & DO")
 
         c1, c2 = st.columns(2)
         with c1: metric_card("PR Balance", f"Rp {total_pr_unpr:,.0f}")
@@ -575,7 +608,7 @@ list_pic_urut3 = pic_counts3.index.tolist()
 if len(list_pic_urut3) >= 1:
     top_pic3 = list_pic_urut3[0]
 else:
-    top_pi3 = "Tidak ada"
+    top_pic3 = "Tidak ada"
 
 with col_kanan:
     # Bungkus dalam container dengan border
@@ -674,3 +707,5 @@ with col_kanan:
                 )
         else:
             st.info("Data tidak tersedia untuk fitur download.")
+
+
