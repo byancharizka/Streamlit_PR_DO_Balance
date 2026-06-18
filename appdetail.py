@@ -115,6 +115,8 @@ st.title("SIBIMA Performance Dashboard")
 start_default = date(2026, 1, 1) # Diubah ke Feb agar sesuai case
 end_default = date.today()
 
+
+# --- FILTER PERIODE & FILTER PENCARIAN ---
 # Gunakan rasio kolom [2, 1, 1] agar filter punya ruang proporsional
 col_head1, col_head2, col_head3, col_head4 = st.columns([1, 1, 1, 1])
 
@@ -125,9 +127,6 @@ with col_head1:
         value=(start_default, end_default),
         max_value=date.today()
     )
-
-# --- FILTER PENCARIAN ---
-col_head2, col_head3, col_head4 = st.columns([1, 1, 1])
 
 with col_head2:
     search_number = st.text_input("Cari Nomor Dokumen 🔍:", placeholder="No. PR / No. DO / No. NPR / No. PUR")
