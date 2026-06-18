@@ -1,710 +1,733 @@
-#Import Library, lampirkan di file requirements.txt
-import requests
-import numpy as np
-import pandas as pd
-import pytz
 import os
-import plotly.express as px
-import plotly.graph_objects as go
-import streamlit as st
-from datetime import datetime, date
-from PIL import Image
-import csv
-import re
-import xlsxwriter
+import logging
 from io import BytesIO
+from datetime import datetime, date
 
-# --- CONFIGURASI PAGE (WAJIB PALING ATAS) ---
-st.set_page_config(layout="wide", page_title="SIBIMA Performance Dashboard")
+import pandas as pd
+import plotly.express as px
+import pytz
+import requests
+import streamlit as st
 
-# --- CSS CUSTOM UNTUK FULL WIDTH ---
-st.markdown("""
-    <style>
-    .block-container {
-        padding-top: 0.5rem;
-        padding-bottom: 1rem;
-        padding-left: 3rem;
-        padding-right: 3rem;
-        max-width: 100%;
-    }
-    [data-testid="stMetricValue"] {
-        font-size: 1.8rem;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+# =========================================================
+# 1) PAGE CONFIG - WAJIB PALING ATAS
+# =========================================================
+st.set_page_config(
+    layout="wide",
+    page_title="SIBIMA Performance Dashboard",
+    initial_sidebar_state="expanded"
+)
 
-st.markdown("""
-    <style>
-    /* Styling untuk Card */
-    .metric-card {
-        background-color: #b3b2ae;  /* Abu-abu muda standar Streamlit */
-        border: 1px solid #dcdcdc;  /* Border abu-abu sedikit lebih gelap */
-        border-radius: 10px;
-        padding: 20px;
-        box-shadow: 2px 2px 10px rgba(0,0,0,0.05);
-        text-align: center;
-        margin: 10px 0;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+# =========================================================
+# 2) LOGGING CONFIG
+# =========================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+logger = logging.getLogger(__name__)
 
+# =========================================================
+# 3) APP CONFIG
+# =========================================================
+TIMEZONE = pytz.timezone("Asia/Jakarta")
+TODAY = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
-st.markdown("""
-    <style>
-    /* Membuat garis vertikal di tengah */
-    .vertical-line {
-        border-left: 2px solid #555;
-        height: 100%;
-        margin: 0 20px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+DEFAULT_START_DATE = date(2026, 1, 1)
+REQUEST_TIMEOUT = int(os.getenv("SIBIMA_API_TIMEOUT", "30"))
 
-# --- 1. KONFIGURASI DATA & API ---
-timezone = pytz.timezone('Asia/Jakarta')
-now = datetime.now(timezone)
-today = now.strftime("%Y-%m-%d")
-
-#TOKEN = "44b71f38c25ddd02cd31b409f85e9f3aca4f337f02f2fa90237afc2a0736"
+# API TANPA TOKEN
 BASE_URL = "https://eas.sibima.id/api/dashboard/"
 
+if not BASE_URL.endswith("/"):
+    BASE_URL += "/"
 
-# --- 1. PERBAIKAN FUNGSI PENGAMBILAN DATA ---
-@st.cache_data(ttl=600)
-def get_api_data(endpoint, start_date_override=None):
-    url = f"{BASE_URL}{endpoint}"
-    actual_start = start_date_override if start_date_override else "2026-01-01"
-    
-    params = {"date_start": actual_start, "date_end": today}
-    try:
-        response = requests.get(url, params=params)
-        if response.status_code == 200:
-            json_response = response.json()
-            # Akses ke 'data' -> 'data' sesuai struktur JSON Anda
-            if 'data' in json_response and 'data' in json_response['data']:
-                return pd.DataFrame(json_response['data']['data'])
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"Error fetching {endpoint}: {e}")
-        return pd.DataFrame()
+# =========================================================
+# 4) CSS CUSTOM
+# =========================================================
+st.markdown("""
+<style>
+.block-container {
+    padding-top: 1rem;
+    padding-bottom: 1rem;
+    padding-left: 2rem;
+    padding-right: 2rem;
+    max-width: 100%;
+}
+[data-testid="stMetricValue"] {
+    font-size: 1.8rem;
+}
+.metric-card {
+    background-color: #b3b2ae;
+    border: 1px solid #dcdcdc;
+    border-radius: 12px;
+    padding: 16px;
+    box-shadow: 1px 2px 8px rgba(0,0,0,0.05);
+    text-align: center;
+    margin: 8px 0;
+}
+.small-note {
+    color: #666;
+    font-size: 0.85rem;
+}
+</style>
+""", unsafe_allow_html=True)
 
-# --- 2. HAPUS FUNGSI EXPAND (TIDAK DIPERLUKAN LAGI) ---
-# Karena get_api_data sudah langsung mengambil list yang tepat, 
-# Anda tidak perlu lagi melakukan .explode() atau .apply(pd.Series)
-
-# Eksekusi langsung
-#df_so = get_api_data("so-balance")
-df_pr = get_api_data("pr-balance")
-df_po = get_api_data("po-balance")
-df_do = get_api_data("do-balance")
-df_npr = get_api_data("outstanding-npr")
-df_pur = get_api_data("outstanding-pur")
-
-# Mengubah kolom 'Tgl ...' menjadi 'transaction_date'
-df_pr = df_pr.rename(columns={'Tgl. PR': 'transaction_date'})
-df_po = df_po.rename(columns={'Tgl. PO': 'transaction_date'})
-#df_po = df_po.rename(columns={'Tgl. PO': 'transaction_date'})
-df_do = df_do.rename(columns={'Tgl. DO': 'transaction_date'})
-df_npr = df_npr.rename(columns={'Tanggal': 'transaction_date'})
-df_pur = df_pur.rename(columns={'Tanggal': 'transaction_date'})
-
-
-
-# Header Dashboard
-st.title("SIBIMA Performance Dashboard")
-start_default = date(2026, 1, 1) # Diubah ke Feb agar sesuai case
-end_default = date.today()
-
-
-# --- FILTER PERIODE & FILTER PENCARIAN ---
-# Gunakan rasio kolom [2, 1, 1] agar filter punya ruang proporsional
-col_head1, col_head2, col_head3, col_head4 = st.columns([1, 1, 1, 1])
-
-with col_head1:
-    # Filter Date
-    selected_date_range = st.date_input(
-        "Select Date Range 📅:", 
-        value=(start_default, end_default),
-        max_value=date.today()
+# =========================================================
+# 5) UTILITIES
+# =========================================================
+def metric_card(label: str, value: str):
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div style="color: #666; font-size: 0.95rem;">{label}</div>
+            <div style="font-size: 1.45rem; font-weight: 700; color: #222;">{value}</div>
+        </div>
+        """,
+        unsafe_allow_html=True
     )
 
-with col_head2:
-    search_number = st.text_input("Cari Nomor Dokumen 🔍:", placeholder="No. PR / No. DO / No. NPR / No. PUR")
 
-with col_head3:
-    search_status = st.text_input("Cari Status 🔍:", placeholder="Complete / In Progress / Approved")
-
-with col_head4:
-    search_pic = st.text_input("Cari PIC 🔍:", placeholder="PIC Procurement / PIC Purchasing / PIC PUR")
-
-
-
-# --- HANDLING INPUT TANGGAL ---
-# --- FUNGSI FILTER ---
-def apply_realization_filter(df, date_range):
-    if df.empty: 
-        return df
-    
-    df = df.copy()
-    
-    # Pastikan tipe data numerik agar sum() akurat
-    cols_to_fix = ['Qty Permintaan (PR)', 'Qty Sudah PO', 'Qty Closed','Qty Outstanding']
-    for col in cols_to_fix:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-    # Filter Tanggal (Hanya jalan jika rentang lengkap: Start & End)
-    if 'transaction_date' in df.columns and isinstance(date_range, (tuple, list)) and len(date_range) == 2:
-        df['transaction_date'] = pd.to_datetime(df['transaction_date']).dt.tz_localize(None)
-        
-        start_dt = pd.to_datetime(date_range[0]).replace(hour=0, minute=0, second=0)
-        end_dt = pd.to_datetime(date_range[1]).replace(hour=23, minute=59, second=59)
-        
-        df = df[(df['transaction_date'] >= start_dt) & (df['transaction_date'] <= end_dt)]
-
-    return df
-
-
-def apply_cumulative_filter(df, end_date):
-    """
-    Mengambil SEMUA data dari awal hingga batas end_date.
-    Data masa lalu (Januari) akan ikut, data masa depan (Maret) akan dibuang.
-    """
-    if df.empty or 'transaction_date' not in df.columns:
-        return df
-    
-    df = df.copy()
-    # Konversi ke datetime dan hilangkan timezone
-    df['transaction_date'] = pd.to_datetime(df['transaction_date']).dt.tz_localize(None)
-    
-    # Ambil batas akhir hari (23:59:59)
-    upper_limit = pd.to_datetime(end_date).replace(hour=23, minute=59, second=59)
-    
-    # Filter hanya berdasarkan batas atas
-    return df[df['transaction_date'] <= upper_limit]
-
-
-if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) == 2:
-    # Misal user pilih 1 Feb - 28 Feb di Sidebar
-    # start_date = 2026-02-01 (Kita abaikan ini)
-    # end_date = 2026-02-28 (Ini yang kita pakai)
-    report_end_date = selected_date_range[1]
-    
-    # Semua dokumen diproses secara akumulatif
-    df_pr_f = apply_cumulative_filter(df_pr, report_end_date)
-    df_po_f = apply_cumulative_filter(df_po, report_end_date)
-    df_do_f = apply_cumulative_filter(df_do, report_end_date)
-    df_npr_f = apply_cumulative_filter(df_npr, report_end_date)
-    df_pur_f = apply_cumulative_filter(df_pur, report_end_date)
-
-
-# --- 5. EKSEKUSI ---
-#df_so_real = apply_realization_filter(df_so, selected_date_range)
-#df_pr_real = apply_realization_filter(df_pr, selected_date_range)
-#df_po_real = apply_realization_filter(df_po, selected_date_range)
-#df_do_real = apply_realization_filter(df_do, selected_date_range)
-
-# Cek data PR apakah data berhasil dimuat
-#if not df_pr_real.empty:
-    #st.write("Data PR Loaded:", df_pr_real)
-
-# Cek data DO apakah data berhasil dimuat
-#if not df_do_real.empty:
-    #st.write("Data DO Loaded:", df_do_real)
-
-
-# --- FILTER DATA BERDASARKAN INPUT ---
-def apply_search_filter(df, search_number=None, search_status=None, search_pic=None):
+def ensure_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Pastikan semua kolom ada agar operasi berikutnya aman."""
     if df.empty:
+        for col in columns:
+            if col not in df.columns:
+                df[col] = pd.Series(dtype="object")
         return df
-    df = df.copy()
 
-    # Filter nomor dokumen (cek di semua kolom nomor yang mungkin ada)
-    if search_number:
-        df = df[
-            df.apply(lambda row: search_number.lower() in str(row).lower(), axis=1)
-        ]
-
-    # Filter status
-    if search_status and 'Status' in df.columns:
-        df = df[df['Status'].str.contains(search_status, case=False, na=False)]
-
-    # Filter PIC
-    if search_pic and any(col in df.columns for col in ['PIC Procurement','PIC Purchasing','PIC']):
-        for col in ['PIC Procurement','PIC Purchasing','PIC']:
-            if col in df.columns:
-                df = df[df[col].str.contains(search_pic, case=False, na=False)]
-
+    for col in columns:
+        if col not in df.columns:
+            df[col] = pd.NA
     return df
 
-# Contoh penggunaan untuk PR
-df_pr_f = apply_search_filter(df_pr_f, search_number, search_status, search_pic)
-df_do_f = apply_search_filter(df_do_f, search_number, search_status, search_pic)
-df_npr_f = apply_search_filter(df_npr_f, search_number, search_status, search_pic)
-df_pur_f = apply_search_filter(df_pur_f, search_number, search_status, search_pic)
+
+def safe_to_numeric(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Konversi kolom ke numerik dengan aman."""
+    for col in columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    return df
 
 
-
-# Konversi kolom Nominal ke float
-df_pr_f['Nominal'] = pd.to_numeric(df_pr_f['Nominal'], errors='coerce').fillna(0.0).astype(float)
-df_po_f['Nominal'] = pd.to_numeric(df_po_f['Nominal'], errors='coerce').fillna(0.0).astype(float)
-df_do_f['Nominal'] = pd.to_numeric(df_do_f['Nominal'], errors='coerce').fillna(0.0).astype(float)
-
-
-# --- AGREGASI FINAL UNTUK DASHBOARD ---
-total_pr_unpr = df_pr_f['Nominal'].sum()
-total_po_unpr = df_po_f['Nominal'].sum()
-
-
-def metric_card(label, value):
-    # Menggunakan HTML untuk membungkus metric
-    st.markdown(f"""
-    <div class="metric-card">
-        <div style="color: #666; font-size: 0.9rem;">{label}</div>
-        <div style="font-size: 1.5rem; font-weight: bold; color: #333;">{value}</div>
-    </div>
-    """, unsafe_allow_html=True)
+def safe_to_datetime(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    """Konversi kolom tanggal dengan aman dan hilangkan timezone."""
+    if col in df.columns:
+        df[col] = pd.to_datetime(df[col], errors="coerce")
+        try:
+            df[col] = df[col].dt.tz_localize(None)
+        except Exception:
+            pass
+    return df
 
 
-# --- STATUS PR ---
-# Menghitung angka-angka kunci untuk ringkasan di atas
-total_pr_count = df_pr_f['No. PR'].nunique()
-total_pr_rows = len(df_pr_f)
-avg_nominal_pr = df_pr_f['Nominal'].mean()
-# --- LOGIKA PIC TERBANYAK (DOKUMEN UNIK) ---
-
-# 1. Pastikan PIC kosong sudah jadi 'Unassigned'
-df_pr_f['PIC Procurement'] = df_pr_f['PIC Procurement'].fillna('Unassigned')
-df_pr_f.loc[df_pr_f['PIC Procurement'] == "", 'PIC Procurement'] = 'Unassigned'
-
-# 2. Filter hanya untuk PIC yang bertugas
-df_assigned = df_pr_f[df_pr_f['PIC Procurement'] != 'Unassigned']
-
-# 3. Hitung jumlah DOKUMEN PR UNIK per PIC (menggunakan nunique)
-pic_counts = df_assigned.groupby('PIC Procurement')['No. PR'].nunique().sort_values(ascending=False)
-
-# 4. Ambil daftar PIC
-list_pic_urut = pic_counts.index.tolist()
-
-# 5. Tentukan top_pic
-if len(list_pic_urut) >= 1:
-    top_pic = list_pic_urut[0]
-else:
-    top_pic = "Tidak ada"
-
-# Debugging (Opsional): Tampilkan di bawah st.write untuk memastikan angkanya benar
-# st.write("Data debug untuk PIC:", pic_counts)
+def normalize_text_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Normalisasi string agar aman untuk pencarian."""
+    for col in columns:
+        if col in df.columns:
+            df[col] = df[col].fillna("").astype(str).str.strip()
+    return df
 
 
+def safe_unique_count(df: pd.DataFrame, col: str) -> int:
+    if df.empty or col not in df.columns:
+        return 0
+    return df[col].nunique(dropna=True)
 
 
-
-# --- MAIN LAYOUT DENGAN PEMBATAS ---
-#col_kiri, col_tengah, col_kanan = st.columns([1, 0.05, 1])
-col_kiri, col_kanan = st.columns([1, 1])
-
-# --- SISI KIRI: DETAIL & ANALISIS ---
-with col_kiri:
-    with st.container(border=True):
-        #st.subheader("📋Detail Outstanding PR")
-        st.subheader("📊Detail Outstanding PR & DO")
-
-        c1, c2 = st.columns(2)
-        with c1: metric_card("PR Balance", f"Rp {total_pr_unpr:,.0f}")
-        with c2: metric_card("PO Balance", f"Rp {total_po_unpr:,.0f}")
-    
-        c1, c2, c3 = st.columns(3)
-        with c1: metric_card("Total Dokumen PR", f"{total_pr_count:,}")
-        with c2: metric_card("Total Item PR", f"{total_pr_rows:,}")
-        with c3: metric_card("PIC Terbanyak", top_pic)
+def safe_mean(df: pd.DataFrame, col: str) -> float:
+    if df.empty or col not in df.columns:
+        return 0.0
+    return float(df[col].mean()) if not df[col].dropna().empty else 0.0
 
 
-
-    # --- AGREGASI STATUS PR ---
-    #if not df_pr_f.empty and 'Status' in df_pr_f.columns:
-    # Mengelompokkan berdasarkan Status
-    pr_summary = df_pr_f.groupby('Status').agg(
-    Total_PR=('No. PR', 'nunique'),     # Menghitung jumlah unik nomor PR
-    Total_Amount=('Nominal', 'sum')     # Menjumlahkan nominal
-    ).reset_index()
+def safe_sum(df: pd.DataFrame, col: str) -> float:
+    if df.empty or col not in df.columns:
+        return 0.0
+    return float(df[col].sum())
 
 
-    # Tentukan warna untuk setiap status agar konsisten di seluruh dashboard
-    status_colors = {
-        "Complete": "#00CC96",   # Hijau
-        "In Progress": "#f2e6ac", # Kuning
-        "Approved": "#f6a27e",    # Oranye
-        # Tambahkan status lain jika ada
+def to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Data") -> bytes:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+    return output.getvalue()
+
+
+# =========================================================
+# 6) API FETCHING
+# =========================================================
+@st.cache_data(ttl=600, show_spinner=False)
+def get_api_data(endpoint: str, start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
+    """
+    Ambil data dari endpoint dashboard API.
+    Robust terhadap:
+    - network timeout
+    - response non-200
+    - format JSON yang tidak sesuai
+    """
+    actual_start = start_date if start_date else DEFAULT_START_DATE.strftime("%Y-%m-%d")
+    actual_end = end_date if end_date else TODAY
+
+    url = f"{BASE_URL}{endpoint}"
+    params = {
+        "date_start": actual_start,
+        "date_end": actual_end
     }
 
-    # --- VISUALISASI PIE CHART ---
-    if not pr_summary.empty:
+    try:
+        logger.info("Fetching endpoint=%s params=%s", endpoint, params)
+        response = requests.get(
+            url,
+            params=params,
+            timeout=REQUEST_TIMEOUT
+        )
+        response.raise_for_status()
+
+        payload = response.json()
+
+        # Expected format: {"data": {"data": [...]}}
+        if isinstance(payload, dict):
+            data_layer = payload.get("data", {})
+            if isinstance(data_layer, dict):
+                rows = data_layer.get("data", [])
+                if isinstance(rows, list):
+                    return pd.DataFrame(rows)
+
+        logger.warning("Unexpected JSON structure for endpoint=%s", endpoint)
+        return pd.DataFrame()
+
+    except requests.Timeout:
+        logger.exception("Timeout when fetching endpoint=%s", endpoint)
+        st.warning(f"Timeout saat mengambil data dari endpoint: {endpoint}")
+        return pd.DataFrame()
+
+    except requests.RequestException as e:
+        logger.exception("Request error for endpoint=%s", endpoint)
+        st.warning(f"Gagal mengambil data dari endpoint {endpoint}: {e}")
+        return pd.DataFrame()
+
+    except ValueError:
+        logger.exception("Invalid JSON for endpoint=%s", endpoint)
+        st.warning(f"Response bukan JSON valid untuk endpoint {endpoint}")
+        return pd.DataFrame()
+
+    except Exception as e:
+        logger.exception("Unexpected error for endpoint=%s", endpoint)
+        st.warning(f"Error tidak terduga saat mengambil {endpoint}: {e}")
+        return pd.DataFrame()
+
+
+def load_all_data() -> dict[str, pd.DataFrame]:
+    endpoint_map = {
+        "pr": ("pr-balance", {"Tgl. PR": "transaction_date"}),
+        "po": ("po-balance", {"Tgl. PO": "transaction_date"}),
+        "do": ("do-balance", {"Tgl. DO": "transaction_date"}),
+        "npr": ("outstanding-npr", {"Tanggal": "transaction_date"}),
+        "pur": ("outstanding-pur", {"Tanggal": "transaction_date"}),
+    }
+
+    result = {}
+    for key, (endpoint, rename_map) in endpoint_map.items():
+        df = get_api_data(endpoint)
+        if not df.empty:
+            df = df.rename(columns=rename_map)
+        result[key] = df
+
+    return result
+
+
+# =========================================================
+# 7) FILTERS & TRANSFORM
+# =========================================================
+def apply_cumulative_filter(df: pd.DataFrame, end_date_val) -> pd.DataFrame:
+    """
+    Ambil SEMUA data dari awal hingga end_date.
+    """
+    if df.empty or "transaction_date" not in df.columns:
+        return df.copy()
+
+    working = df.copy()
+    working = safe_to_datetime(working, "transaction_date")
+
+    upper_limit = pd.to_datetime(end_date_val).replace(hour=23, minute=59, second=59)
+    return working[
+        working["transaction_date"].notna() &
+        (working["transaction_date"] <= upper_limit)
+    ].copy()
+
+
+def apply_search_filter(
+    df: pd.DataFrame,
+    search_number: str = "",
+    search_status: str = "",
+    search_pic: str = ""
+) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+
+    working = df.copy()
+    working = normalize_text_columns(
+        working,
+        ["Status", "PIC Procurement", "PIC Purchasing", "PIC", "No. PR", "No. DO", "No. PUR", "No. Transaksi"]
+    )
+
+    # Filter nomor dokumen: mencari di semua kolom string
+    if search_number:
+        pattern = search_number.strip().lower()
+        string_cols = working.select_dtypes(include=["object"]).columns.tolist()
+        if string_cols:
+            mask_number = working[string_cols].apply(
+                lambda col: col.str.lower().str.contains(pattern, na=False)
+            ).any(axis=1)
+            working = working[mask_number]
+
+    # Filter status
+    if search_status and "Status" in working.columns:
+        working = working[
+            working["Status"].str.contains(search_status.strip(), case=False, na=False)
+        ]
+
+    # Filter PIC -> OR logic, bukan AND
+    if search_pic:
+        pic_cols = [col for col in ["PIC Procurement", "PIC Purchasing", "PIC"] if col in working.columns]
+        if pic_cols:
+            mask_pic = working[pic_cols].apply(
+                lambda col: col.str.contains(search_pic.strip(), case=False, na=False)
+            ).any(axis=1)
+            working = working[mask_pic]
+
+    return working.copy()
+
+
+def assign_unassigned(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    working = df.copy()
+    if col in working.columns:
+        working[col] = working[col].fillna("Unassigned").astype(str).str.strip()
+        working.loc[working[col] == "", col] = "Unassigned"
+    return working
+
+
+def get_top_pic(df: pd.DataFrame, pic_col: str, doc_col: str) -> str:
+    if df.empty or pic_col not in df.columns or doc_col not in df.columns:
+        return "Tidak ada"
+
+    working = assign_unassigned(df, pic_col)
+    working = working[working[pic_col] != "Unassigned"]
+
+    if working.empty:
+        return "Tidak ada"
+
+    grouped = (
+        working.groupby(pic_col, dropna=False)[doc_col]
+        .nunique()
+        .sort_values(ascending=False)
+    )
+
+    return grouped.index[0] if not grouped.empty else "Tidak ada"
+
+
+def summarize_status(df: pd.DataFrame, doc_col: str, nominal_col: str = "Nominal") -> pd.DataFrame:
+    if df.empty or "Status" not in df.columns:
+        return pd.DataFrame(columns=["Status", "Total_Doc", "Total_Amount"])
+
+    working = df.copy()
+    working = ensure_columns(working, [doc_col, nominal_col, "Status"])
+    working = safe_to_numeric(working, [nominal_col])
+
+    summary = (
+        working.groupby("Status", dropna=False)
+        .agg(
+            Total_Doc=(doc_col, "nunique"),
+            Total_Amount=(nominal_col, "sum")
+        )
+        .reset_index()
+    )
+    return summary
+
+
+def summarize_pic_status(df: pd.DataFrame, pic_col: str, doc_col: str) -> pd.DataFrame:
+    if df.empty or pic_col not in df.columns or "Status" not in df.columns or doc_col not in df.columns:
+        return pd.DataFrame(columns=[pic_col, "Status", "Jumlah_Doc"])
+
+    working = assign_unassigned(df, pic_col)
+
+    summary = (
+        working.groupby([pic_col, "Status"], dropna=False)
+        .agg(Jumlah_Doc=(doc_col, "nunique"))
+        .reset_index()
+        .sort_values(by="Jumlah_Doc", ascending=False)
+    )
+    return summary
+
+
+# =========================================================
+# 8) CHART HELPERS
+# =========================================================
+STATUS_COLORS = {
+    "Complete": "#00CC96",
+    "In Progress": "#F2C94C",
+    "Approved": "#F2994A",
+    "Rejected": "#EB5757",
+    "Pending": "#56CCF2",
+}
+
+def render_status_pie(summary_df: pd.DataFrame, title: str):
+    if summary_df.empty:
+        st.info("Data status tidak tersedia.")
+        return
+
+    fig = px.pie(
+        summary_df,
+        values="Total_Amount",
+        names="Status",
+        color="Status",
+        color_discrete_map=STATUS_COLORS,
+        hole=0.45,
+        title=title
+    )
+
+    fig.update_traces(
+        textinfo="percent+value",
+        texttemplate="%{percent:.1%}<br>(Rp %{value:,.0f})"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_status_bar(summary_df: pd.DataFrame, title: str):
+    if summary_df.empty:
+        st.info("Data status tidak tersedia.")
+        return
+
+    fig = px.bar(
+        summary_df,
+        x="Status",
+        y="Total_Amount",
+        color="Status",
+        color_discrete_map=STATUS_COLORS,
+        title=title
+    )
+
+    fig.update_traces(
+        texttemplate="Rp %{y:,.0f}",
+        textposition="outside"
+    )
+    fig.update_layout(
+        showlegend=False,
+        yaxis=dict(
+            tickformat=",.0f",
+            title="Total Nominal (Rp)"
+        )
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_pic_bar(summary_df: pd.DataFrame, x_col: str, y_col: str, color_col: str | None, title: str):
+    if summary_df.empty:
+        st.info("Data PIC tidak tersedia.")
+        return
+
+    kwargs = {
+        "data_frame": summary_df,
+        "x": x_col,
+        "y": y_col,
+        "title": title
+    }
+
+    if color_col and color_col in summary_df.columns:
+        kwargs["color"] = color_col
+        kwargs["color_discrete_map"] = STATUS_COLORS
+
+    fig = px.bar(**kwargs)
+    fig.update_traces(
+        texttemplate="%{y}",
+        textposition="inside",
+        textfont_size=10,
+        textangle=0
+    )
+    fig.update_layout(
+        uniformtext_mode="hide",
+        uniformtext_minsize=8
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# =========================================================
+# 9) MAIN APP
+# =========================================================
+def main():
+    st.title("SIBIMA Performance Dashboard")
+
+    # ---------- LOAD DATA ----------
+    with st.spinner("Mengambil data dashboard..."):
+        data = load_all_data()
+
+    df_pr = data["pr"]
+    df_po = data["po"]
+    df_do = data["do"]
+    df_npr = data["npr"]
+    df_pur = data["pur"]
+
+    # ---------- TOP FILTERS ----------
+    col_head1, col_head2, col_head3, col_head4 = st.columns([1, 1, 1, 1])
+
+    with col_head1:
+        selected_date_range = st.date_input(
+            "Select Date Range 📅",
+            value=(DEFAULT_START_DATE, date.today()),
+            max_value=date.today()
+        )
+
+    with col_head2:
+        search_number = st.text_input(
+            "Cari Nomor Dokumen 🔍",
+            placeholder="No. PR / No. DO / No. NPR / No. PUR"
+        )
+
+    with col_head3:
+        search_status = st.text_input(
+            "Cari Status 🔍",
+            placeholder="Complete / In Progress / Approved"
+        )
+
+    with col_head4:
+        search_pic = st.text_input(
+            "Cari PIC 🔍",
+            placeholder="PIC Procurement / PIC Purchasing / PIC PUR"
+        )
+
+    # ---------- DEFAULT SAFE COPY ----------
+    df_pr_f = df_pr.copy()
+    df_po_f = df_po.copy()
+    df_do_f = df_do.copy()
+    df_npr_f = df_npr.copy()
+    df_pur_f = df_pur.copy()
+
+    # ---------- DATE FILTER (CUMULATIVE) ----------
+    if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) == 2:
+        report_end_date = selected_date_range[1]
+        df_pr_f = apply_cumulative_filter(df_pr_f, report_end_date)
+        df_po_f = apply_cumulative_filter(df_po_f, report_end_date)
+        df_do_f = apply_cumulative_filter(df_do_f, report_end_date)
+        df_npr_f = apply_cumulative_filter(df_npr_f, report_end_date)
+        df_pur_f = apply_cumulative_filter(df_pur_f, report_end_date)
+
+    # ---------- SEARCH FILTER ----------
+    df_pr_f = apply_search_filter(df_pr_f, search_number, search_status, search_pic)
+    df_po_f = apply_search_filter(df_po_f, search_number, search_status, search_pic)
+    df_do_f = apply_search_filter(df_do_f, search_number, search_status, search_pic)
+    df_npr_f = apply_search_filter(df_npr_f, search_number, search_status, search_pic)
+    df_pur_f = apply_search_filter(df_pur_f, search_number, search_status, search_pic)
+
+    # ---------- ENSURE IMPORTANT COLUMNS ----------
+    df_pr_f = ensure_columns(df_pr_f, ["Nominal", "No. PR", "Status", "PIC Procurement"])
+    df_po_f = ensure_columns(df_po_f, ["Nominal"])
+    df_do_f = ensure_columns(df_do_f, ["Nominal", "No. DO", "PIC Purchasing"])
+    df_npr_f = ensure_columns(df_npr_f, ["No. Transaksi"])
+    df_pur_f = ensure_columns(df_pur_f, ["No. PUR", "PIC", "Status"])
+
+    df_pr_f = safe_to_numeric(df_pr_f, ["Nominal"])
+    df_po_f = safe_to_numeric(df_po_f, ["Nominal"])
+    df_do_f = safe_to_numeric(df_do_f, ["Nominal"])
+
+    # ---------- METRICS ----------
+    total_pr_unpr = safe_sum(df_pr_f, "Nominal")
+    total_po_unpr = safe_sum(df_po_f, "Nominal")
+    total_do_unpr = safe_sum(df_do_f, "Nominal")
+
+    total_pr_count = safe_unique_count(df_pr_f, "No. PR")
+    total_pr_rows = len(df_pr_f)
+    total_do_count = safe_unique_count(df_do_f, "No. DO")
+    total_do_rows = len(df_do_f)
+    total_npr_count = safe_unique_count(df_npr_f, "No. Transaksi")
+    total_npr_rows = len(df_npr_f)
+
+    avg_nominal_do = safe_mean(df_do_f, "Nominal")
+
+    top_pic_pr = get_top_pic(df_pr_f, "PIC Procurement", "No. PR")
+    top_pic_do = get_top_pic(df_do_f, "PIC Purchasing", "No. DO")
+    top_pic_pur = get_top_pic(df_pur_f, "PIC", "No. PUR")
+
+    # ---------- LAYOUT ----------
+    col_kiri, col_kanan = st.columns([1, 1])
+
+    # =====================================================
+    # LEFT - PR & DO
+    # =====================================================
+    with col_kiri:
         with st.container(border=True):
-            st.subheader("🍩Proporsi Nominal PR per Status")
-    
-            fig_pie = px.pie(
-                pr_summary, 
-                values='Total_Amount', 
-                names='Status', 
-                color='Status',
-                color_discrete_map=status_colors, # Menggunakan mapping warna yang sama
-                hole=0.4, # Membuat tampilan menjadi Donut Chart (opsional)
-                title="Persentase Distribusi Nominal PR"
-             )
-    
-            # Mengatur tampilan agar lebih bersih
-            fig_pie.update_traces(
-             textinfo='percent+value', # Menampilkan persentase dan nilai
-                texttemplate='%{percent:.1%} <br>(Rp %{value:,.0f})'
-            )
-    
-            st.plotly_chart(fig_pie, use_container_width=True)
+            st.subheader("📊 Detail Outstanding PR & DO")
 
+            c1, c2 = st.columns(2)
+            with c1:
+                metric_card("PR Balance", f"Rp {total_pr_unpr:,.0f}")
+            with c2:
+                metric_card("PO Balance", f"Rp {total_po_unpr:,.0f}")
 
-    with st.container(border=True):    
-        st.subheader("🔍Analisis Status PR")
-    
-        # Opsional: Menampilkan dengan format Rupiah yang lebih cantik di tabel
-        pr_summary_display = pr_summary.copy()
-        pr_summary_display['Total_Amount'] = pr_summary_display['Total_Amount'].apply(lambda x: f"Rp {x:,.0f}")
-        st.write(pr_summary_display)
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                metric_card("Total Dokumen PR", f"{total_pr_count:,}")
+            with c2:
+                metric_card("Total Item PR", f"{total_pr_rows:,}")
+            with c3:
+                metric_card("PIC Terbanyak", top_pic_pr)
 
-        #else:
-            #st.info("Data PR tidak tersedia atau kolom 'Status' tidak ditemukan.")
-
-
-        # --- VISUALISASI BAR CHART DENGAN WARNA BERBEDA ---
-
-
-        fig = px.bar(
-            pr_summary, 
-            x='Status', 
-            y='Total_Amount', 
-            color='Status',
-            color_discrete_map=status_colors, # Konsistensi warna
-            title="Distribusi Nominal PR per Status"
-        )
-
-        # 1. Update traces untuk angka di atas bar (format ribuan/jutaan penuh)
-        fig.update_traces(
-            texttemplate='Rp %{y:,.0f}', # Menggunakan format ribuan (,) dengan 0 desimal
-            textposition='outside'
-        )
-
-        # 2. Update layout untuk menghilangkan legenda warna dan mengatur sumbu Y
-        fig.update_layout(
-            showlegend=False,              # Menghilangkan legenda warna di samping
-            yaxis=dict(
-                tickformat=',.0f',         # Format sumbu Y agar muncul angka penuh
-                title="Total Nominal (Rp)"
-            )
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-
-
-    # --- ANALISIS PIC PROCUREMENT TERBANYAK PER STATUS ---
-    # --- PEMBERSIHAN DATA (TAMBAHKAN SEBELUM PROSES FILTER) ---
-
-    # Jika ternyata isinya bukan NaN tapi string kosong (""), gunakan ini:
-    df_pr_f.loc[df_pr_f['PIC Procurement'] == "", 'PIC Procurement'] = 'Unassigned'
-    if not df_pr_f.empty and 'PIC Procurement' in df_pr_f.columns:
-    
-        # 1. Grouping berdasarkan PIC dan Status, lalu hitung jumlah baris (atau unique No. PR)
-        pic_summary = df_pr_f.groupby(['PIC Procurement', 'Status']).agg(
-            Jumlah_PR=('No. PR', 'nunique')
-        ).reset_index()
-
-        # 2. Urutkan berdasarkan jumlah terbanyak
-        pic_summary = pic_summary.sort_values(by='Jumlah_PR', ascending=False)
+        pr_summary = summarize_status(df_pr_f, doc_col="No. PR", nominal_col="Nominal")
 
         with st.container(border=True):
-            st.subheader("👤Analisis PIC Procurement per Status")
-    
-            # 3. Tampilkan dalam bentuk Bar Chart
-            fig_pic = px.bar(
-            pic_summary, 
-            x='PIC Procurement', 
-            y='Jumlah_PR', 
-            color='Status',
-            color_discrete_map=status_colors, # Warna akan mengikuti mapping yang sama
-            title="Jumlah PR per PIC Procurement",
+            st.subheader("🍩 Proporsi Nominal PR per Status")
+            render_status_pie(pr_summary, "Persentase Distribusi Nominal PR")
+
+        with st.container(border=True):
+            st.subheader("🔍 Analisis Status PR")
+
+            if not pr_summary.empty:
+                pr_summary_display = pr_summary.copy()
+                pr_summary_display["Total_Amount"] = pr_summary_display["Total_Amount"].apply(lambda x: f"Rp {x:,.0f}")
+                st.dataframe(pr_summary_display, use_container_width=True, hide_index=True)
+            else:
+                st.info("Tidak ada data status PR untuk ditampilkan.")
+
+            render_status_bar(pr_summary, "Distribusi Nominal PR per Status")
+
+        pic_summary_pr = summarize_pic_status(df_pr_f, "PIC Procurement", "No. PR")
+        with st.container(border=True):
+            st.subheader("👤 Analisis PIC Procurement per Status")
+            render_pic_bar(
+                summary_df=pic_summary_pr,
+                x_col="PIC Procurement",
+                y_col="Jumlah_Doc",
+                color_col="Status",
+                title="Jumlah PR per PIC Procurement"
             )
 
-            fig_pic.update_traces(
-                texttemplate='%{y}',           
-                textposition='inside',         
-                textfont_size=10,
-                textangle=0                    # <--- TAMBAHKAN INI: Memaksa sudut teks 0 derajat (tegak lurus)
-            )
+        # Download per PIC PR
+        with st.container(border=True):
+            st.subheader("📥 Download Data PR per PIC")
 
-    
-            fig_pic.update_layout(
-                xaxis_title="PIC Procurement",
-                yaxis_title="Jumlah PR",
-                legend_title="Status PR",
-                # --- TAMBAHKAN KONFIGURASI DI BAWAH INI ---
-                uniformtext_mode='hide',       # Menyembunyikan teks jika batang terlalu sempit
-                uniformtext_minsize=8          # Ukuran font minimum agar tetap terbaca
-            )
-    
-            st.plotly_chart(fig_pic, use_container_width=True)
-    
-            # 4. Tampilkan tabel detailnya
-            #st.write("Tabel Detail PIC:")
-            #st.table(pic_summary)
+            if not df_pr_f.empty and "PIC Procurement" in df_pr_f.columns:
+                options = sorted(df_pr_f["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist())
+                selected_pic = st.selectbox("Pilih PIC Procurement:", options, key="pr_pic_select")
 
-    else:
-        st.info("Data PIC Procurement tidak tersedia atau kolom tidak ditemukan.")
-
-
-
-
-    # --- FITUR DOWNLOAD EXCEL PER PIC ---
-    with st.container(border=True):
-        st.subheader("📥 Download Data PR per PIC")
-
-        if not df_pr_f.empty and 'PIC Procurement' in df_pr_f.columns:
-            # Ambil list unik PIC yang ada di data
-            list_pic = df_pr_f['PIC Procurement'].unique().tolist()
-    
-            # Dropdown untuk memilih PIC
-            selected_pic = st.selectbox("Pilih PIC Procurement:", list_pic)
-    
-            if selected_pic:
-                # Filter data berdasarkan PIC yang dipilih
-                df_filtered = df_pr_f[df_pr_f['PIC Procurement'] == selected_pic]
-        
-                # Konversi ke Excel di memori (menggunakan BytesIO)
-                from io import BytesIO
-                output = BytesIO()
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df_filtered.to_excel(writer, index=False, sheet_name='Data_PR')
-            
-                # Tombol download
+                filtered = df_pr_f[df_pr_f["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic].copy()
                 st.download_button(
                     label=f"Download Data {selected_pic}.xlsx",
-                    data=output.getvalue(),
-                    file_name=f"Data_PR_{selected_pic}.xlsx",
+                    data=to_excel_bytes(filtered, sheet_name="Data_PR"),
+                    file_name=f"Data_PR_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-        else:
-            st.info("Data tidak tersedia untuk fitur download.")
-
-
-
-
-
-    # --- FITUR DOWNLOAD EXCEL TERFILTER (PERIODE + STATUS) ---
-    with st.container(border=True):
-        st.subheader("📥 Download Data PR (Periode & Status)")
-
-        if not df_pr_f.empty:
-            # 1. Pilih Status (Bisa pilih banyak)
-            all_statuses = df_pr_f['Status'].unique().tolist()
-            selected_statuses = st.multiselect("Pilih Status untuk di-download:", all_statuses, default=all_statuses)
-    
-            # 2. Filter data berdasarkan Status yang dipilih
-            df_download = df_pr_f[df_pr_f['Status'].isin(selected_statuses)]
-    
-            if not df_download.empty:
-                # Konversi ke Excel di memori
-                output = BytesIO()
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df_download.to_excel(writer, index=False, sheet_name='Data_PR')
-            
-                # Tombol download
-                st.download_button(
-                    label=f"Download {len(df_download)} Baris Data (Filtered).xlsx",
-                    data=output.getvalue(),
-                    file_name=f"Data_PR_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-                st.write(f"Menampilkan {len(df_download)} baris data yang akan di-download.")
             else:
-                st.warning("Tidak ada data yang sesuai dengan filter yang dipilih.")
-        else:
-            st.info("Data tidak tersedia untuk fitur download.")
+                st.info("Data tidak tersedia untuk fitur download PR per PIC.")
 
+        # Download PR by status
+        with st.container(border=True):
+            st.subheader("📥 Download Data PR (Periode & Status)")
 
+            if not df_pr_f.empty and "Status" in df_pr_f.columns:
+                all_statuses = sorted([s for s in df_pr_f["Status"].dropna().astype(str).unique().tolist() if s.strip()])
+                selected_statuses = st.multiselect(
+                    "Pilih Status untuk di-download:",
+                    all_statuses,
+                    default=all_statuses,
+                    key="pr_status_export"
+                )
 
+                df_download = df_pr_f[df_pr_f["Status"].isin(selected_statuses)].copy()
 
-    # --- AGREGASI FINAL UNTUK DASHBOARD PR ---
-    total_do_unpr = df_do_f['Nominal'].sum()
+                if not df_download.empty:
+                    st.download_button(
+                        label=f"Download {len(df_download):,} Baris Data (Filtered).xlsx",
+                        data=to_excel_bytes(df_download, sheet_name="Data_PR"),
+                        file_name=f"Data_PR_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                    st.caption(f"Menampilkan {len(df_download):,} baris data yang akan di-download.")
+                else:
+                    st.warning("Tidak ada data yang sesuai dengan filter yang dipilih.")
+            else:
+                st.info("Data PR tidak tersedia untuk export.")
 
+        # DO Metrics
+        with st.container(border=True):
+            st.subheader("📊 Detail Outstanding DO")
 
-    def metric_card(label, value):
-        # Menggunakan HTML untuk membungkus metric
-        st.markdown(f"""
-        <div class="metric-card">
-            <div style="color: #666; font-size: 0.9rem;">{label}</div>
-            <div style="font-size: 1.5rem; font-weight: bold; color: #333;">{value}</div>
-        </div>
-        """, unsafe_allow_html=True)
+            c1, c2 = st.columns(2)
+            with c1:
+                metric_card("DO Balance", f"Rp {total_do_unpr:,.0f}")
+            with c2:
+                metric_card("Rata-rata Nominal", f"Rp {avg_nominal_do:,.0f}")
 
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                metric_card("Total Dokumen DO", f"{total_do_count:,}")
+            with c2:
+                metric_card("Total Item DO", f"{total_do_rows:,}")
+            with c3:
+                metric_card("PIC Terbanyak", top_pic_do)
 
-    # --- STATUS DO ---
-    # Menghitung angka-angka kunci untuk ringkasan di atas
-    total_do_count = df_do_f['No. DO'].nunique()
-    total_do_rows = len(df_do_f)
-    avg_nominal_do = df_do_f['Nominal'].mean()
-    # 1. Pastikan PIC kosong sudah jadi 'Unassigned'
-    df_do_f['PIC Purchasing'] = df_do_f['PIC Purchasing'].fillna('Unassigned')
-    df_do_f.loc[df_do_f['PIC Purchasing'] == "", 'PIC Purchasing'] = 'Unassigned'
+    # =====================================================
+    # RIGHT - NPR & PUR
+    # =====================================================
+    with col_kanan:
+        with st.container(border=True):
+            st.subheader("📊 Detail Outstanding NPR & PUR")
+            c1, c2 = st.columns(2)
+            with c1:
+                metric_card("NPR Balance (Item)", f"{total_npr_rows:,}")
+            with c2:
+                metric_card("PIC PUR Terbanyak", top_pic_pur)
 
-    # 2. Filter hanya untuk PIC yang bertugas
-    df_assigned2 = df_do_f[df_do_f['PIC Purchasing'] != 'Unassigned']
+            st.markdown(
+                f"<div class='small-note'>Total dokumen NPR unik: {total_npr_count:,}</div>",
+                unsafe_allow_html=True
+            )
 
-    # 3. Hitung jumlah DOKUMEN PR UNIK per PIC (menggunakan nunique)
-    pic_counts2 = df_assigned2.groupby('PIC Purchasing')['No. DO'].nunique().sort_values(ascending=False)
-
-    # 4. Ambil daftar PIC
-    list_pic_urut2 = pic_counts2.index.tolist()
-
-    # 5. Tentukan top_pic
-    if len(list_pic_urut2) >= 1:
-        top_pic2 = list_pic_urut2[0]
-    else:
-        top_pic2 = "Tidak ada"
-
-
-
-    with st.container(border=True):
-        st.subheader("📊Detail Outstanding DO")
-        c1, c2 = st.columns(2)
-        with c1: metric_card("DO Balance", f"Rp {total_do_unpr:,.0f}")
-        with c2: metric_card("Rata-rata Nominal", f"Rp {avg_nominal_do:,.0f}")
-
-
-        c1, c2, c3 = st.columns(3)
-        with c1: metric_card("Total Dokumen DO", f"{total_do_count:,}")
-        with c2: metric_card("Total Item DO", f"{total_do_rows:,}")
-        with c3: metric_card("PIC Terbanyak", top_pic2)
-
-
-# Card Ringkasan NPR
-# --- STATUS NPR ---
-# Menghitung angka-angka kunci untuk ringkasan di atas
-total_npr_count = df_npr_f['No. Transaksi'].nunique()
-total_npr_rows = len(df_npr_f)
-# --- LOGIKA PIC TERBANYAK (DOKUMEN UNIK) ---
-
-# 1. Pastikan PIC kosong sudah jadi 'Unassigned'
-df_pur_f['PIC'] = df_pur_f['PIC'].fillna('Unassigned')
-df_pur_f.loc[df_pur_f['PIC'] == "", 'PIC'] = 'Unassigned'
-
-# 2. Filter hanya untuk PIC yang bertugas
-df_assigned3 = df_pur_f[df_pur_f['PIC'] != 'Unassigned']
-
-# 3. Hitung jumlah DOKUMEN PR UNIK per PIC (menggunakan nunique)
-pic_counts3 = df_assigned3.groupby('PIC')['No. PUR'].nunique().sort_values(ascending=False)
-
-# 4. Ambil daftar PIC
-list_pic_urut3 = pic_counts3.index.tolist()
-
-# 5. Tentukan top_pic
-if len(list_pic_urut3) >= 1:
-    top_pic3 = list_pic_urut3[0]
-else:
-    top_pic3 = "Tidak ada"
-
-with col_kanan:
-    # Bungkus dalam container dengan border
-    with st.container(border=True):
-        st.subheader("📊Detail Outstanding NPR & PUR")
-            
-        c1, c2 = st.columns(2)
-        with c1: metric_card("NPR Balance (Item)", f"{total_npr_rows:,}")
-        with c2: metric_card("PIC PUR Terbanyak", top_pic3)
-
- 
-
-
-    # --- ANALISIS PIC PROCUREMENT TERBANYAK PER STATUS ---
-    # --- PEMBERSIHAN DATA (TAMBAHKAN SEBELUM PROSES FILTER) ---
-
-    # Jika ternyata isinya bukan NaN tapi string kosong (""), gunakan ini:
-    df_pur_f.loc[df_pur_f['PIC'] == "", 'PIC'] = 'Unassigned'
-    if not df_pur_f.empty and 'PIC' in df_pur_f.columns:
-    
-        # 1. Grouping berdasarkan PIC dan Status, lalu hitung jumlah baris (atau unique No. PR)
-        pic_summary3 = df_pur_f.groupby(['PIC', 'Status']).agg(
-            Jumlah_PUR=('No. PUR', 'nunique')
-        ).reset_index()
-
-        # 2. Urutkan berdasarkan jumlah terbanyak
-        pic_summary3 = pic_summary3.sort_values(by='Jumlah_PUR', ascending=False)
+        pic_summary_pur = summarize_pic_status(df_pur_f, "PIC", "No. PUR")
+        with st.container(border=True):
+            st.subheader("👤 Analisis PIC PUR")
+            render_pic_bar(
+                summary_df=pic_summary_pur,
+                x_col="PIC",
+                y_col="Jumlah_Doc",
+                color_col="Status" if "Status" in pic_summary_pur.columns else None,
+                title="Jumlah PUR per PIC PUR"
+            )
 
         with st.container(border=True):
-            st.subheader("👤Analisis PIC PUR")
-    
-            # 3. Tampilkan dalam bentuk Bar Chart
-            fig_pic3 = px.bar(
-            pic_summary3, 
-            x='PIC', 
-            y='Jumlah_PUR', 
-            #color='Status',
-            #color_discrete_map=status_colors, # Warna akan mengikuti mapping yang sama
-            title="Jumlah PUR per PIC PUR",
-            )
+            st.subheader("📥 Download Data PUR per PIC")
 
-            fig_pic3.update_traces(
-                texttemplate='%{y}',           
-                textposition='inside',         
-                textfont_size=10,
-                textangle=0          # <--- TAMBAHKAN INI: Memaksa sudut teks 0 derajat (tegak lurus)
-            )
+            if not df_pur_f.empty and "PIC" in df_pur_f.columns:
+                options = sorted(df_pur_f["PIC"].fillna("Unassigned").astype(str).unique().tolist())
+                selected_pic3 = st.selectbox("Pilih PIC PUR:", options, key="pur_pic_select")
 
-    
-            fig_pic3.update_layout(
-                xaxis_title="PIC",
-                yaxis_title="Jumlah PURR",
-                legend_title="Status PURR",
-                # --- TAMBAHKAN KONFIGURASI DI BAWAH INI ---
-                uniformtext_mode='hide',       # Menyembunyikan teks jika batang terlalu sempit
-                uniformtext_minsize=8          # Ukuran font minimum agar tetap terbaca
-            )
-    
-            st.plotly_chart(fig_pic3, use_container_width=True)
-    
-            # 4. Tampilkan tabel detailnya
-            #st.write("Tabel Detail PIC:")
-            #st.table(pic_summary)
-
-    else:
-        st.info("Data PIC PUR tidak tersedia atau kolom tidak ditemukan.")
-
-
-    # --- FITUR DOWNLOAD EXCEL PUR PER PIC ---
-    with st.container(border=True):
-        st.subheader("📥 Download Data PUR per PIC")
-
-        if not df_pur_f.empty and 'PIC' in df_pur_f.columns:
-            # Ambil list unik PIC yang ada di data
-            list_pic3 = df_pur_f['PIC'].unique().tolist()
-    
-            # Dropdown untuk memilih PIC
-            selected_pic3 = st.selectbox("Pilih PIC PUR:", list_pic3)
-    
-            if selected_pic3:
-                # Filter data berdasarkan PIC yang dipilih
-                df_filtered3 = df_pur_f[df_pur_f['PIC'] == selected_pic3]
-        
-                # Konversi ke Excel di memori (menggunakan BytesIO)
-                from io import BytesIO
-                output3 = BytesIO()
-                with pd.ExcelWriter(output3, engine='xlsxwriter') as writer:
-                    df_filtered3.to_excel(writer, index=False, sheet_name='Data_PUR')
-            
-                # Tombol download
+                filtered3 = df_pur_f[df_pur_f["PIC"].fillna("Unassigned").astype(str) == selected_pic3].copy()
                 st.download_button(
                     label=f"Download Data {selected_pic3}.xlsx",
-                    data=output3.getvalue(),
-                    file_name=f"Data_PUR_{selected_pic3}.xlsx",
+                    data=to_excel_bytes(filtered3, sheet_name="Data_PUR"),
+                    file_name=f"Data_PUR_{selected_pic3}_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-        else:
-            st.info("Data tidak tersedia untuk fitur download.")
+            else:
+                st.info("Data PUR tidak tersedia untuk fitur download.")
+
+    # ---------- FOOTER INFO ----------
+    with st.expander("ℹ️ Informasi Teknis Dashboard"):
+        selected_report_date = (
+            selected_date_range[1]
+            if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) == 2
+            else date.today()
+        )
+
+        st.markdown(
+            f"""
+- **Base URL:** `{BASE_URL}`
+- **Timeout Request:** `{REQUEST_TIMEOUT}` detik
+- **Tanggal report sampai:** `{selected_report_date}`
+- **Mode filter tanggal:** kumulatif (semua data sampai tanggal akhir)
+- **Cache API:** 600 detik
+            """
+        )
 
 
+if __name__ == "__main__":
+    main()
