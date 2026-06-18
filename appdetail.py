@@ -453,28 +453,41 @@ def render_pic_bar(summary_df: pd.DataFrame, x_col: str, y_col: str, color_col: 
 
 
 def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, title: str):
-    """Menampilkan heatmap aktivitas PIC berdasarkan jumlah dokumen per bulan."""
+    """Menampilkan heatmap aktivitas PIC berdasarkan jumlah dokumen unik per bulan."""
     if df.empty or pic_col not in df.columns or date_col not in df.columns:
         st.info("Data tidak tersedia untuk heatmap aktivitas PIC.")
         return
 
+    # Copy data agar aman
     working = df.copy()
-    working = safe_to_datetime(working, date_col)
-    working = assign_unassigned(working, pic_col)
-    working["Bulan"] = working[date_col].dt.strftime("%b")
+
+    # Pastikan kolom tanggal sudah datetime
+    working[date_col] = pd.to_datetime(working[date_col], errors="coerce")
+
+    # Pastikan kolom PIC tidak kosong
+    working[pic_col] = working[pic_col].fillna("Unassigned")
+
+    # Mapping bulan dari angka → nama singkat
+    bulan_map = {
+        1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
+        7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"
+    }
+    working["Bulan"] = working[date_col].dt.month.map(bulan_map)
 
     # Urutkan bulan secara kronologis
-    bulan_order = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    bulan_order = list(bulan_map.values())
     working["Bulan"] = pd.Categorical(working["Bulan"], categories=bulan_order, ordered=True)
 
+    # Hitung jumlah PR unik per PIC per bulan
+    working["No. PR"] = working["No. PR"].astype(str).str.strip().str.upper()
     summary = (
-    working.groupby([pic_col, "Bulan"])[ "No. PR" ]
-    .nunique()  # menghitung jumlah PR unik
-    .reset_index(name="Jumlah Dokumen")
+        working.groupby([pic_col, "Bulan"])["No. PR"]
+        .nunique()
+        .reset_index(name="Jumlah Dokumen")
+        .sort_values("Bulan")
     )
 
-
+    # Buat heatmap dengan Plotly
     fig = px.density_heatmap(
         summary,
         x="Bulan",
@@ -489,6 +502,7 @@ def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, title: str
         yaxis_title="PIC",
         coloraxis_colorbar=dict(title="Jumlah Dokumen"),
     )
+
     st.plotly_chart(fig, use_container_width=True)
 
 
