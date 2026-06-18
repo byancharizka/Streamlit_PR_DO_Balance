@@ -101,10 +101,12 @@ df_npr = get_api_data("outstanding-npr")
 df_pur = get_api_data("outstanding-pur")
 
 # Mengubah kolom 'Tgl ...' menjadi 'transaction_date'
-#df_so = df_so.rename(columns={'tanggal': 'transaction_date'})
 df_pr = df_pr.rename(columns={'Tgl. PR': 'transaction_date'})
+df_po = df_po.rename(columns={'Tgl. PO': 'transaction_date'})
 #df_po = df_po.rename(columns={'Tgl. PO': 'transaction_date'})
 df_do = df_do.rename(columns={'Tgl. DO': 'transaction_date'})
+df_npr = df_npr.rename(columns={'Tanggal': 'transaction_date'})
+df_pur = df_pur.rename(columns={'Tanggal': 'transaction_date'})
 
 
 
@@ -192,6 +194,8 @@ if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) =
     df_pr_f = apply_cumulative_filter(df_pr, report_end_date)
     df_po_f = apply_cumulative_filter(df_po, report_end_date)
     df_do_f = apply_cumulative_filter(df_do, report_end_date)
+    df_npr_f = apply_cumulative_filter(df_npr, report_end_date)
+    df_pur_f = apply_cumulative_filter(df_pur, report_end_date)
 
 
 # --- 5. EKSEKUSI ---
@@ -211,11 +215,13 @@ if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) =
 
 # Konversi kolom Nominal ke float
 df_pr_f['Nominal'] = pd.to_numeric(df_pr_f['Nominal'], errors='coerce').fillna(0.0).astype(float)
+df_po_f['Nominal'] = pd.to_numeric(df_po_f['Nominal'], errors='coerce').fillna(0.0).astype(float)
 df_do_f['Nominal'] = pd.to_numeric(df_do_f['Nominal'], errors='coerce').fillna(0.0).astype(float)
 
 
-# --- AGREGASI FINAL UNTUK DASHBOARD PR ---
+# --- AGREGASI FINAL UNTUK DASHBOARD ---
 total_pr_unpr = df_pr_f['Nominal'].sum()
+total_po_unpr = df_po_f['Nominal'].sum()
 
 
 def metric_card(label, value):
@@ -269,11 +275,11 @@ col_kiri, col_kanan = st.columns([1, 1])
 with col_kiri:
     with st.container(border=True):
         #st.subheader("📋Detail Outstanding PR")
-        st.subheader("📊Detail Outstanding PR")
+        st.subheader("📊Detail Outstanding")
 
         c1, c2 = st.columns(2)
         with c1: metric_card("PR Balance", f"Rp {total_pr_unpr:,.0f}")
-        with c2: metric_card("Rata-rata Nominal", f"Rp {avg_nominal_pr:,.0f}")
+        with c2: metric_card("PO Balance", f"Rp {total_po_unpr:,.0f}")
     
         c1, c2, c3 = st.columns(3)
         with c1: metric_card("Total Dokumen PR", f"{total_pr_count:,}")
@@ -545,16 +551,94 @@ with col_kiri:
         with c3: metric_card("PIC Terbanyak", top_pic2)
 
 
+# Card Ringkasan NPR
+# --- STATUS NPR ---
+# Menghitung angka-angka kunci untuk ringkasan di atas
+total_npr_count = df_npr_f['No. Transaksi'].nunique()
+total_npr_rows = len(df_npr_f)
+# --- LOGIKA PIC TERBANYAK (DOKUMEN UNIK) ---
 
+# 1. Pastikan PIC kosong sudah jadi 'Unassigned'
+df_pur_f['PIC'] = df_pur_f['PIC'].fillna('Unassigned')
+df_pur_f.loc[df_pur_f['PIC'] == "", 'PIC'] = 'Unassigned'
 
+# 2. Filter hanya untuk PIC yang bertugas
+df_assigned3 = df_pur_f[df_pur_f['PIC'] != 'Unassigned']
+
+# 3. Hitung jumlah DOKUMEN PR UNIK per PIC (menggunakan nunique)
+pic_counts3 = df_assigned3.groupby('PIC')['No. PUR'].nunique().sort_values(ascending=False)
+
+# 4. Ambil daftar PIC
+list_pic_urut3 = pic_counts3.index.tolist()
+
+# 5. Tentukan top_pic
+if len(list_pic_urut3) >= 1:
+    top_pic3 = list_pic_urut3[0]
+else:
+    top_pi3 = "Tidak ada"
 
 with col_kanan:
     # Bungkus dalam container dengan border
     with st.container(border=True):
-        st.subheader("📊Detail Outstanding NPR")
-        # Card Ringkasan NPR
+        st.subheader("📊Detail Outstanding NPR & PUR")
+            
         c1, c2 = st.columns(2)
-        with c1: metric_card("NPR Outstanding", f"{total_pr_count:,}")
-        with c2: metric_card("PIC Terbanyak", top_pic)
-        
+        with c1: metric_card("NPR Balance (Item)", f"{total_npr_rows:,}")
+        with c2: metric_card("PIC PUR Terbanyak", top_pic3)
 
+ 
+
+
+    # --- ANALISIS PIC PROCUREMENT TERBANYAK PER STATUS ---
+    # --- PEMBERSIHAN DATA (TAMBAHKAN SEBELUM PROSES FILTER) ---
+
+    # Jika ternyata isinya bukan NaN tapi string kosong (""), gunakan ini:
+    df_pur_f.loc[df_pur_f['PIC'] == "", 'PIC'] = 'Unassigned'
+    if not df_pur_f.empty and 'PIC' in df_pur_f.columns:
+    
+        # 1. Grouping berdasarkan PIC dan Status, lalu hitung jumlah baris (atau unique No. PR)
+        pic_summary3 = df_pur_f.groupby(['PIC', 'Status']).agg(
+            Jumlah_PUR=('No. PUR', 'nunique')
+        ).reset_index()
+
+        # 2. Urutkan berdasarkan jumlah terbanyak
+        pic_summary3 = pic_summary3.sort_values(by='Jumlah_PUR', ascending=False)
+
+        with st.container(border=True):
+            st.subheader("👤Analisis PIC PUR per Status")
+    
+            # 3. Tampilkan dalam bentuk Bar Chart
+            fig_pic3 = px.bar(
+            pic_summary3, 
+            x='PIC', 
+            y='Jumlah_PUR', 
+            #color='Status',
+            #color_discrete_map=status_colors, # Warna akan mengikuti mapping yang sama
+            title="Jumlah PR per PIC PUR",
+            )
+
+            fig_pic3.update_traces(
+                texttemplate='%{y}',           
+                textposition='inside',         
+                textfont_size=10,
+                textangle=0          # <--- TAMBAHKAN INI: Memaksa sudut teks 0 derajat (tegak lurus)
+            )
+
+    
+            fig_pic3.update_layout(
+                xaxis_title="PIC",
+                yaxis_title="Jumlah PURR",
+                legend_title="Status PURR",
+                # --- TAMBAHKAN KONFIGURASI DI BAWAH INI ---
+                uniformtext_mode='hide',       # Menyembunyikan teks jika batang terlalu sempit
+                uniformtext_minsize=8          # Ukuran font minimum agar tetap terbaca
+            )
+    
+            st.plotly_chart(fig_pic3, use_container_width=True)
+    
+            # 4. Tampilkan tabel detailnya
+            #st.write("Tabel Detail PIC:")
+            #st.table(pic_summary)
+
+    else:
+        st.info("Data PIC PUR tidak tersedia atau kolom tidak ditemukan.")
