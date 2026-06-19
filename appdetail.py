@@ -866,7 +866,7 @@ def main():
             else:
                 st.info("Tidak ada data status DO untuk ditampilkan.")   
 
-        render_status_bar(do_summary, "Distribusi Nominal DO per Status")
+            render_status_bar(do_summary, "Distribusi Nominal DO per Status")
 
         pic_summary_do = summarize_pic_status_do(df_do_f, "PIC Purchasing", "No. DO")
         with st.container(border=True):
