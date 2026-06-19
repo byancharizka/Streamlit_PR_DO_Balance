@@ -614,6 +614,50 @@ def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, title: str
     )
 
 
+def calculate_aging(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
+    if df.empty or date_col not in df.columns:
+        return df.copy()
+    working = df.copy()
+    working = safe_to_datetime(working, date_col)
+    today = pd.to_datetime(TODAY)
+    working["Aging"] = (today - working[date_col]).dt.days
+    return working
+
+def categorize_aging(df: pd.DataFrame) -> pd.DataFrame:
+    bins = [0, 30, 60, 90, float("inf")]
+    labels = ["0-30 hari", "31-60 hari", "61-90 hari", ">90 hari"]
+    df["Aging Category"] = pd.cut(df["Aging"], bins=bins, labels=labels, right=True)
+    return df
+
+
+def render_aging_bar(df: pd.DataFrame, doc_col: str, title: str):
+    if df.empty or "Aging Category" not in df.columns:
+        st.info("Data aging tidak tersedia.")
+        return
+
+    summary = (
+        df.groupby("Aging Category")[doc_col]
+        .nunique()
+        .reset_index(name="Jumlah Dokumen")
+    )
+
+    fig = px.bar(
+    summary,
+    x="Aging Category",
+    y="Jumlah Dokumen",
+    color="Aging Category",
+    color_discrete_map={
+        "0-30 hari": "#2F80ED",   # biru tua
+        "31-60 hari": "#7ABBEE",  # biru muda
+        "61-90 hari": "#FCA27F",     # oranye
+        ">90 hari": "#EB5757"  # merah
+    },
+    text="Jumlah Dokumen",
+    title=title
+    )
+    fig.update_traces(textposition="outside")
+    st.plotly_chart(fig, use_container_width=True)
+
 
 
 
@@ -781,6 +825,15 @@ def main():
                 date_col="transaction_date",
                 title="Heatmap Aktivitas PIC Procurement per Bulan"
             )
+
+
+        df_pr_f_aging = calculate_aging(df_pr_f, "transaction_date")
+        df_pr_f_aging = categorize_aging(df_pr_f_aging)
+
+        with st.container(border=True):
+            st.subheader("⏳ Distribusi Aging PR")
+            render_aging_bar(df_pr_f_aging, "No. PR", "Distribusi Dokumen PR berdasarkan Aging")
+
 
 
         # Download per PIC PR
