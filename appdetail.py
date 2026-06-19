@@ -93,7 +93,7 @@ h2, h3, h4, h5, h6 {
 }
             
 .metric-card div {
-    font-size: 0.75rem !important;
+    font-size: 0.80rem !important;
 }            
 
 /* ====== SMALL NOTES ====== */
