@@ -504,27 +504,18 @@ def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, title: str
         st.info("Data tidak tersedia untuk heatmap aktivitas PIC.")
         return
 
-    # Copy data agar aman
     working = df.copy()
-
-    # Pastikan kolom tanggal sudah datetime
     working[date_col] = pd.to_datetime(working[date_col], errors="coerce")
-
-    # Pastikan kolom PIC tidak kosong
     working[pic_col] = working[pic_col].fillna("Unassigned")
 
-    # Mapping bulan dari angka → nama singkat
     bulan_map = {
         1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
         7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"
     }
     working["Bulan"] = working[date_col].dt.month.map(bulan_map)
-
-    # Urutkan bulan secara kronologis
     bulan_order = list(bulan_map.values())
     working["Bulan"] = pd.Categorical(working["Bulan"], categories=bulan_order, ordered=True)
 
-    # Hitung jumlah PR unik per PIC per bulan
     working["No. PR"] = working["No. PR"].astype(str).str.strip().str.upper()
     summary = (
         working.groupby([pic_col, "Bulan"])["No. PR"]
@@ -533,23 +524,43 @@ def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, title: str
         .sort_values("Bulan")
     )
 
-    # Buat heatmap dengan Plotly
+    # 🔥 Buat heatmap
     fig = px.density_heatmap(
         summary,
         x="Bulan",
         y=pic_col,
         z="Jumlah Dokumen",
         color_continuous_scale=["#56CCF2", "#F2994A", "#EB5757"],
-        title=title,
     )
 
+    # 🔧 Atur layout agar legenda di bawah dan heatmap lebih lebar
     fig.update_layout(
         xaxis_title="Bulan",
         yaxis_title="PIC",
-        coloraxis_colorbar=dict(title="Jumlah Dokumen"),
+        coloraxis_colorbar=dict(
+            title="Jumlah Dokumen",
+            orientation="h",          # horizontal
+            yanchor="bottom",
+            y=-0.25,                  # posisi di bawah grafik
+            xanchor="center",
+            x=0.5
+        ),
+        margin=dict(l=100, r=40, t=60, b=80),
+        height=500
     )
 
     st.plotly_chart(fig, use_container_width=True)
+
+    # Tambahkan keterangan di bawah heatmap
+    st.markdown(
+        "<div style='text-align:center; font-size:0.8rem; color:#6f6f6f;'>"
+        "📝 <b>Keterangan:</b> " \
+        "Kotak dengan warna mendekati merah artinya punya outstanding PR yang lebih banyak sedangkan " \
+        "kotak dengan warna mendekati biru artinya outstanding PRnya lebih sedikit"
+        "</div>",
+        unsafe_allow_html=True
+    )
+
 
 
 
