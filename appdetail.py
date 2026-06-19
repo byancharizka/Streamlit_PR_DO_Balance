@@ -49,7 +49,7 @@ st.markdown("""
 <style>
 /* ====== TITLE UTAMA ====== */
 h1 {
-    font-size: 2rem !important;   /* paling besar */
+    font-size: 1.5rem !important;   /* paling besar */
     font-weight: 800;
     color: #222;
 }
@@ -83,10 +83,12 @@ h2, h3, h4, h5, h6 {
     background-color: #f4f4f4;
     border: 1px solid #dcdcdc;
     border-radius: 12px;
-    padding: 16px;
+    padding: px;
     box-shadow: 1px 2px 8px rgba(0,0,0,0.05);
     text-align: center;
-    margin: 8px 0;
+    margin-top: 3px;
+    margin-bottom: 7px;
+    margin-left: 2.5px;
     font-size: 0.75rem;
 }
             
@@ -665,11 +667,11 @@ def main():
     col_kiri, col_tengah, col_kanan = st.columns([1, 1, 1])
 
     # =====================================================
-    # LEFT - PR & DO
+    # LEFT - PR
     # =====================================================
     with col_kiri:
         with st.container(border=True):
-            st.subheader("📊 Detail Outstanding PR & DO")
+            st.subheader("📊 Detail Outstanding PR")
 
             c1, c2 = st.columns(2)
             with c1:
@@ -770,23 +772,28 @@ def main():
             else:
                 st.info("Data PR tidak tersedia untuk export.")
 
-        # DO Metrics
+    # =====================================================
+    # MID - DO
+    # =====================================================
+    with col_tengah:
         with st.container(border=True):
             st.subheader("📊 Detail Outstanding DO")
 
             c1, c2 = st.columns(2)
             with c1:
-                metric_card("DO Balance", f"Rp {total_do_unpr:,.0f}")
+                metric_card("PR Balance", f"Rp {total_pr_unpr:,.0f}")
             with c2:
-                metric_card("Rata-rata Nominal", f"Rp {avg_nominal_do:,.0f}")
+                metric_card("PO Balance", f"Rp {total_po_unpr:,.0f}")
 
             c1, c2, c3 = st.columns(3)
             with c1:
-                metric_card("Total Dokumen DO", f"{total_do_count:,}")
+                metric_card("Total Dokumen PR", f"{total_pr_count:,}")
             with c2:
-                metric_card("Total Item DO", f"{total_do_rows:,}")
+                metric_card("Total Item PR", f"{total_pr_rows:,}")
             with c3:
-                metric_card("PIC Terbanyak", top_pic_do)
+                metric_card("PIC Terbanyak", top_pic_pr)
+
+        pr_summary = summarize_status(df_pr_f, doc_col="No. PR", nominal_col="Nominal")            
 
     # =====================================================
     # RIGHT - NPR & PUR
@@ -800,10 +807,14 @@ def main():
             with c2:
                 metric_card("PIC PUR Terbanyak", top_pic_pur)
 
-            st.markdown(
-                f"<div class='small-note'>Total dokumen NPR unik: {total_npr_count:,}</div>",
-                unsafe_allow_html=True
-            )
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                metric_card("Total Dokumen PR", f"{total_pr_count:,}")
+            with c2:
+                metric_card("Total Item PR", f"{total_pr_rows:,}")
+            with c3:
+                metric_card("PIC Terbanyak", top_pic_pr)
 
         pic_summary_pur = summarize_pic_status(df_pur_f, "PIC", "No. PUR")
         with st.container(border=True):
