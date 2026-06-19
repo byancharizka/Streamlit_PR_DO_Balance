@@ -83,7 +83,7 @@ h2, h3, h4, h5, h6 {
     background-color: #f4f4f4;
     border: 1px solid #dcdcdc;
     border-radius: 12px;
-    padding: px;
+    padding: 2px;
     box-shadow: 1px 2px 8px rgba(0,0,0,0.05);
     text-align: center;
     margin-top: 3px;
@@ -117,6 +117,24 @@ div[data-testid="stContainer"] {
     padding-top: 0.1rem !important;
     padding-bottom: 0.1rem !important;
 }
+            
+
+/* ====== FILTER INPUTS ====== */
+div[data-testid="stDateInput"], 
+div[data-testid="stTextInput"] {
+    font-size: 0.7rem !important;   /* ukuran teks lebih kecil */
+}
+
+label, .stTextInput label, .stDateInput label {
+    font-size: 0.7rem !important;   /* label input lebih kecil */
+    color: #555 !important;
+}
+
+/* Kurangi tinggi box input agar lebih ramping */
+input, textarea {
+    font-size: 0.7rem !important;
+    padding: 4px 6px !important;
+}            
                         
 </style>
 """, unsafe_allow_html=True)
