@@ -47,31 +47,78 @@ if not BASE_URL.endswith("/"):
 # =========================================================
 st.markdown("""
 <style>
+/* ====== TITLE UTAMA ====== */
+h1 {
+    font-size: 2rem !important;   /* paling besar */
+    font-weight: 800;
+    color: #222;
+}
+
+/* ====== SUBTITLE & SUBHEADER ====== */
+h2, h3, h4, h5, h6 {
+    font-size: 1rem !important;   /* lebih kecil dari h1 */
+    font-weight: 600;
+    color: #444;
+}
+
+/* ====== LAYOUT CONTAINER ====== */
 .block-container {
-    padding-top: 1rem;
+    padding-top: 2rem;
     padding-bottom: 1rem;
     padding-left: 2rem;
     padding-right: 2rem;
     max-width: 100%;
 }
-[data-testid="stMetricValue"] {
-    font-size: 1.8rem;
+
+/* ====== METRIC COMPONENTS ====== */
+[data-testid="stMetricLabel"] {
+    font-size: 0.7rem !important;
 }
+[data-testid="stMetricValue"] {
+    font-size: 0.8rem !important;
+}
+
+/* ====== CUSTOM METRIC CARD ====== */
 .metric-card {
-    background-color: #b3b2ae;
+    background-color: #f4f4f4;
     border: 1px solid #dcdcdc;
     border-radius: 12px;
     padding: 16px;
     box-shadow: 1px 2px 8px rgba(0,0,0,0.05);
     text-align: center;
     margin: 8px 0;
+    font-size: 0.75rem;
 }
+            
+.metric-card div {
+    font-size: 0.75rem !important;
+}            
+
+/* ====== SMALL NOTES ====== */
 .small-note {
     color: #666;
-    font-size: 0.85rem;
+    font-size: 0.70rem;
 }
+            
+h3, h4, h5 {
+    margin-bottom: 0.1rem !important;
+}
+
+/* Kurangi jarak antar komponen container */
+div[data-testid="stVerticalBlock"] {
+    margin-top: 0.1rem !important;
+    margin-bottom: 0.1rem !important;
+}
+
+/* Kurangi padding default di dalam container */
+div[data-testid="stContainer"] {
+    padding-top: 0.1rem !important;
+    padding-bottom: 0.1rem !important;
+}
+                        
 </style>
 """, unsafe_allow_html=True)
+
 
 # =========================================================
 # 5) UTILITIES
@@ -81,7 +128,7 @@ def metric_card(label: str, value: str):
         f"""
         <div class="metric-card">
             <div style="color: #666; font-size: 0.95rem;">{label}</div>
-            <div style="font-size: 1.45rem; font-weight: 700; color: #222;">{value}</div>
+            <div style="font-size: 0.9rem; font-weight: 700; color: #222;">{value}</div>
         </div>
         """,
         unsafe_allow_html=True
@@ -384,8 +431,8 @@ def render_status_pie(summary_df: pd.DataFrame, title: str):
         color="Status",
         color_discrete_map=STATUS_COLORS,
         hole=0.45,
-        title=title
     )
+    
 
     fig.update_traces(
         textinfo="percent+value",
@@ -431,7 +478,6 @@ def render_pic_bar(summary_df: pd.DataFrame, x_col: str, y_col: str, color_col: 
         "data_frame": summary_df,
         "x": x_col,
         "y": y_col,
-        "title": title
     }
 
     if color_col and color_col in summary_df.columns:
@@ -605,7 +651,7 @@ def main():
     top_pic_pur = get_top_pic(df_pur_f, "PIC", "No. PUR")
 
     # ---------- LAYOUT ----------
-    col_kiri, col_kanan = st.columns([1, 1])
+    col_kiri, col_tengah, col_kanan = st.columns([1, 1, 1])
 
     # =====================================================
     # LEFT - PR & DO
