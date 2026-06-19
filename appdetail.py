@@ -8,6 +8,7 @@ import plotly.express as px
 import pytz
 import requests
 import streamlit as st
+import plotly.graph_objects as go
 
 # =========================================================
 # 1) PAGE CONFIG - WAJIB PALING ATAS
@@ -717,6 +718,65 @@ def render_pic_aging_bar(summary_df: pd.DataFrame, title: str):
 
     st.plotly_chart(fig, use_container_width=True)
 
+def render_sla_gauge(df: pd.DataFrame, threshold: int = 30, title: str = "SLA Compliance"):
+    if df.empty or "Aging" not in df.columns:
+        st.info("Data aging tidak tersedia untuk SLA.")
+        return
+
+    sla_compliance = (df["Aging"] <= threshold).mean() * 100
+
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=sla_compliance,
+        title={'text': f"{title} (≤{threshold} hari)"},
+        gauge={
+            'axis': {'range': [0, 100]},
+            'bar': {'color': "green"},
+            'steps': [
+                {'range': [0, 50], 'color': "red"},
+                {'range': [50, 80], 'color': "yellow"},
+                {'range': [80, 100], 'color': "green"}
+            ]
+        }
+    ))
+    st.plotly_chart(fig, use_container_width=True)
+
+def summarize_pic_sla(df: pd.DataFrame, pic_col: str, doc_col: str, threshold: int = 30) -> pd.DataFrame:
+    if df.empty or pic_col not in df.columns or "Aging" not in df.columns:
+        return pd.DataFrame(columns=[pic_col, "Total_Doc", "SLA_Compliance"])
+
+    working = assign_unassigned(df, pic_col)
+
+    summary = (
+        working.groupby(pic_col).agg(
+            Total_Doc=(doc_col, "nunique"),
+            SLA_Compliance=(doc_col, lambda x: (working.loc[x.index, "Aging"] <= threshold).sum() / len(x) * 100 if len(x) > 0 else 0)
+        )
+        .reset_index()
+    )
+    return summary
+
+def render_pic_sla_bar(summary_df: pd.DataFrame, title: str):
+    if summary_df.empty:
+        st.info("Data SLA per PIC tidak tersedia.")
+        return
+
+    fig = px.bar(
+        summary_df,
+        x="PIC Procurement",
+        y="SLA_Compliance",
+        text="SLA_Compliance",
+        color="SLA_Compliance",
+        color_continuous_scale=["#EB5757", "#F2C94C", "#6FCF97"],  # merah → kuning → hijau
+        title=title
+    )
+    fig.update_traces(
+        texttemplate="%{text:.1f}%",
+        textposition="outside",
+        textfont=dict(size=14, color="black")
+    )
+    fig.update_layout(coloraxis_showscale=False)
+    st.plotly_chart(fig, use_container_width=True)
 
 # =========================================================
 # 9) MAIN APP
@@ -897,6 +957,17 @@ def main():
             st.subheader("👥 Analisis Kinerja PIC Procurement")
             #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
             render_pic_aging_bar(pic_aging_summary, "Rata-rata Aging per PIC Procurement")
+
+        with st.container(border=True):
+            st.subheader("📏 SLA Compliance PR")
+            render_sla_gauge(df_pr_f_aging, threshold=30, title="SLA Compliance PR")
+
+        pic_sla_summary = summarize_pic_sla(df_pr_f_aging, "PIC Procurement", "No. PR", threshold=30)
+
+        with st.container(border=True):
+            st.subheader("📏 SLA Compliance per PIC Procurement")
+            #st.dataframe(pic_sla_summary, use_container_width=True, hide_index=True)
+            render_pic_sla_bar(pic_sla_summary, "Persentase SLA Compliance per PIC Procurement (≤30 hari)")
 
 
         # Download per PIC PR
