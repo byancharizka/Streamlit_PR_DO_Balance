@@ -588,17 +588,18 @@ def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, title: str
 
     # 🔧 Atur layout agar legenda di bawah dan heatmap lebih lebar
     fig.update_layout(
+        coloraxis_showscale=False,
         xaxis_title="Bulan",
         yaxis_title="PIC",
         coloraxis_colorbar=dict(
-            title="Jumlah Dokumen",
-            orientation="h",          # horizontal
+            title=None,
+            orientation="h",
             yanchor="bottom",
-            y=-0.25,                  # posisi di bawah grafik
+            y=-0.15,   # ubah dari -0.25 ke -0.15 atau -0.10
             xanchor="center",
             x=0.5
         ),
-        margin=dict(l=100, r=40, t=60, b=80),
+        margin=dict(l=100, r=40, t=60, b=120),
         height=500
     )
 
@@ -908,10 +909,6 @@ def main():
         pr_summary = summarize_status(df_pr_f, doc_col="No. PR", nominal_col="Nominal")
 
         with st.container(border=True):
-            st.subheader("🍩 Proporsi Nominal PR per Status")
-            render_status_pie(pr_summary, "Persentase Distribusi Nominal PR")
-
-        with st.container(border=True):
             st.subheader("🔍 Analisis Status PR")
 
             if not pr_summary.empty:
@@ -1037,11 +1034,7 @@ def main():
             with c3:
                 metric_card("PIC Terbanyak", top_pic_pr)
 
-        do_summary = summarize_status_do(df_do_f, doc_col="No. DO", nominal_col="Nominal") 
-
-        with st.container(border=True):
-            st.subheader("🍩 Proporsi Nominal DO per Status")
-            render_status_pie(do_summary, "Persentase Distribusi Nominal DO")        
+        do_summary = summarize_status_do(df_do_f, doc_col="No. DO", nominal_col="Nominal")        
 
         with st.container(border=True):
             st.subheader("🔍 Analisis Status DO")
