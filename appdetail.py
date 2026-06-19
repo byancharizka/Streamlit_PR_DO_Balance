@@ -289,6 +289,7 @@ def load_all_data() -> dict[str, pd.DataFrame]:
     endpoint_map = {
         "pr": ("pr-balance", {"Tgl. PR": "transaction_date"}),
         "po": ("po-balance", {"Tgl. PO": "transaction_date"}),
+        "grn": ("grn-balance", {"Tgl. GRN": "transaction_date"}),
         "do": ("do-balance", {"Tgl. DO": "transaction_date"}),
         "npr": ("outstanding-npr", {"Tanggal": "transaction_date"}),
         "pur": ("outstanding-pur", {"Tanggal": "transaction_date"}),
@@ -412,6 +413,25 @@ def summarize_status(df: pd.DataFrame, doc_col: str, nominal_col: str = "Nominal
     )
     return summary
 
+def summarize_status_do(df: pd.DataFrame, doc_col: str, nominal_col: str = "Nominal") -> pd.DataFrame:
+    if df.empty or "Status DO" not in df.columns:
+        return pd.DataFrame(columns=["Status", "Total_Doc", "Total_Amount"])  # ubah ke Status
+
+    working_do = df.copy()
+    working_do = ensure_columns(working_do, [doc_col, nominal_col, "Status DO"])
+    working_do = safe_to_numeric(working_do, [nominal_col])
+
+    summary_do = (
+        working_do.groupby("Status DO", dropna=False)
+        .agg(
+            Total_Doc=(doc_col, "nunique"),
+            Total_Amount=(nominal_col, "sum")
+        )
+        .reset_index()
+        .rename(columns={"Status DO": "Status"})  # tambahkan ini
+    )
+    return summary_do
+
 
 def summarize_pic_status(df: pd.DataFrame, pic_col: str, doc_col: str) -> pd.DataFrame:
     if df.empty or pic_col not in df.columns or "Status" not in df.columns or doc_col not in df.columns:
@@ -427,7 +447,19 @@ def summarize_pic_status(df: pd.DataFrame, pic_col: str, doc_col: str) -> pd.Dat
     )
     return summary
 
+def summarize_pic_status_do(df: pd.DataFrame, pic_col: str, doc_col: str) -> pd.DataFrame:
+    if df.empty or pic_col not in df.columns or "Status DO" not in df.columns or doc_col not in df.columns:
+        return pd.DataFrame(columns=[pic_col, "Status DO", "Jumlah_Doc"])
 
+    working_do = assign_unassigned(df, pic_col)
+
+    summary_do = (
+        working_do.groupby([pic_col, "Status DO"], dropna=False)
+        .agg(Jumlah_Doc=(doc_col, "nunique"))
+        .reset_index()
+        .sort_values(by="Jumlah_Doc", ascending=False)
+    )
+    return summary_do
 # =========================================================
 # 8) CHART HELPERS
 # =========================================================
@@ -597,6 +629,7 @@ def main():
 
     df_pr = data["pr"]
     df_po = data["po"]
+    df_grn = data["grn"]
     df_do = data["do"]
     df_npr = data["npr"]
     df_pur = data["pur"]
@@ -632,6 +665,7 @@ def main():
     # ---------- DEFAULT SAFE COPY ----------
     df_pr_f = df_pr.copy()
     df_po_f = df_po.copy()
+    df_grn_f = df_grn.copy()
     df_do_f = df_do.copy()
     df_npr_f = df_npr.copy()
     df_pur_f = df_pur.copy()
@@ -641,6 +675,7 @@ def main():
         report_end_date = selected_date_range[1]
         df_pr_f = apply_cumulative_filter(df_pr_f, report_end_date)
         df_po_f = apply_cumulative_filter(df_po_f, report_end_date)
+        df_grn_f = apply_cumulative_filter(df_grn_f, report_end_date)
         df_do_f = apply_cumulative_filter(df_do_f, report_end_date)
         df_npr_f = apply_cumulative_filter(df_npr_f, report_end_date)
         df_pur_f = apply_cumulative_filter(df_pur_f, report_end_date)
@@ -648,6 +683,7 @@ def main():
     # ---------- SEARCH FILTER ----------
     df_pr_f = apply_search_filter(df_pr_f, search_number, search_status, search_pic)
     df_po_f = apply_search_filter(df_po_f, search_number, search_status, search_pic)
+    df_grn_f = apply_search_filter(df_grn_f, search_number, search_status, search_pic)
     df_do_f = apply_search_filter(df_do_f, search_number, search_status, search_pic)
     df_npr_f = apply_search_filter(df_npr_f, search_number, search_status, search_pic)
     df_pur_f = apply_search_filter(df_pur_f, search_number, search_status, search_pic)
@@ -655,17 +691,20 @@ def main():
     # ---------- ENSURE IMPORTANT COLUMNS ----------
     df_pr_f = ensure_columns(df_pr_f, ["Nominal", "No. PR", "Status", "PIC Procurement"])
     df_po_f = ensure_columns(df_po_f, ["Nominal"])
+    df_grn_f = ensure_columns(df_grn_f, ["Nominal"])
     df_do_f = ensure_columns(df_do_f, ["Nominal", "No. DO", "PIC Purchasing"])
     df_npr_f = ensure_columns(df_npr_f, ["No. Transaksi"])
     df_pur_f = ensure_columns(df_pur_f, ["No. PUR", "PIC", "Status"])
 
     df_pr_f = safe_to_numeric(df_pr_f, ["Nominal"])
     df_po_f = safe_to_numeric(df_po_f, ["Nominal"])
+    df_grn_f = safe_to_numeric(df_grn_f, ["Nominal"])
     df_do_f = safe_to_numeric(df_do_f, ["Nominal"])
 
     # ---------- METRICS ----------
     total_pr_unpr = safe_sum(df_pr_f, "Nominal")
     total_po_unpr = safe_sum(df_po_f, "Nominal")
+    total_grn_unpr = safe_sum(df_grn_f, "Nominal")
     total_do_unpr = safe_sum(df_do_f, "Nominal")
 
     total_pr_count = safe_unique_count(df_pr_f, "No. PR")
@@ -799,19 +838,46 @@ def main():
 
             c1, c2 = st.columns(2)
             with c1:
-                metric_card("PR Balance", f"Rp {total_pr_unpr:,.0f}")
+                metric_card("GRN Balance", f"Rp {total_grn_unpr:,.0f}")
             with c2:
-                metric_card("PO Balance", f"Rp {total_po_unpr:,.0f}")
+                metric_card("DO Balance", f"Rp {total_do_unpr:,.0f}")
 
             c1, c2, c3 = st.columns(3)
             with c1:
-                metric_card("Total Dokumen PR", f"{total_pr_count:,}")
+                metric_card("Total Dokumen DO", f"{total_do_count:,}")
             with c2:
-                metric_card("Total Item PR", f"{total_pr_rows:,}")
+                metric_card("Total Item DO", f"{total_do_rows:,}")
             with c3:
                 metric_card("PIC Terbanyak", top_pic_pr)
 
-        pr_summary = summarize_status(df_pr_f, doc_col="No. PR", nominal_col="Nominal")            
+        do_summary = summarize_status_do(df_do_f, doc_col="No. DO", nominal_col="Nominal") 
+
+        with st.container(border=True):
+            st.subheader("🍩 Proporsi Nominal DO per Status")
+            render_status_pie(do_summary, "Persentase Distribusi Nominal DO")        
+
+        with st.container(border=True):
+            st.subheader("🔍 Analisis Status DO")
+
+            if not do_summary.empty:
+                do_summary_display = do_summary.copy()
+                do_summary_display["Total_Amount"] = do_summary_display["Total_Amount"].apply(lambda x: f"Rp {x:,.0f}")
+                st.dataframe(do_summary_display, use_container_width=True, hide_index=True)
+            else:
+                st.info("Tidak ada data status DO untuk ditampilkan.")   
+
+        render_status_bar(do_summary, "Distribusi Nominal DO per Status")
+
+        pic_summary_do = summarize_pic_status_do(df_do_f, "PIC Purchasing", "No. DO")
+        with st.container(border=True):
+            st.subheader("👤 Analisis PIC Purchasing per Status")
+            render_pic_bar(
+                summary_df=pic_summary_do,
+                x_col="PIC Purchasing",
+                y_col="Jumlah_Doc",
+                color_col="Status DO",
+                title="Jumlah DO per PIC Purchasing"
+            )
 
     # =====================================================
     # RIGHT - NPR & PUR
@@ -828,9 +894,9 @@ def main():
 
             c1, c2, c3 = st.columns(3)
             with c1:
-                metric_card("Total Dokumen PR", f"{total_pr_count:,}")
+                metric_card("Total Dokumen PR", f"{total_npr_count:,}")
             with c2:
-                metric_card("Total Item PR", f"{total_pr_rows:,}")
+                metric_card("Total Item PR", f"{total_npr_rows:,}")
             with c3:
                 metric_card("PIC Terbanyak", top_pic_pr)
 
