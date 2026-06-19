@@ -658,7 +658,64 @@ def render_aging_bar(df: pd.DataFrame, doc_col: str, title: str):
     fig.update_traces(textposition="outside")
     st.plotly_chart(fig, use_container_width=True)
 
+def summarize_pic_aging(df: pd.DataFrame, pic_col: str, doc_col: str) -> pd.DataFrame:
+    if df.empty or pic_col not in df.columns or "Aging" not in df.columns or "Status" not in df.columns:
+        return pd.DataFrame(columns=[pic_col, "Avg_Aging", "Total_Doc", "Outstanding_Doc", "Completed_Doc", "Over90Pct"])
 
+    working = assign_unassigned(df, pic_col)
+
+    summary = (
+        working.groupby(pic_col).agg(
+            Avg_Aging=("Aging", "mean"),
+            Total_Doc=(doc_col, "nunique"),
+            Outstanding_Doc=(doc_col, lambda x: (working.loc[x.index, "Status"] != "Complete").sum()),
+            Completed_Doc=(doc_col, lambda x: (working.loc[x.index, "Status"] == "Complete").sum()),
+            Over90Pct=("Aging", lambda x: (x > 90).sum() / len(x) * 100 if len(x) > 0 else 0)
+        )
+        .reset_index()
+    )
+    return summary
+
+def render_pic_aging_bar(summary_df: pd.DataFrame, title: str):
+    if summary_df.empty:
+        st.info("Data aging per PIC tidak tersedia.")
+        return
+    color_continuous_scale=[
+    (0.0, "#56CCF2"),   # hijau muda untuk aging rendah
+    (0.5, "#F2994A"),   # kuning untuk sedang
+    (1.0, "#EB5757")    # merah untuk aging tinggi
+    ]
+
+    fig = px.bar(
+        summary_df,
+        x="PIC Procurement",
+        y="Avg_Aging",
+        text="Avg_Aging",
+        color="Avg_Aging",
+        color_continuous_scale=[
+            (0.0, "#56CCF2"),
+            (0.5, "#F2C94C"),
+            (1.0, "#EB5757")
+    ],
+    title=title
+    )
+    # Tambahkan pengaturan ukuran teks
+    fig.update_traces(
+    texttemplate="%{text:.1f} hari",
+    textposition="outside",
+    textfont=dict(
+        size=20,          # ubah sesuai kebutuhan (misalnya 18 atau 20)
+        color="black",    # warna teks agar kontras
+        family="Arial"    # jenis font agar lebih jelas
+        )
+    )
+
+    fig.update_layout(
+    coloraxis_showscale=False  # sembunyikan color scale di sisi kanan
+    )
+
+
+    st.plotly_chart(fig, use_container_width=True)
 
 
 # =========================================================
@@ -834,6 +891,12 @@ def main():
             st.subheader("⏳ Distribusi Aging PR")
             render_aging_bar(df_pr_f_aging, "No. PR", "Distribusi Dokumen PR berdasarkan Aging")
 
+            pic_aging_summary = summarize_pic_aging(df_pr_f_aging, "PIC Procurement", "No. PR")
+
+        with st.container(border=True):
+            st.subheader("👥 Analisis Kinerja PIC Procurement")
+            #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
+            render_pic_aging_bar(pic_aging_summary, "Rata-rata Aging per PIC Procurement")
 
 
         # Download per PIC PR
