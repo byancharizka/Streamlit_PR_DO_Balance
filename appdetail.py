@@ -718,7 +718,7 @@ def render_aging_bar(df: pd.DataFrame, doc_col: str):
         "61-90 hari": "#FCA27F",     # oranye
         ">90 hari": "#EB5757"  # merah
     },
-    text="Jumlah Transaksi",
+    text="Jumlah Transaksi"
     )
     fig.update_traces(textposition="outside")
     st.plotly_chart(fig, use_container_width=True)
@@ -1037,6 +1037,8 @@ def main():
 
             df_pr_f_aging = calculate_aging(df_pr_f, "transaction_date")
             df_pr_f_aging = categorize_aging(df_pr_f_aging)
+            df_pr_final_f_aging = calculate_aging(df_pr_final_f, "transaction_date")
+            df_pr_final_f_aging = categorize_aging(df_pr_final_f_aging)
 
 
     # =====================================================
@@ -1045,15 +1047,21 @@ def main():
         with col_tengah:
 
             with st.container(border=True):
+                st.subheader("⏳ Distribusi Aging PR")
+                render_aging_bar(df_pr_final_f_aging, "transaction_number")
+                
+            with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging PR Balance")
                 render_aging_bar(df_pr_f_aging, "No. PR")
 
+
                 pic_aging_summary = summarize_pic_aging(df_pr_f_aging, "PIC Procurement", "No. PR")
+                pic_aging_summary_final = summarize_pic_aging(df_pr_final_f_aging, "PIC Procurement", "transaction_number")
 
             with st.container(border=True):
                 st.subheader("👥 Analisis PR Balance - Kinerja PIC Procurement")
                 #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
-                render_pic_aging_bar(pic_aging_summary)
+                render_pic_aging_bar(pic_aging_summary_final)
 
 
     # =====================================================
