@@ -884,6 +884,11 @@ def main():
     df_pr_final = data_new["pr"]
     df_do_final = data_new["do"]
 
+    # Pastikan kolom PIC dan Status sesuai
+    df_pr_final = df_pr_final.rename(columns={
+    "item_pic_procurement_name": "PIC Procurement",
+    "status_description": "Status"
+    })
 
     # ---------- TOP FILTERS ----------
     col_head1, col_head2, col_head3, col_head4, col_head5 = st.columns([1, 1, 1, 1, 1])
@@ -941,8 +946,8 @@ def main():
         #df_pr_final_f = apply_cumulative_filter(df_pr_final_f, report_end_date)
 
             # 🔹 Dataset baru (PR Final) pakai realisasi
-        df_pr_final_f = apply_realization_filter(df_pr_final_f, report_start_date, report_end_date)
-        df_do_final_f = apply_realization_filter(df_do_final_f, report_start_date, report_end_date)
+        df_pr_final_f_real = apply_realization_filter(df_pr_final_f, report_start_date, report_end_date)
+        df_do_final_f_real = apply_realization_filter(df_do_final_f, report_start_date, report_end_date)
 
 
     # ---------- SEARCH FILTER ----------
@@ -960,8 +965,8 @@ def main():
     df_do_f = ensure_columns(df_do_f, ["Nominal", "No. DO", "PIC Purchasing"])
     df_npr_f = ensure_columns(df_npr_f, ["No. Transaksi"])
     df_pur_f = ensure_columns(df_pur_f, ["No. PUR", "PIC", "Status"])
-    df_pr_final_f_real = ensure_columns(df_pr_final_f, ["PIC Procurement", "transaction_number", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
-    df_do_final_f_real = ensure_columns(df_do_final_f, ["transaction_number", "price", "quantity", "discount", "transaction_total", "tax1_value", "tax2_value"])
+    df_pr_final_f_real = ensure_columns(df_pr_final_f_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
+    df_do_final_f_real = ensure_columns(df_do_final_f_real, ["transaction_number", "price", "quantity", "discount", "transaction_total", "tax1_value", "tax2_value"])
 
     df_pr_f = safe_to_numeric(df_pr_f, ["Nominal"])
     df_po_f = safe_to_numeric(df_po_f, ["Nominal"])
@@ -1069,10 +1074,7 @@ def main():
                 st.subheader("🔥 Heatmap PR Balance - Aktivitas PIC Procurement")
                 render_pic_heatmap(df_pr_f, "PIC Procurement", "transaction_date", "No. PR", "Heatmap Aktivitas PIC Procurement per Bulan")
 
-            df_pr_f_aging = calculate_aging(df_pr_f, "transaction_date")
-            df_pr_f_aging = categorize_aging(df_pr_f_aging)
-            df_pr_final_f_real_aging = calculate_aging(df_pr_final_f_real, "transaction_date")
-            df_pr_final_f_real_aging = categorize_aging(df_pr_final_f_real_aging)
+
 
 
 
@@ -1080,6 +1082,12 @@ def main():
     # MID
     # =====================================================
         with col_tengah:
+
+            df_pr_f_aging = calculate_aging(df_pr_f, "transaction_date")
+            df_pr_f_aging = categorize_aging(df_pr_f_aging)
+            # Hitung aging
+            df_pr_final_f_real_aging = calculate_aging(df_pr_final_f_real, "transaction_date")
+            df_pr_final_f_real_aging = categorize_aging(df_pr_final_f_real_aging)
 
             with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging PR")
@@ -1090,8 +1098,9 @@ def main():
                 render_aging_bar(df_pr_f_aging, "No. PR")
 
 
+
                 pic_aging_summary = summarize_pic_aging(df_pr_f_aging, "PIC Procurement", "No. PR")
-                pic_aging_summary_final = summarize_pic_aging(df_pr_final_f_real_aging, "item_PIC_Procurement", "transaction_number")
+                pic_aging_summary_final = summarize_pic_aging(df_pr_final_f_real_aging, "PIC Procurement", "transaction_number")
 
             with st.container(border=True):
                 st.subheader("👥 Analisis PR Balance - Kinerja PIC Procurement")
@@ -1223,8 +1232,12 @@ def main():
 
             df_pr_f_aging = calculate_aging(df_pr_f, "transaction_date")
             df_pr_f_aging = categorize_aging(df_pr_f_aging)
+            #df_pr_final_f_real_aging = calculate_aging(df_pr_final_f_real, "transaction_date")
+            #df_pr_final_f_real_aging = categorize_aging(df_pr_final_f_real_aging)
+            # Hitung aging untuk PR
             df_pr_final_f_real_aging = calculate_aging(df_pr_final_f_real, "transaction_date")
             df_pr_final_f_real_aging = categorize_aging(df_pr_final_f_real_aging)
+
     
     
     # ---------- FOOTER INFO ----------
