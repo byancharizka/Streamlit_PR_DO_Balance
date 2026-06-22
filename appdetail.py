@@ -957,6 +957,7 @@ def main():
     df_do_f = apply_search_filter(df_do_f, search_number, search_status, search_pic)
     df_npr_f = apply_search_filter(df_npr_f, search_number, search_status, search_pic)
     df_pur_f = apply_search_filter(df_pur_f, search_number, search_status, search_pic)
+    df_pr_final_f_real = apply_search_filter(df_pr_final_f_real, search_number, search_status, search_pic)
 
     # ---------- ENSURE IMPORTANT COLUMNS ----------
     df_pr_f = ensure_columns(df_pr_f, ["Nominal", "No. PR", "Status", "PIC Procurement"])
@@ -1089,9 +1090,17 @@ def main():
             df_pr_final_f_real_aging = calculate_aging(df_pr_final_f_real, "transaction_date")
             df_pr_final_f_real_aging = categorize_aging(df_pr_final_f_real_aging)
 
+            # Filter hanya PR yang belum complete
+            #df_pr_final_f_real_outstanding = df_pr_final_f_real[df_pr_final_f_real["Status"] = "Complete"]
+            # Filter hanya PR dengan status Complete atau In Progress
+            df_pr_final_f_real_selected = df_pr_final_f_real_aging[
+            (df_pr_final_f_real["Status"] == "Complete") | 
+            (df_pr_final_f_real["Status"] == "In Progress")
+            ]
+
             with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging PR")
-                render_aging_bar(df_pr_final_f_real_aging, "transaction_number")
+                render_aging_bar(df_pr_final_f_real_selected, "transaction_number")
 
             with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging PR Balance")
@@ -1100,17 +1109,19 @@ def main():
 
 
                 pic_aging_summary = summarize_pic_aging(df_pr_f_aging, "PIC Procurement", "No. PR")
-                pic_aging_summary_final = summarize_pic_aging(df_pr_final_f_real_aging, "PIC Procurement", "transaction_number")
+                pic_aging_summary_final = summarize_pic_aging(df_pr_final_f_real_selected, "PIC Procurement", "transaction_number")
+
+            with st.container(border=True):
+                st.subheader("👥 Analisis PR - Kinerja PIC Procurement")
+                #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
+                render_pic_aging_bar(pic_aging_summary_final)
 
             with st.container(border=True):
                 st.subheader("👥 Analisis PR Balance - Kinerja PIC Procurement")
                 #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
                 render_pic_aging_bar(pic_aging_summary)
 
-            with st.container(border=True):
-                st.subheader("👥 Analisis PR - Kinerja PIC Procurement")
-                #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
-                render_pic_aging_bar(pic_aging_summary_final)
+
 
 
     # =====================================================
