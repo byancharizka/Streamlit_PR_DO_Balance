@@ -229,7 +229,7 @@ def safe_sum(df: pd.DataFrame, col: str) -> float:
         return 0.0
     if col not in df.columns:
         # fallback ke kolom lain yang mirip
-        for alt in ["Nominal", "total", "grand_total", "transaction_total"]:
+        for alt in ["Nominal", "discount", "price"]:
             if alt in df.columns:
                 col = alt
                 break
@@ -272,31 +272,45 @@ def get_api_data_old(endpoint: str, source: str = "outstanding", start_date=None
         st.warning(f"Gagal mengambil data dari endpoint {endpoint} ({source}): {e}")
         return pd.DataFrame()
     
-
 def get_api_data_new(endpoint: str, source: str = "eas", start_date=None, end_date=None):
     base_url = BASE_URL.get(source, BASE_URL["eas"])
     url = f"{base_url}{endpoint}"
     params = {
         "date_start": start_date,
         "date_end": end_date,
-        "token": API_TOKEN
+        "token": API_TOKEN,
+        "page": 1
     }
 
-    try:
+    all_rows = []
+    while True:
         response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         payload = response.json()
 
-        # ✅ Struktur API baru langsung {"data": [...]}
-        if isinstance(payload, dict):
-            rows = payload.get("data", [])
-            if isinstance(rows, list):
-                return pd.DataFrame(rows)
-        return pd.DataFrame()
+        rows = payload.get("data", [])
+        if isinstance(rows, list):
+            for row in rows:
+                items = row.get("items", [])
+                if items:
+                    for item in items:
+                        # aman: prefix item
+                        flat = {**row, **{f"item_{k}": v for k, v in item.items()}}
+                        all_rows.append(flat)
+                else:
+                    all_rows.append(row)
 
-    except Exception as e:
-        st.warning(f"Gagal mengambil data dari endpoint {endpoint} ({source}): {e}")
-        return pd.DataFrame()
+        meta = payload.get("meta", {})
+        if meta.get("current_page", 1) >= meta.get("last_page", 1):
+            break
+        params["page"] += 1
+
+    # ✅ konversi ke DataFrame dan pastikan kolom tanggal jadi datetime
+    df = pd.DataFrame(all_rows)
+    df = safe_to_datetime(df, "transaction_date")
+    return df
+
+
 
 
 
@@ -322,22 +336,19 @@ def load_all_data() -> dict[str, pd.DataFrame]:
     return result
 
 
-def load_all_data_new() -> dict[str, pd.DataFrame]:
+def load_all_data_new(start_date=None, end_date=None) -> dict[str, pd.DataFrame]:
     endpoint_map_new = {
-        #"sq": "sales-quotations",
-        #"so": "sales-orders",
         "do": "delivery-orders",
-        #"si": "sales-invoices",
         "pr": "purchase-requests",
         "po": "purchase-orders",
-        #"grn": "goods-receipt-notes",
     }
 
     result_new = {}
     for key, endpoint in endpoint_map_new.items():
-        df = get_api_data_new(endpoint, source="eas")
+        df = get_api_data_new(endpoint, source="eas", start_date=start_date, end_date=end_date)
         result_new[key] = df
     return result_new
+
 
 
 # =========================================================
@@ -837,8 +848,11 @@ def render_pic_sla_bar(summary_df: pd.DataFrame, title: str):
 # 9) MAIN APP
 # =========================================================
 
+data_new = load_all_data_new(start_date=DEFAULT_START_DATE, end_date=date.today())
+
+
 data_old = load_all_data()
-data_new = load_all_data_new()
+#data_new = load_all_data_new()
 
 def main():
     st.title("SIBIMA Performance Dashboard")
@@ -859,22 +873,21 @@ def main():
     col_head1, col_head2, col_head3, col_head4, col_head5 = st.columns([1, 1, 1, 1, 1])
 
     with col_head1:
-        selected_doc_type = st.selectbox(
-            "Pilih Jenis Dokumen 📑",
-            ["PR", "PO", "GRN", "DO", "NPR", "PUR"]
-    )
-
-
-    with col_head2:
         selected_date_range = st.date_input(
             "Select Date Range 📅",
             value=(DEFAULT_START_DATE, date.today()),
             max_value=date.today()
         )
 
+    with col_head2:
+        selected_doc_type = st.selectbox(
+            "Pilih Jenis Dokumen 📑",
+            ["PR", "PO", "GRN", "DO", "NPR", "PUR"]
+    )
+
     with col_head3:
         search_number = st.text_input(
-            "Cari Nomor Dokumen 🔍",
+            "Cari Nomor Transaksi 🔍",
             placeholder="No. PR / No. DO / No. NPR / No. PUR"
         )
 
@@ -925,13 +938,15 @@ def main():
     df_do_f = ensure_columns(df_do_f, ["Nominal", "No. DO", "PIC Purchasing"])
     df_npr_f = ensure_columns(df_npr_f, ["No. Transaksi"])
     df_pur_f = ensure_columns(df_pur_f, ["No. PUR", "PIC", "Status"])
-    df_pr_final_f = ensure_columns(df_pr_final_f, ["No. PR", "transaction_total"])
+    df_pr_final_f = ensure_columns(df_pr_final_f, ["No. PR", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
 
     df_pr_f = safe_to_numeric(df_pr_f, ["Nominal"])
     df_po_f = safe_to_numeric(df_po_f, ["Nominal"])
     df_grn_f = safe_to_numeric(df_grn_f, ["Nominal"])
     df_do_f = safe_to_numeric(df_do_f, ["Nominal"])
-    df_pr_final_f = safe_to_numeric(df_pr_final_f, ["transaction_total"])
+    df_pr_final_f = safe_to_numeric(df_pr_final_f, ["price", "discount", "quantity", "tax1_percentage", "tax2_percentage"])
+    df_pr_final_f = safe_to_numeric(df_pr_final_f, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
+    
     # ---------- METRICS ----------
     total_pr_unpr = safe_sum(df_pr_f, "Nominal")
     total_po_unpr = safe_sum(df_po_f, "Nominal")
@@ -939,7 +954,16 @@ def main():
     total_do_unpr = safe_sum(df_do_f, "Nominal")
     total_pr = safe_sum(df_pr_final_f, "transaction_total")
 
-    total_pr_count = safe_unique_count(df_pr_final_f, "No. PR")
+
+    df_pr_final_f["disc_per_unit"] = df_pr_final_f["item_price"] * (df_pr_final_f["item_discount"] / 100)
+    df_pr_final_f["tax_unit"] = (df_pr_final_f["item_price"] - df_pr_final_f["disc_per_unit"]) * (df_pr_final_f["item_tax1_percentage"] / 100)
+    df_pr_final_f["net_price_unit"] = df_pr_final_f["item_price"] - df_pr_final_f["disc_per_unit"] + df_pr_final_f["tax_unit"]
+    df_pr_final_f["total_pr_row"] = df_pr_final_f["item_quantity"] * df_pr_final_f["net_price_unit"]
+    total_pr = df_pr_final_f["total_pr_row"].sum()
+
+
+
+    total_pr_count = safe_unique_count(df_pr_final_f, "transaction_number")
     total_pr_balance_count = safe_unique_count(df_pr_f, "No. PR")
     total_pr_rows = len(df_pr_final_f)
     total_pr_balance_rows = len(df_pr_f)
@@ -976,6 +1000,11 @@ def main():
                     metric_card("Total Transaksi PR", f"{total_pr_count:,}")
                 with c2:
                     metric_card("Total Transaksi PR Balance", f"{total_pr_balance_count:,}")
+
+
+                #st.write("Kolom:", df_pr_final_f.columns)
+                #st.write("Contoh tanggal:", df_pr_final_f["transaction_date"].head())
+                #st.write(df_pr_final_f[["item_price", "item_discount", "item_quantity"]].head())
 
                 c1, c2, c3 = st.columns(3)
                 with c1:
