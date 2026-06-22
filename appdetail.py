@@ -333,7 +333,7 @@ def load_all_data() -> dict[str, pd.DataFrame]:
         "grn": ("grn-balance", {"Tgl. GRN": "transaction_date"}),
         "do": ("do-balance", {"Tgl. DO": "transaction_date"}),
         "npr": ("outstanding-npr", {"Tanggal": "transaction_date"}),
-        "pur": ("outstanding-pur", {"Tanggal": "transaction_date"}),
+        "pur": ("outstanding-pur", {"Tanggal": "transaction_date"})
     }
 
     result = {}
@@ -884,6 +884,7 @@ def main():
     df_pr_final = data_new["pr"]
     df_do_final = data_new["do"]
 
+
     # ---------- TOP FILTERS ----------
     col_head1, col_head2, col_head3, col_head4, col_head5 = st.columns([1, 1, 1, 1, 1])
 
@@ -959,7 +960,7 @@ def main():
     df_do_f = ensure_columns(df_do_f, ["Nominal", "No. DO", "PIC Purchasing"])
     df_npr_f = ensure_columns(df_npr_f, ["No. Transaksi"])
     df_pur_f = ensure_columns(df_pur_f, ["No. PUR", "PIC", "Status"])
-    df_pr_final_f_real = ensure_columns(df_pr_final_f, ["transaction_number", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
+    df_pr_final_f_real = ensure_columns(df_pr_final_f, ["PIC Procurement", "transaction_number", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
     df_do_final_f_real = ensure_columns(df_do_final_f, ["transaction_number", "price", "quantity", "discount", "transaction_total", "tax1_value", "tax2_value"])
 
     df_pr_f = safe_to_numeric(df_pr_f, ["Nominal"])
@@ -976,6 +977,8 @@ def main():
     total_grn_unpr = safe_sum(df_grn_f, "Nominal")
     total_do_unpr = safe_sum(df_do_f, "Nominal")
     #total_pr = safe_sum(df_pr_final_f_real, "transaction_total")
+
+    df_pr_final_f_real = normalize_text_columns(df_pr_final_f_real, ["item_PIC_Procurement"])
 
 
     df_pr_final_f_real["disc_per_unit"] = df_pr_final_f_real["item_price"] * (df_pr_final_f_real["item_discount"] / 100)
@@ -1045,6 +1048,7 @@ def main():
                 with c3:
                     metric_card("PIC Terbanyak", top_pic_pr)
 
+
                 pr_summary = summarize_status(df_pr_f, doc_col="No. PR", nominal_col="Nominal")
 
                 with st.container(border=True):
@@ -1070,65 +1074,10 @@ def main():
             df_pr_final_f_real_aging = calculate_aging(df_pr_final_f_real, "transaction_date")
             df_pr_final_f_real_aging = categorize_aging(df_pr_final_f_real_aging)
 
-    # ---------- DO ----------
-    if selected_doc_type == "DO":
-        with col_kiri:
-            with st.container(border=True):
-                st.subheader("📊 Detail DO")
-
-                c1, c2 = st.columns(2)
-                with c1:
-                    metric_card("Total DO", f"Rp {total_do:,.0f}")
-                with c2:
-                    metric_card("DO Balance", f"Rp {total_do_unpr:,.0f}")
-
-                c1, c2 = st.columns(2)
-                with c1:
-                    metric_card("Total Transaksi DO", f"{total_do_count:,}")
-                with c2:
-                    metric_card("Total Transaksi DO Balance", f"{total_do_balance_count:,}")
-
-
-                #st.write("Kolom:", df_pr_final_f.columns)
-                #st.write("Contoh tanggal:", df_pr_final_f["transaction_date"].head())
-                #st.write(df_pr_final_f[["item_price", "item_discount", "item_quantity"]].head())
-
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    metric_card("Total Item DO", f"{total_do_rows:,}")
-                with c2:
-                    metric_card("Total Item DO Balance", total_do_balance_rows)
-                with c3:
-                    metric_card("PIC Terbanyak", top_pic_do)
-
-                do_summary = summarize_status(df_do_f, doc_col="No. DO", nominal_col="Nominal")
-
-                with st.container(border=True):
-                    st.subheader("🍩 Proporsi Nominal DO Balance per Status")
-                    render_status_pie(do_summary, "Persentase Distribusi Nominal DO Balance")
-
-            pic_summary_do = summarize_pic_status(df_do_f, "PIC Procurement", "No. DO")
-            with st.container(border=True):
-                st.subheader("👤 Analisis Transaksi DO Balance per PIC Procurement & per Status")
-                render_pic_bar(
-                    summary_df=pic_summary_do,
-                    x_col="PIC Procurement",
-                    y_col="Jumlah_Doc",
-                    color_col="Status DO",
-                )
-
-            with st.container(border=True):
-                st.subheader("🔥 Heatmap DO Balance - Aktivitas PIC Procurement")
-                render_pic_heatmap(df_do_f, "PIC Procurement", "transaction_date", "No. DO", "Heatmap Aktivitas PIC Procurement per Bulan")
-
-            df_pr_f_aging = calculate_aging(df_pr_f, "transaction_date")
-            df_pr_f_aging = categorize_aging(df_pr_f_aging)
-            df_pr_final_f_real_aging = calculate_aging(df_pr_final_f_real, "transaction_date")
-            df_pr_final_f_real_aging = categorize_aging(df_pr_final_f_real_aging)
 
 
     # =====================================================
-    # MID - DO
+    # MID
     # =====================================================
         with col_tengah:
 
@@ -1142,7 +1091,7 @@ def main():
 
 
                 pic_aging_summary = summarize_pic_aging(df_pr_f_aging, "PIC Procurement", "No. PR")
-                pic_aging_summary_final = summarize_pic_aging(df_pr_final_f_real_aging, "PIC Procurement", "transaction_number")
+                pic_aging_summary_final = summarize_pic_aging(df_pr_final_f_real_aging, "item_PIC_Procurement", "transaction_number")
 
             with st.container(border=True):
                 st.subheader("👥 Analisis PR Balance - Kinerja PIC Procurement")
@@ -1220,6 +1169,64 @@ def main():
                         st.warning("Tidak ada data yang sesuai dengan filter yang dipilih.")
                 else:
                     st.info("Data PR tidak tersedia untuk export.")
+    
+    # ---------- DO ----------
+    if selected_doc_type == "DO":
+        with col_kiri:
+            with st.container(border=True):
+                st.subheader("📊 Detail DO")
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    metric_card("Total DO", f"Rp {total_do:,.0f}")
+                with c2:
+                    metric_card("DO Balance", f"Rp {total_do_unpr:,.0f}")
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    metric_card("Total Transaksi DO", f"{total_do_count:,}")
+                with c2:
+                    metric_card("Total Transaksi DO Balance", f"{total_do_balance_count:,}")
+
+
+                #st.write("Kolom:", df_pr_final_f.columns)
+                #st.write("Contoh tanggal:", df_pr_final_f["transaction_date"].head())
+                #st.write(df_pr_final_f[["item_price", "item_discount", "item_quantity"]].head())
+
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    metric_card("Total Item DO", f"{total_do_rows:,}")
+                with c2:
+                    metric_card("Total Item DO Balance", total_do_balance_rows)
+                with c3:
+                    metric_card("PIC Terbanyak", top_pic_do)
+
+                do_summary = summarize_status(df_do_f, doc_col="No. DO", nominal_col="Nominal")
+
+                with st.container(border=True):
+                    st.subheader("🍩 Proporsi Nominal DO Balance per Status")
+                    render_status_pie(do_summary, "Persentase Distribusi Nominal DO Balance")
+
+            pic_summary_do = summarize_pic_status(df_do_f, "PIC Procurement", "No. DO")
+            with st.container(border=True):
+                st.subheader("👤 Analisis Transaksi DO Balance per PIC Procurement & per Status")
+                render_pic_bar(
+                    summary_df=pic_summary_do,
+                    x_col="PIC Procurement",
+                    y_col="Jumlah_Doc",
+                    color_col="Status DO",
+                )
+
+            with st.container(border=True):
+                st.subheader("🔥 Heatmap DO Balance - Aktivitas PIC Procurement")
+                render_pic_heatmap(df_do_f, "PIC Procurement", "transaction_date", "No. DO", "Heatmap Aktivitas PIC Procurement per Bulan")
+
+            df_pr_f_aging = calculate_aging(df_pr_f, "transaction_date")
+            df_pr_f_aging = categorize_aging(df_pr_f_aging)
+            df_pr_final_f_real_aging = calculate_aging(df_pr_final_f_real, "transaction_date")
+            df_pr_final_f_real_aging = categorize_aging(df_pr_final_f_real_aging)
+    
+    
     # ---------- FOOTER INFO ----------
     with st.expander("ℹ️ Informasi Teknis Dashboard"):
         selected_report_date = (
