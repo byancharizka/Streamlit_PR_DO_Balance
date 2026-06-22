@@ -370,6 +370,27 @@ def apply_cumulative_filter(df: pd.DataFrame, end_date_val) -> pd.DataFrame:
         (working["transaction_date"] <= upper_limit)
     ].copy()
 
+def apply_realization_filter(df: pd.DataFrame, start_date_val, end_date_val) -> pd.DataFrame:
+    """
+    Ambil data hanya dalam rentang tanggal tertentu (start_date sampai end_date).
+    Contoh: 1 Mei 2026 s/d 31 Mei 2026.
+    """
+    if df.empty or "transaction_date" not in df.columns:
+        return df.copy()
+
+    working = df.copy()
+    working = safe_to_datetime(working, "transaction_date")
+
+    lower_limit = pd.to_datetime(start_date_val).replace(hour=0, minute=0, second=0)
+    upper_limit = pd.to_datetime(end_date_val).replace(hour=23, minute=59, second=59)
+
+    return working[
+        working["transaction_date"].notna() &
+        (working["transaction_date"] >= lower_limit) &
+        (working["transaction_date"] <= upper_limit)
+    ].copy()
+
+
 
 def apply_search_filter(
     df: pd.DataFrame,
@@ -908,16 +929,20 @@ def main():
     df_pur_f = df_pur.copy()
     df_pr_final_f = df_pr_final.copy()
 
-    # ---------- DATE FILTER (CUMULATIVE) ----------
+    # ---------- DATE FILTER ----------
     if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) == 2:
-        report_end_date = selected_date_range[1]
+        report_start_date, report_end_date = selected_date_range
         df_pr_f = apply_cumulative_filter(df_pr_f, report_end_date)
         df_po_f = apply_cumulative_filter(df_po_f, report_end_date)
         df_grn_f = apply_cumulative_filter(df_grn_f, report_end_date)
         df_do_f = apply_cumulative_filter(df_do_f, report_end_date)
         df_npr_f = apply_cumulative_filter(df_npr_f, report_end_date)
         df_pur_f = apply_cumulative_filter(df_pur_f, report_end_date)
-        df_pr_final_f = apply_cumulative_filter(df_pr_final_f, report_end_date)
+        #df_pr_final_f = apply_cumulative_filter(df_pr_final_f, report_end_date)
+
+            # 🔹 Dataset baru (PR Final) pakai realisasi
+        df_pr_final_f = apply_realization_filter(df_pr_final_f, report_start_date, report_end_date)
+
 
     # ---------- SEARCH FILTER ----------
     df_pr_f = apply_search_filter(df_pr_f, search_number, search_status, search_pic)
@@ -934,34 +959,34 @@ def main():
     df_do_f = ensure_columns(df_do_f, ["Nominal", "No. DO", "PIC Purchasing"])
     df_npr_f = ensure_columns(df_npr_f, ["No. Transaksi"])
     df_pur_f = ensure_columns(df_pur_f, ["No. PUR", "PIC", "Status"])
-    df_pr_final_f = ensure_columns(df_pr_final_f, ["No. PR", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
+    df_pr_final_f_real = ensure_columns(df_pr_final_f, ["No. PR", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
 
     df_pr_f = safe_to_numeric(df_pr_f, ["Nominal"])
     df_po_f = safe_to_numeric(df_po_f, ["Nominal"])
     df_grn_f = safe_to_numeric(df_grn_f, ["Nominal"])
     df_do_f = safe_to_numeric(df_do_f, ["Nominal"])
-    df_pr_final_f = safe_to_numeric(df_pr_final_f, ["price", "discount", "quantity", "tax1_percentage", "tax2_percentage"])
-    df_pr_final_f = safe_to_numeric(df_pr_final_f, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
+    df_pr_final_f_real = safe_to_numeric(df_pr_final_f_real, ["price", "discount", "quantity", "tax1_percentage", "tax2_percentage"])
+    df_pr_final_f_real= safe_to_numeric(df_pr_final_f_real, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
     
     # ---------- METRICS ----------
     total_pr_unpr = safe_sum(df_pr_f, "Nominal")
     total_po_unpr = safe_sum(df_po_f, "Nominal")
     total_grn_unpr = safe_sum(df_grn_f, "Nominal")
     total_do_unpr = safe_sum(df_do_f, "Nominal")
-    total_pr = safe_sum(df_pr_final_f, "transaction_total")
+    total_pr = safe_sum(df_pr_final_f_real, "transaction_total")
 
 
-    df_pr_final_f["disc_per_unit"] = df_pr_final_f["item_price"] * (df_pr_final_f["item_discount"] / 100)
-    df_pr_final_f["tax_unit"] = (df_pr_final_f["item_price"] - df_pr_final_f["disc_per_unit"]) * (df_pr_final_f["item_tax1_percentage"] / 100)
-    df_pr_final_f["net_price_unit"] = df_pr_final_f["item_price"] - df_pr_final_f["disc_per_unit"] + df_pr_final_f["tax_unit"]
-    df_pr_final_f["total_pr_row"] = df_pr_final_f["item_quantity"] * df_pr_final_f["net_price_unit"]
-    total_pr = df_pr_final_f["total_pr_row"].sum()
+    df_pr_final_f_real["disc_per_unit"] = df_pr_final_f_real["item_price"] * (df_pr_final_f_real["item_discount"] / 100)
+    df_pr_final_f_real["tax_unit"] = (df_pr_final_f_real["item_price"] - df_pr_final_f_real["disc_per_unit"]) * (df_pr_final_f_real["item_tax1_percentage"] / 100)
+    df_pr_final_f_real["net_price_unit"] = df_pr_final_f_real["item_price"] - df_pr_final_f_real["disc_per_unit"] + df_pr_final_f_real["tax_unit"]
+    df_pr_final_f_real["total_pr_row"] = df_pr_final_f_real["item_quantity"] * df_pr_final_f_real["net_price_unit"]
+    total_pr = df_pr_final_f_real["total_pr_row"].sum()
 
 
 
-    total_pr_count = safe_unique_count(df_pr_final_f, "transaction_number")
+    total_pr_count = safe_unique_count(df_pr_final_f_real, "transaction_number")
     total_pr_balance_count = safe_unique_count(df_pr_f, "No. PR")
-    total_pr_rows = len(df_pr_final_f)
+    total_pr_rows = len(df_pr_final_f_real)
     total_pr_balance_rows = len(df_pr_f)
     total_do_count = safe_unique_count(df_do_f, "No. DO")
     total_do_rows = len(df_do_f)
@@ -1037,8 +1062,8 @@ def main():
 
             df_pr_f_aging = calculate_aging(df_pr_f, "transaction_date")
             df_pr_f_aging = categorize_aging(df_pr_f_aging)
-            df_pr_final_f_aging = calculate_aging(df_pr_final_f, "transaction_date")
-            df_pr_final_f_aging = categorize_aging(df_pr_final_f_aging)
+            df_pr_final_f_real_aging = calculate_aging(df_pr_final_f_real, "transaction_date")
+            df_pr_final_f_real_aging = categorize_aging(df_pr_final_f_real_aging)
 
 
     # =====================================================
@@ -1048,7 +1073,7 @@ def main():
 
             with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging PR")
-                render_aging_bar(df_pr_final_f_aging, "transaction_number")
+                render_aging_bar(df_pr_final_f_real_aging, "transaction_number")
 
             with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging PR Balance")
@@ -1056,7 +1081,7 @@ def main():
 
 
                 pic_aging_summary = summarize_pic_aging(df_pr_f_aging, "PIC Procurement", "No. PR")
-                pic_aging_summary_final = summarize_pic_aging(df_pr_final_f_aging, "PIC Procurement", "transaction_number")
+                pic_aging_summary_final = summarize_pic_aging(df_pr_final_f_real_aging, "PIC Procurement", "transaction_number")
 
             with st.container(border=True):
                 st.subheader("👥 Analisis PR Balance - Kinerja PIC Procurement")
@@ -1075,7 +1100,7 @@ def main():
     with col_kanan:
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance PR")
-                render_sla_gauge(df_pr_final_f_aging, threshold=30, title="SLA Compliance PR")
+                render_sla_gauge(df_pr_final_f_real_aging, threshold=30, title="SLA Compliance PR")
 
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance PR Balance")
