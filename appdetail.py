@@ -37,11 +37,19 @@ TODAY = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 DEFAULT_START_DATE = date(2026, 1, 1)
 REQUEST_TIMEOUT = int(os.getenv("SIBIMA_API_TIMEOUT", "30"))
 
-# API TANPA TOKEN
-BASE_URL = "https://eas.sibima.id/api/dashboard/"
+BASE_URL = {
+    "outstanding": "https://eas.sibima.id/api/dashboard/",
+    "eas": "https://eas.sibima.id/api/",
+    "brp": "https://brp.sibima.id/api/"
+}
 
-if not BASE_URL.endswith("/"):
-    BASE_URL += "/"
+API_TOKEN = os.getenv("SIBIMA_API_TOKEN", "44b71f38c25ddd02cd31b409f85e9f3aca4f337f02f2fa90237afc2a0736")
+
+# Pastikan setiap URL diakhiri dengan "/"
+for key in BASE_URL:
+    if not BASE_URL[key].endswith("/"):
+        BASE_URL[key] += "/"
+
 
 # =========================================================
 # 4) CSS CUSTOM
@@ -226,63 +234,55 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Data") -> bytes:
 # 6) API FETCHING
 # =========================================================
 @st.cache_data(ttl=600, show_spinner=False)
-def get_api_data(endpoint: str, start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
-    """
-    Ambil data dari endpoint dashboard API.
-    Robust terhadap:
-    - network timeout
-    - response non-200
-    - format JSON yang tidak sesuai
-    """
-    actual_start = start_date if start_date else DEFAULT_START_DATE.strftime("%Y-%m-%d")
-    actual_end = end_date if end_date else TODAY
-
-    url = f"{BASE_URL}{endpoint}"
-    params = {
-        "date_start": actual_start,
-        "date_end": actual_end
-    }
+@st.cache_data(ttl=600, show_spinner=False)
+def get_api_data_old(endpoint: str, source: str = "outstanding", start_date=None, end_date=None):
+    base_url = BASE_URL.get(source, BASE_URL["outstanding"])
+    url = f"{base_url}{endpoint}"
+    params = {"date_start": start_date, "date_end": end_date}
 
     try:
-        logger.info("Fetching endpoint=%s params=%s", endpoint, params)
-        response = requests.get(
-            url,
-            params=params,
-            timeout=REQUEST_TIMEOUT
-        )
+        logger.info("Fetching endpoint=%s from source=%s params=%s", endpoint, source, params)
+        response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
-
         payload = response.json()
 
-        # Expected format: {"data": {"data": [...]}}
         if isinstance(payload, dict):
             data_layer = payload.get("data", {})
             if isinstance(data_layer, dict):
                 rows = data_layer.get("data", [])
                 if isinstance(rows, list):
                     return pd.DataFrame(rows)
-
-        logger.warning("Unexpected JSON structure for endpoint=%s", endpoint)
-        return pd.DataFrame()
-
-    except requests.Timeout:
-        logger.exception("Timeout when fetching endpoint=%s", endpoint)
-        st.warning(f"Timeout saat mengambil data dari endpoint: {endpoint}")
-        return pd.DataFrame()
-
-    except requests.RequestException as e:
-        logger.exception("Request error for endpoint=%s", endpoint)
-        st.warning(f"Gagal mengambil data dari endpoint {endpoint}: {e}")
-        return pd.DataFrame()
-
-    except ValueError:
-        logger.exception("Invalid JSON for endpoint=%s", endpoint)
-        st.warning(f"Response bukan JSON valid untuk endpoint {endpoint}")
         return pd.DataFrame()
 
     except Exception as e:
-        logger.exception("Unexpected error for endpoint=%s", endpoint)
-        st.warning(f"Error tidak terduga saat mengambil {endpoint}: {e}")
+        st.warning(f"Gagal mengambil data dari endpoint {endpoint} ({source}): {e}")
+        return pd.DataFrame()
+    
+
+def get_api_data_new(endpoint: str, source: str = "eas", start_date=None, end_date=None):
+    base_url = BASE_URL.get(source, BASE_URL["eas"])
+    url = f"{base_url}{endpoint}"
+    params = {
+        "date_start": start_date,
+        "date_end": end_date,
+        "token": API_TOKEN
+    }
+    try:
+        logger.info("Fetching endpoint=%s from source=%s params=%s", endpoint, source, params)
+        response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        payload = response.json()
+
+        if isinstance(payload, dict):
+            data_layer = payload.get("data", {})
+            if isinstance(data_layer, dict):
+                rows = data_layer.get("data", [])
+                if isinstance(rows, list):
+                    return pd.DataFrame(rows)
+        return pd.DataFrame()
+
+    except Exception as e:
+        st.warning(f"Gagal mengambil data dari endpoint {endpoint} ({source}): {e}")
         return pd.DataFrame()
 
 
@@ -298,12 +298,32 @@ def load_all_data() -> dict[str, pd.DataFrame]:
 
     result = {}
     for key, (endpoint, rename_map) in endpoint_map.items():
-        df = get_api_data(endpoint)
+        # 🔹 gunakan fungsi yang benar
+        df = get_api_data_old(endpoint, source="outstanding")
+
         if not df.empty:
             df = df.rename(columns=rename_map)
         result[key] = df
 
     return result
+
+
+def load_all_data_new() -> dict[str, pd.DataFrame]:
+    endpoint_map_new = {
+        "sq": "sales-quotations",
+        "so": "sales-orders",
+        "do": "delivery-orders",
+        "si": "sales-invoices",
+        "pr": "purchase-requests",
+        "po": "purchase-orders",
+        "grn": "goods-receipt-notes",
+    }
+
+    result_new = {}
+    for key, endpoint in endpoint_map_new.items():
+        df = get_api_data_new(endpoint, source="eas")
+        result_new[key] = df
+    return result_new
 
 
 # =========================================================
@@ -802,6 +822,10 @@ def render_pic_sla_bar(summary_df: pd.DataFrame, title: str):
 # =========================================================
 # 9) MAIN APP
 # =========================================================
+
+data_old = load_all_data()
+data_new = load_all_data_new()
+
 def main():
     st.title("SIBIMA Performance Dashboard")
 
@@ -809,12 +833,13 @@ def main():
     with st.spinner("Mengambil data dashboard..."):
         data = load_all_data()
 
-    df_pr = data["pr"]
-    df_po = data["po"]
-    df_grn = data["grn"]
-    df_do = data["do"]
-    df_npr = data["npr"]
-    df_pur = data["pur"]
+    df_pr = data_old["pr"]
+    df_po = data_old["po"]
+    df_grn = data_old["grn"]
+    df_do = data_old["do"]
+    df_npr = data_old["npr"]
+    df_pur = data_old["pur"]
+    df_pr_final = data_new["pr"]
 
     # ---------- TOP FILTERS ----------
     col_head1, col_head2, col_head3, col_head4, col_head5 = st.columns([1, 1, 1, 1, 1])
@@ -858,6 +883,7 @@ def main():
     df_do_f = df_do.copy()
     df_npr_f = df_npr.copy()
     df_pur_f = df_pur.copy()
+    df_pr_final_f = df_pr_f.copy()
 
     # ---------- DATE FILTER (CUMULATIVE) ----------
     if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) == 2:
@@ -868,6 +894,7 @@ def main():
         df_do_f = apply_cumulative_filter(df_do_f, report_end_date)
         df_npr_f = apply_cumulative_filter(df_npr_f, report_end_date)
         df_pur_f = apply_cumulative_filter(df_pur_f, report_end_date)
+        df_pr_final_f = apply_cumulative_filter(df_pr_f, report_end_date)
 
     # ---------- SEARCH FILTER ----------
     df_pr_f = apply_search_filter(df_pr_f, search_number, search_status, search_pic)
@@ -884,17 +911,19 @@ def main():
     df_do_f = ensure_columns(df_do_f, ["Nominal", "No. DO", "PIC Purchasing"])
     df_npr_f = ensure_columns(df_npr_f, ["No. Transaksi"])
     df_pur_f = ensure_columns(df_pur_f, ["No. PUR", "PIC", "Status"])
+    df_pr_final_f = ensure_columns(df_pr_final_f, ["transaction_total"])
 
     df_pr_f = safe_to_numeric(df_pr_f, ["Nominal"])
     df_po_f = safe_to_numeric(df_po_f, ["Nominal"])
     df_grn_f = safe_to_numeric(df_grn_f, ["Nominal"])
     df_do_f = safe_to_numeric(df_do_f, ["Nominal"])
-
+    df_pr_final_f = safe_to_numeric(df_pr_final_f, ["transaction_total"])
     # ---------- METRICS ----------
     total_pr_unpr = safe_sum(df_pr_f, "Nominal")
     total_po_unpr = safe_sum(df_po_f, "Nominal")
     total_grn_unpr = safe_sum(df_grn_f, "Nominal")
     total_do_unpr = safe_sum(df_do_f, "Nominal")
+    total_pr = safe_sum(df_pr_final_f, "transaction_total")
 
     total_pr_count = safe_unique_count(df_pr_f, "No. PR")
     total_pr_rows = len(df_pr_f)
@@ -922,9 +951,9 @@ def main():
 
                 c1, c2 = st.columns(2)
                 with c1:
-                    metric_card("PR Balance", f"Rp {total_pr_unpr:,.0f}")
+                    metric_card("Total PR", f"Rp {total_pr:,.0f}")
                 with c2:
-                    metric_card("PO Balance", f"Rp {total_po_unpr:,.0f}")
+                    metric_card("PR Balance", f"Rp {total_pr_unpr:,.0f}")
 
                 c1, c2, c3 = st.columns(3)
                 with c1:
