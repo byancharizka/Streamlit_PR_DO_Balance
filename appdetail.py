@@ -567,7 +567,7 @@ def render_status_bar(summary_df: pd.DataFrame, title: str):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_pic_bar(summary_df: pd.DataFrame, x_col: str, y_col: str, color_col: str | None, title: str):
+def render_pic_bar(summary_df: pd.DataFrame, x_col: str, y_col: str, color_col: str | None):
     if summary_df.empty:
         st.info("Data PIC tidak tersedia.")
         return
@@ -609,7 +609,6 @@ def render_pic_bar(summary_df: pd.DataFrame, x_col: str, y_col: str, color_col: 
     fig.update_layout(
         uniformtext_mode="hide",
         uniformtext_minsize=8,
-        title=title
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -697,7 +696,7 @@ def categorize_aging(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def render_aging_bar(df: pd.DataFrame, doc_col: str, title: str):
+def render_aging_bar(df: pd.DataFrame, doc_col: str):
     if df.empty or "Aging Category" not in df.columns:
         st.info("Data aging tidak tersedia.")
         return
@@ -720,7 +719,6 @@ def render_aging_bar(df: pd.DataFrame, doc_col: str, title: str):
         ">90 hari": "#EB5757"  # merah
     },
     text="Jumlah Transaksi",
-    title=title
     )
     fig.update_traces(textposition="outside")
     st.plotly_chart(fig, use_container_width=True)
@@ -743,7 +741,7 @@ def summarize_pic_aging(df: pd.DataFrame, pic_col: str, doc_col: str) -> pd.Data
     )
     return summary
 
-def render_pic_aging_bar(summary_df: pd.DataFrame, title: str):
+def render_pic_aging_bar(summary_df: pd.DataFrame):
     if summary_df.empty:
         st.info("Data aging per PIC tidak tersedia.")
         return
@@ -764,7 +762,6 @@ def render_pic_aging_bar(summary_df: pd.DataFrame, title: str):
             (0.5, "#F2C94C"),
             (1.0, "#EB5757")
     ],
-    title=title
     )
     # Tambahkan pengaturan ukuran teks
     fig.update_traces(
@@ -822,7 +819,7 @@ def summarize_pic_sla(df: pd.DataFrame, pic_col: str, doc_col: str, threshold: i
     )
     return summary
 
-def render_pic_sla_bar(summary_df: pd.DataFrame, title: str):
+def render_pic_sla_bar(summary_df: pd.DataFrame):
     if summary_df.empty:
         st.info("Data SLA per PIC tidak tersedia.")
         return
@@ -834,7 +831,6 @@ def render_pic_sla_bar(summary_df: pd.DataFrame, title: str):
         text="SLA_Compliance",
         color="SLA_Compliance",
         color_continuous_scale=["#EB5757", "#F2C94C", "#6FCF97"],  # merah → kuning → hijau
-        title=title
     )
     fig.update_traces(
         texttemplate="%{text:.1f}%",
@@ -987,7 +983,7 @@ def main():
     if selected_doc_type == "PR":
         with col_kiri:
             with st.container(border=True):
-                st.subheader("📊 Detail Outstanding PR")
+                st.subheader("📊 Detail PR")
 
                 c1, c2 = st.columns(2)
                 with c1:
@@ -1017,22 +1013,21 @@ def main():
                 pr_summary = summarize_status(df_pr_f, doc_col="No. PR", nominal_col="Nominal")
 
                 with st.container(border=True):
-                    st.subheader("🍩 Proporsi Nominal PR per Status")
-                    render_status_pie(pr_summary, "Persentase Distribusi Nominal PR")
+                    st.subheader("🍩 Proporsi Nominal PR Balance per Status")
+                    render_status_pie(pr_summary, "Persentase Distribusi Nominal PR Balance")
 
             pic_summary_pr = summarize_pic_status(df_pr_f, "PIC Procurement", "No. PR")
             with st.container(border=True):
-                st.subheader("👤 Analisis PIC Procurement per Status")
+                st.subheader("👤 Analisis Transaksi PR Balance per PIC Procurement & per Status")
                 render_pic_bar(
                     summary_df=pic_summary_pr,
                     x_col="PIC Procurement",
                     y_col="Jumlah_Doc",
                     color_col="Status",
-                    title="Jumlah PR per PIC Procurement"
                 )
 
             with st.container(border=True):
-                st.subheader("🔥 Heatmap Aktivitas PIC Procurement")
+                st.subheader("🔥 Heatmap PR Balance - Aktivitas PIC Procurement")
                 render_pic_heatmap(
                     df_pr_f,
                     pic_col="PIC Procurement",
@@ -1050,15 +1045,15 @@ def main():
         with col_tengah:
 
             with st.container(border=True):
-                st.subheader("⏳ Distribusi Aging PR")
-                render_aging_bar(df_pr_f_aging, "No. PR", "Distribusi PR Balance berdasarkan Aging")
+                st.subheader("⏳ Distribusi Aging PR Balance")
+                render_aging_bar(df_pr_f_aging, "No. PR")
 
                 pic_aging_summary = summarize_pic_aging(df_pr_f_aging, "PIC Procurement", "No. PR")
 
             with st.container(border=True):
-                st.subheader("👥 Analisis Kinerja PIC Procurement")
+                st.subheader("👥 Analisis PR Balance - Kinerja PIC Procurement")
                 #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
-                render_pic_aging_bar(pic_aging_summary, "Rata-rata Aging per PIC Procurement")
+                render_pic_aging_bar(pic_aging_summary)
 
 
     # =====================================================
@@ -1067,14 +1062,14 @@ def main():
     with col_kanan:
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance PR")
-                render_sla_gauge(df_pr_f_aging, threshold=30, title="SLA Compliance PR")
+                render_sla_gauge(df_pr_f_aging, threshold=30, title="SLA Compliance PR Balance")
 
             pic_sla_summary = summarize_pic_sla(df_pr_f_aging, "PIC Procurement", "No. PR", threshold=30)
 
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance per PIC Procurement")
                 #st.dataframe(pic_sla_summary, use_container_width=True, hide_index=True)
-                render_pic_sla_bar(pic_sla_summary, "Persentase SLA Compliance per PIC Procurement (≤30 hari)")
+                render_pic_sla_bar(pic_sla_summary)
 
 
             # Download per PIC PR
