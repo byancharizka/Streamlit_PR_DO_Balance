@@ -1049,7 +1049,7 @@ def main():
             with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging PR")
                 render_aging_bar(df_pr_final_f_aging, "transaction_number")
-                
+
             with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging PR Balance")
                 render_aging_bar(df_pr_f_aging, "No. PR")
@@ -1057,6 +1057,11 @@ def main():
 
                 pic_aging_summary = summarize_pic_aging(df_pr_f_aging, "PIC Procurement", "No. PR")
                 pic_aging_summary_final = summarize_pic_aging(df_pr_final_f_aging, "PIC Procurement", "transaction_number")
+
+            with st.container(border=True):
+                st.subheader("👥 Analisis PR Balance - Kinerja PIC Procurement")
+                #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
+                render_pic_aging_bar(pic_aging_summary)
 
             with st.container(border=True):
                 st.subheader("👥 Analisis PR Balance - Kinerja PIC Procurement")
@@ -1070,6 +1075,10 @@ def main():
     with col_kanan:
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance PR")
+                render_sla_gauge(df_pr_final_f_aging, threshold=30, title="SLA Compliance PR")
+
+            with st.container(border=True):
+                st.subheader("📏 SLA Compliance PR Balance")
                 render_sla_gauge(df_pr_f_aging, threshold=30, title="SLA Compliance PR Balance")
 
             pic_sla_summary = summarize_pic_sla(df_pr_f_aging, "PIC Procurement", "No. PR", threshold=30)
