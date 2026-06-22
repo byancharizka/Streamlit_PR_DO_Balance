@@ -527,6 +527,9 @@ def render_pic_bar(summary_df: pd.DataFrame, x_col: str, y_col: str, color_col: 
         st.info("Data PIC tidak tersedia.")
         return
 
+    # Hitung total dokumen per PIC
+    summary_df["Total_Doc"] = summary_df.groupby(x_col)[y_col].transform("sum")
+
     kwargs = {
         "data_frame": summary_df,
         "x": x_col,
@@ -538,16 +541,32 @@ def render_pic_bar(summary_df: pd.DataFrame, x_col: str, y_col: str, color_col: 
         kwargs["color_discrete_map"] = STATUS_COLORS
 
     fig = px.bar(**kwargs)
+
+    # 🔹 Label per status (segmen warna) → di dalam bar
     fig.update_traces(
-        texttemplate="%{y}",
+        texttemplate="%{y}",          # angka per status
         textposition="inside",
-        textfont_size=10,
-        textangle=0
+        textfont=dict(size=10, color="white")
     )
+
+    # 🔹 Tambahkan angka total per PIC → di atas bar
+    totals = summary_df.groupby(x_col)[y_col].sum().reset_index()
+    for _, row in totals.iterrows():
+        fig.add_annotation(
+            x=row[x_col],             # posisi di sumbu X (PIC)
+            y=row[y_col],             # tinggi bar total
+            text=f"{row[y_col]}",     # angka total
+            showarrow=False,
+            font=dict(size=12, color="black"),
+            yshift=10                 # geser sedikit ke atas
+        )
+
     fig.update_layout(
         uniformtext_mode="hide",
-        uniformtext_minsize=8
+        uniformtext_minsize=8,
+        title=title
     )
+
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -583,7 +602,8 @@ def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, title: str
         x="Bulan",
         y=pic_col,
         z="Jumlah Dokumen",
-        color_continuous_scale=["#56CCF2", "#F2994A", "#EB5757"],
+        color_continuous_scale=["#138207", "#F2994A", "#A80B0B"],
+        text_auto=True   # 🔑 Tambahkan ini untuk menampilkan angka
     )
 
     # 🔧 Atur layout agar legenda di bawah dan heatmap lebih lebar
@@ -797,28 +817,35 @@ def main():
     df_pur = data["pur"]
 
     # ---------- TOP FILTERS ----------
-    col_head1, col_head2, col_head3, col_head4 = st.columns([1, 1, 1, 1])
+    col_head1, col_head2, col_head3, col_head4, col_head5 = st.columns([1, 1, 1, 1, 1])
 
     with col_head1:
+        selected_doc_type = st.selectbox(
+            "Pilih Jenis Dokumen 📑",
+            ["PR", "PO", "GRN", "DO", "NPR", "PUR"]
+    )
+
+
+    with col_head2:
         selected_date_range = st.date_input(
             "Select Date Range 📅",
             value=(DEFAULT_START_DATE, date.today()),
             max_value=date.today()
         )
 
-    with col_head2:
+    with col_head3:
         search_number = st.text_input(
             "Cari Nomor Dokumen 🔍",
             placeholder="No. PR / No. DO / No. NPR / No. PUR"
         )
 
-    with col_head3:
+    with col_head4:
         search_status = st.text_input(
             "Cari Status 🔍",
             placeholder="Complete / In Progress / Approved"
         )
 
-    with col_head4:
+    with col_head5:
         search_pic = st.text_input(
             "Cari PIC 🔍",
             placeholder="PIC Procurement / PIC Purchasing / PIC PUR"
@@ -888,226 +915,133 @@ def main():
     # =====================================================
     # LEFT - PR
     # =====================================================
-    with col_kiri:
-        with st.container(border=True):
-            st.subheader("📊 Detail Outstanding PR")
+    if selected_doc_type == "PR":
+        with col_kiri:
+            with st.container(border=True):
+                st.subheader("📊 Detail Outstanding PR")
 
-            c1, c2 = st.columns(2)
-            with c1:
-                metric_card("PR Balance", f"Rp {total_pr_unpr:,.0f}")
-            with c2:
-                metric_card("PO Balance", f"Rp {total_po_unpr:,.0f}")
+                c1, c2 = st.columns(2)
+                with c1:
+                    metric_card("PR Balance", f"Rp {total_pr_unpr:,.0f}")
+                with c2:
+                    metric_card("PO Balance", f"Rp {total_po_unpr:,.0f}")
 
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                metric_card("Total Dokumen PR", f"{total_pr_count:,}")
-            with c2:
-                metric_card("Total Item PR", f"{total_pr_rows:,}")
-            with c3:
-                metric_card("PIC Terbanyak", top_pic_pr)
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    metric_card("Total Dokumen PR", f"{total_pr_count:,}")
+                with c2:
+                    metric_card("Total Item PR", f"{total_pr_rows:,}")
+                with c3:
+                    metric_card("PIC Terbanyak", top_pic_pr)
 
-        pr_summary = summarize_status(df_pr_f, doc_col="No. PR", nominal_col="Nominal")
+                pr_summary = summarize_status(df_pr_f, doc_col="No. PR", nominal_col="Nominal")
 
-        with st.container(border=True):
-            st.subheader("🔍 Analisis Status PR")
+                with st.container(border=True):
+                    st.subheader("🍩 Proporsi Nominal PR per Status")
+                    render_status_pie(pr_summary, "Persentase Distribusi Nominal PR")
 
-            if not pr_summary.empty:
-                pr_summary_display = pr_summary.copy()
-                pr_summary_display["Total_Amount"] = pr_summary_display["Total_Amount"].apply(lambda x: f"Rp {x:,.0f}")
-                st.dataframe(pr_summary_display, use_container_width=True, hide_index=True)
-            else:
-                st.info("Tidak ada data status PR untuk ditampilkan.")
-
-            render_status_bar(pr_summary, "Distribusi Nominal PR per Status")
-
-        pic_summary_pr = summarize_pic_status(df_pr_f, "PIC Procurement", "No. PR")
-        with st.container(border=True):
-            st.subheader("👤 Analisis PIC Procurement per Status")
-            render_pic_bar(
-                summary_df=pic_summary_pr,
-                x_col="PIC Procurement",
-                y_col="Jumlah_Doc",
-                color_col="Status",
-                title="Jumlah PR per PIC Procurement"
-            )
-        
-        with st.container(border=True):
-            st.subheader("🔥 Heatmap Aktivitas PIC Procurement")
-            render_pic_heatmap(
-                df_pr_f,
-                pic_col="PIC Procurement",
-                date_col="transaction_date",
-                title="Heatmap Aktivitas PIC Procurement per Bulan"
-            )
-
-
-        df_pr_f_aging = calculate_aging(df_pr_f, "transaction_date")
-        df_pr_f_aging = categorize_aging(df_pr_f_aging)
-
-        with st.container(border=True):
-            st.subheader("⏳ Distribusi Aging PR")
-            render_aging_bar(df_pr_f_aging, "No. PR", "Distribusi Dokumen PR berdasarkan Aging")
-
-            pic_aging_summary = summarize_pic_aging(df_pr_f_aging, "PIC Procurement", "No. PR")
-
-        with st.container(border=True):
-            st.subheader("👥 Analisis Kinerja PIC Procurement")
-            #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
-            render_pic_aging_bar(pic_aging_summary, "Rata-rata Aging per PIC Procurement")
-
-        with st.container(border=True):
-            st.subheader("📏 SLA Compliance PR")
-            render_sla_gauge(df_pr_f_aging, threshold=30, title="SLA Compliance PR")
-
-        pic_sla_summary = summarize_pic_sla(df_pr_f_aging, "PIC Procurement", "No. PR", threshold=30)
-
-        with st.container(border=True):
-            st.subheader("📏 SLA Compliance per PIC Procurement")
-            #st.dataframe(pic_sla_summary, use_container_width=True, hide_index=True)
-            render_pic_sla_bar(pic_sla_summary, "Persentase SLA Compliance per PIC Procurement (≤30 hari)")
-
-
-        # Download per PIC PR
-        with st.container(border=True):
-            st.subheader("📥 Download Data PR per PIC")
-
-            if not df_pr_f.empty and "PIC Procurement" in df_pr_f.columns:
-                options = sorted(df_pr_f["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist())
-                selected_pic = st.selectbox("Pilih PIC Procurement:", options, key="pr_pic_select")
-
-                filtered = df_pr_f[df_pr_f["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic].copy()
-                st.download_button(
-                    label=f"Download Data {selected_pic}.xlsx",
-                    data=to_excel_bytes(filtered, sheet_name="Data_PR"),
-                    file_name=f"Data_PR_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            else:
-                st.info("Data tidak tersedia untuk fitur download PR per PIC.")
-
-        # Download PR by status
-        with st.container(border=True):
-            st.subheader("📥 Download Data PR (Periode & Status)")
-
-            if not df_pr_f.empty and "Status" in df_pr_f.columns:
-                all_statuses = sorted([s for s in df_pr_f["Status"].dropna().astype(str).unique().tolist() if s.strip()])
-                selected_statuses = st.multiselect(
-                    "Pilih Status untuk di-download:",
-                    all_statuses,
-                    default=all_statuses,
-                    key="pr_status_export"
+            pic_summary_pr = summarize_pic_status(df_pr_f, "PIC Procurement", "No. PR")
+            with st.container(border=True):
+                st.subheader("👤 Analisis PIC Procurement per Status")
+                render_pic_bar(
+                    summary_df=pic_summary_pr,
+                    x_col="PIC Procurement",
+                    y_col="Jumlah_Doc",
+                    color_col="Status",
+                    title="Jumlah PR per PIC Procurement"
                 )
 
-                df_download = df_pr_f[df_pr_f["Status"].isin(selected_statuses)].copy()
+            with st.container(border=True):
+                st.subheader("🔥 Heatmap Aktivitas PIC Procurement")
+                render_pic_heatmap(
+                    df_pr_f,
+                    pic_col="PIC Procurement",
+                    date_col="transaction_date",
+                    title="Heatmap Aktivitas PIC Procurement per Bulan"
+                )
 
-                if not df_download.empty:
-                    st.download_button(
-                        label=f"Download {len(df_download):,} Baris Data (Filtered).xlsx",
-                        data=to_excel_bytes(df_download, sheet_name="Data_PR"),
-                        file_name=f"Data_PR_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                    st.caption(f"Menampilkan {len(df_download):,} baris data yang akan di-download.")
-                else:
-                    st.warning("Tidak ada data yang sesuai dengan filter yang dipilih.")
-            else:
-                st.info("Data PR tidak tersedia untuk export.")
+            df_pr_f_aging = calculate_aging(df_pr_f, "transaction_date")
+            df_pr_f_aging = categorize_aging(df_pr_f_aging)
+
 
     # =====================================================
     # MID - DO
     # =====================================================
-    with col_tengah:
-        with st.container(border=True):
-            st.subheader("📊 Detail Outstanding DO")
+        with col_tengah:
 
-            c1, c2 = st.columns(2)
-            with c1:
-                metric_card("GRN Balance", f"Rp {total_grn_unpr:,.0f}")
-            with c2:
-                metric_card("DO Balance", f"Rp {total_do_unpr:,.0f}")
+            with st.container(border=True):
+                st.subheader("⏳ Distribusi Aging PR")
+                render_aging_bar(df_pr_f_aging, "No. PR", "Distribusi Dokumen PR berdasarkan Aging")
 
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                metric_card("Total Dokumen DO", f"{total_do_count:,}")
-            with c2:
-                metric_card("Total Item DO", f"{total_do_rows:,}")
-            with c3:
-                metric_card("PIC Terbanyak", top_pic_pr)
+                pic_aging_summary = summarize_pic_aging(df_pr_f_aging, "PIC Procurement", "No. PR")
 
-        do_summary = summarize_status_do(df_do_f, doc_col="No. DO", nominal_col="Nominal")        
+            with st.container(border=True):
+                st.subheader("👥 Analisis Kinerja PIC Procurement")
+                #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
+                render_pic_aging_bar(pic_aging_summary, "Rata-rata Aging per PIC Procurement")
 
-        with st.container(border=True):
-            st.subheader("🔍 Analisis Status DO")
-
-            if not do_summary.empty:
-                do_summary_display = do_summary.copy()
-                do_summary_display["Total_Amount"] = do_summary_display["Total_Amount"].apply(lambda x: f"Rp {x:,.0f}")
-                st.dataframe(do_summary_display, use_container_width=True, hide_index=True)
-            else:
-                st.info("Tidak ada data status DO untuk ditampilkan.")   
-
-            render_status_bar(do_summary, "Distribusi Nominal DO per Status")
-
-        pic_summary_do = summarize_pic_status_do(df_do_f, "PIC Purchasing", "No. DO")
-        with st.container(border=True):
-            st.subheader("👤 Analisis PIC Purchasing per Status")
-            render_pic_bar(
-                summary_df=pic_summary_do,
-                x_col="PIC Purchasing",
-                y_col="Jumlah_Doc",
-                color_col="Status DO",
-                title="Jumlah DO per PIC Purchasing"
-            )
 
     # =====================================================
-    # RIGHT - NPR & PUR
+    # RIGHT
     # =====================================================
     with col_kanan:
-        with st.container(border=True):
-            st.subheader("📊 Detail Outstanding NPR & PUR")
-            c1, c2 = st.columns(2)
-            with c1:
-                metric_card("NPR Balance (Item)", f"{total_npr_rows:,}")
-            with c2:
-                metric_card("PIC PUR Terbanyak", top_pic_pur)
+            with st.container(border=True):
+                st.subheader("📏 SLA Compliance PR")
+                render_sla_gauge(df_pr_f_aging, threshold=30, title="SLA Compliance PR")
+
+            pic_sla_summary = summarize_pic_sla(df_pr_f_aging, "PIC Procurement", "No. PR", threshold=30)
+
+            with st.container(border=True):
+                st.subheader("📏 SLA Compliance per PIC Procurement")
+                #st.dataframe(pic_sla_summary, use_container_width=True, hide_index=True)
+                render_pic_sla_bar(pic_sla_summary, "Persentase SLA Compliance per PIC Procurement (≤30 hari)")
 
 
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                metric_card("Total Dokumen PR", f"{total_npr_count:,}")
-            with c2:
-                metric_card("Total Item PR", f"{total_npr_rows:,}")
-            with c3:
-                metric_card("PIC Terbanyak", top_pic_pr)
+            # Download per PIC PR
+            with st.container(border=True):
+                st.subheader("📥 Download Data PR per PIC")
 
-        pic_summary_pur = summarize_pic_status(df_pur_f, "PIC", "No. PUR")
-        with st.container(border=True):
-            st.subheader("👤 Analisis PIC PUR")
-            render_pic_bar(
-                summary_df=pic_summary_pur,
-                x_col="PIC",
-                y_col="Jumlah_Doc",
-                color_col="Status" if "Status" in pic_summary_pur.columns else None,
-                title="Jumlah PUR per PIC PUR"
-            )
+                if not df_pr_f.empty and "PIC Procurement" in df_pr_f.columns:
+                    options = sorted(df_pr_f["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist())
+                    selected_pic = st.selectbox("Pilih PIC Procurement:", options, key="pr_pic_select")
 
-        with st.container(border=True):
-            st.subheader("📥 Download Data PUR per PIC")
+                    filtered = df_pr_f[df_pr_f["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic].copy()
+                    st.download_button(
+                        label=f"Download Data {selected_pic}.xlsx",
+                        data=to_excel_bytes(filtered, sheet_name="Data_PR"),
+                        file_name=f"Data_PR_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                else:
+                    st.info("Data tidak tersedia untuk fitur download PR per PIC.")
 
-            if not df_pur_f.empty and "PIC" in df_pur_f.columns:
-                options = sorted(df_pur_f["PIC"].fillna("Unassigned").astype(str).unique().tolist())
-                selected_pic3 = st.selectbox("Pilih PIC PUR:", options, key="pur_pic_select")
+        # Download PR by status
+            with st.container(border=True):
+                st.subheader("📥 Download Data PR (Periode & Status)")
 
-                filtered3 = df_pur_f[df_pur_f["PIC"].fillna("Unassigned").astype(str) == selected_pic3].copy()
-                st.download_button(
-                    label=f"Download Data {selected_pic3}.xlsx",
-                    data=to_excel_bytes(filtered3, sheet_name="Data_PUR"),
-                    file_name=f"Data_PUR_{selected_pic3}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            else:
-                st.info("Data PUR tidak tersedia untuk fitur download.")
+                if not df_pr_f.empty and "Status" in df_pr_f.columns:
+                    all_statuses = sorted([s for s in df_pr_f["Status"].dropna().astype(str).unique().tolist() if s.strip()])
+                    selected_statuses = st.multiselect(
+                        "Pilih Status untuk di-download:",
+                        all_statuses,
+                        default=all_statuses,
+                        key="pr_status_export"
+                    )
 
+                    df_download = df_pr_f[df_pr_f["Status"].isin(selected_statuses)].copy()
+
+                    if not df_download.empty:
+                        st.download_button(
+                            label=f"Download {len(df_download):,} Baris Data (Filtered).xlsx",
+                            data=to_excel_bytes(df_download, sheet_name="Data_PR"),
+                            file_name=f"Data_PR_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                        st.caption(f"Menampilkan {len(df_download):,} baris data yang akan di-download.")
+                    else:
+                        st.warning("Tidak ada data yang sesuai dengan filter yang dipilih.")
+                else:
+                    st.info("Data PR tidak tersedia untuk export.")
     # ---------- FOOTER INFO ----------
     with st.expander("ℹ️ Informasi Teknis Dashboard"):
         selected_report_date = (
