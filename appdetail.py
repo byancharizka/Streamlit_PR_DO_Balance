@@ -143,7 +143,9 @@ label, .stTextInput label, .stDateInput label {
 input, textarea {
     font-size: 0.7rem !important;
     padding: 4px 6px !important;
-}            
+}
+            
+
                         
 </style>
 """, unsafe_allow_html=True)
@@ -222,6 +224,18 @@ def safe_sum(df: pd.DataFrame, col: str) -> float:
         return 0.0
     return float(df[col].sum())
 
+def safe_sum(df: pd.DataFrame, col: str) -> float:
+    if df.empty:
+        return 0.0
+    if col not in df.columns:
+        # fallback ke kolom lain yang mirip
+        for alt in ["Nominal", "total", "grand_total", "transaction_total"]:
+            if alt in df.columns:
+                col = alt
+                break
+    return float(pd.to_numeric(df[col], errors="coerce").fillna(0).sum())
+
+
 
 def to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Data") -> bytes:
     output = BytesIO()
@@ -267,23 +281,23 @@ def get_api_data_new(endpoint: str, source: str = "eas", start_date=None, end_da
         "date_end": end_date,
         "token": API_TOKEN
     }
+
     try:
-        logger.info("Fetching endpoint=%s from source=%s params=%s", endpoint, source, params)
         response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         payload = response.json()
 
+        # ✅ Struktur API baru langsung {"data": [...]}
         if isinstance(payload, dict):
-            data_layer = payload.get("data", {})
-            if isinstance(data_layer, dict):
-                rows = data_layer.get("data", [])
-                if isinstance(rows, list):
-                    return pd.DataFrame(rows)
+            rows = payload.get("data", [])
+            if isinstance(rows, list):
+                return pd.DataFrame(rows)
         return pd.DataFrame()
 
     except Exception as e:
         st.warning(f"Gagal mengambil data dari endpoint {endpoint} ({source}): {e}")
         return pd.DataFrame()
+
 
 
 def load_all_data() -> dict[str, pd.DataFrame]:
@@ -310,13 +324,13 @@ def load_all_data() -> dict[str, pd.DataFrame]:
 
 def load_all_data_new() -> dict[str, pd.DataFrame]:
     endpoint_map_new = {
-        "sq": "sales-quotations",
-        "so": "sales-orders",
+        #"sq": "sales-quotations",
+        #"so": "sales-orders",
         "do": "delivery-orders",
-        "si": "sales-invoices",
+        #"si": "sales-invoices",
         "pr": "purchase-requests",
         "po": "purchase-orders",
-        "grn": "goods-receipt-notes",
+        #"grn": "goods-receipt-notes",
     }
 
     result_new = {}
@@ -361,7 +375,7 @@ def apply_search_filter(
         ["Status", "PIC Procurement", "PIC Purchasing", "PIC", "No. PR", "No. DO", "No. PUR", "No. Transaksi"]
     )
 
-    # Filter nomor dokumen: mencari di semua kolom string
+    # Filter nomor transaksi: mencari di semua kolom string
     if search_number:
         pattern = search_number.strip().lower()
         string_cols = working.select_dtypes(include=["object"]).columns.tolist()
@@ -488,7 +502,7 @@ STATUS_COLORS = {
     "Complete": "#00CC96",
     "In Progress": "#F2C94C",
     "Approved": "#F2994A",
-    "Rejected": "#EB5757",
+    "Need Approve": "#EB5757",
     "Pending": "#56CCF2",
 }
 
@@ -547,7 +561,7 @@ def render_pic_bar(summary_df: pd.DataFrame, x_col: str, y_col: str, color_col: 
         st.info("Data PIC tidak tersedia.")
         return
 
-    # Hitung total dokumen per PIC
+    # Hitung total transaksi per PIC
     summary_df["Total_Doc"] = summary_df.groupby(x_col)[y_col].transform("sum")
 
     kwargs = {
@@ -591,7 +605,7 @@ def render_pic_bar(summary_df: pd.DataFrame, x_col: str, y_col: str, color_col: 
 
 
 def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, title: str):
-    """Menampilkan heatmap aktivitas PIC berdasarkan jumlah dokumen unik per bulan."""
+    """Menampilkan heatmap aktivitas PIC berdasarkan jumlah transaksi unik per bulan."""
     if df.empty or pic_col not in df.columns or date_col not in df.columns:
         st.info("Data tidak tersedia untuk heatmap aktivitas PIC.")
         return
@@ -612,7 +626,7 @@ def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, title: str
     summary = (
         working.groupby([pic_col, "Bulan"])["No. PR"]
         .nunique()
-        .reset_index(name="Jumlah Dokumen")
+        .reset_index(name="Jumlah Transaksi")
         .sort_values("Bulan")
     )
 
@@ -621,7 +635,7 @@ def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, title: str
         summary,
         x="Bulan",
         y=pic_col,
-        z="Jumlah Dokumen",
+        z="Jumlah Transaksi",
         color_continuous_scale=["#138207", "#F2994A", "#A80B0B"],
         text_auto=True   # 🔑 Tambahkan ini untuk menampilkan angka
     )
@@ -680,13 +694,13 @@ def render_aging_bar(df: pd.DataFrame, doc_col: str, title: str):
     summary = (
         df.groupby("Aging Category")[doc_col]
         .nunique()
-        .reset_index(name="Jumlah Dokumen")
+        .reset_index(name="Jumlah Transaksi")
     )
 
     fig = px.bar(
     summary,
     x="Aging Category",
-    y="Jumlah Dokumen",
+    y="Jumlah Transaksi",
     color="Aging Category",
     color_discrete_map={
         "0-30 hari": "#2F80ED",   # biru tua
@@ -694,7 +708,7 @@ def render_aging_bar(df: pd.DataFrame, doc_col: str, title: str):
         "61-90 hari": "#FCA27F",     # oranye
         ">90 hari": "#EB5757"  # merah
     },
-    text="Jumlah Dokumen",
+    text="Jumlah Transaksi",
     title=title
     )
     fig.update_traces(textposition="outside")
@@ -867,7 +881,7 @@ def main():
     with col_head4:
         search_status = st.text_input(
             "Cari Status 🔍",
-            placeholder="Complete / In Progress / Approved"
+            placeholder="Complete / In Progress / Approved / Need Approve"
         )
 
     with col_head5:
@@ -883,7 +897,7 @@ def main():
     df_do_f = df_do.copy()
     df_npr_f = df_npr.copy()
     df_pur_f = df_pur.copy()
-    df_pr_final_f = df_pr_f.copy()
+    df_pr_final_f = df_pr_final.copy()
 
     # ---------- DATE FILTER (CUMULATIVE) ----------
     if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) == 2:
@@ -894,7 +908,7 @@ def main():
         df_do_f = apply_cumulative_filter(df_do_f, report_end_date)
         df_npr_f = apply_cumulative_filter(df_npr_f, report_end_date)
         df_pur_f = apply_cumulative_filter(df_pur_f, report_end_date)
-        df_pr_final_f = apply_cumulative_filter(df_pr_f, report_end_date)
+        df_pr_final_f = apply_cumulative_filter(df_pr_final_f, report_end_date)
 
     # ---------- SEARCH FILTER ----------
     df_pr_f = apply_search_filter(df_pr_f, search_number, search_status, search_pic)
@@ -911,7 +925,7 @@ def main():
     df_do_f = ensure_columns(df_do_f, ["Nominal", "No. DO", "PIC Purchasing"])
     df_npr_f = ensure_columns(df_npr_f, ["No. Transaksi"])
     df_pur_f = ensure_columns(df_pur_f, ["No. PUR", "PIC", "Status"])
-    df_pr_final_f = ensure_columns(df_pr_final_f, ["transaction_total"])
+    df_pr_final_f = ensure_columns(df_pr_final_f, ["No. PR", "transaction_total"])
 
     df_pr_f = safe_to_numeric(df_pr_f, ["Nominal"])
     df_po_f = safe_to_numeric(df_po_f, ["Nominal"])
@@ -925,8 +939,10 @@ def main():
     total_do_unpr = safe_sum(df_do_f, "Nominal")
     total_pr = safe_sum(df_pr_final_f, "transaction_total")
 
-    total_pr_count = safe_unique_count(df_pr_f, "No. PR")
-    total_pr_rows = len(df_pr_f)
+    total_pr_count = safe_unique_count(df_pr_final_f, "No. PR")
+    total_pr_balance_count = safe_unique_count(df_pr_f, "No. PR")
+    total_pr_rows = len(df_pr_final_f)
+    total_pr_balance_rows = len(df_pr_f)
     total_do_count = safe_unique_count(df_do_f, "No. DO")
     total_do_rows = len(df_do_f)
     total_npr_count = safe_unique_count(df_npr_f, "No. Transaksi")
@@ -939,7 +955,7 @@ def main():
     top_pic_pur = get_top_pic(df_pur_f, "PIC", "No. PUR")
 
     # ---------- LAYOUT ----------
-    col_kiri, col_tengah, col_kanan = st.columns([1, 1, 1])
+    col_kiri, col_tengah, col_kanan = st.columns([1, 1, 1], gap="small")
 
     # =====================================================
     # LEFT - PR
@@ -955,11 +971,17 @@ def main():
                 with c2:
                     metric_card("PR Balance", f"Rp {total_pr_unpr:,.0f}")
 
+                c1, c2 = st.columns(2)
+                with c1:
+                    metric_card("Total Transaksi PR", f"{total_pr_count:,}")
+                with c2:
+                    metric_card("Total Transaksi PR Balance", f"{total_pr_balance_count:,}")
+
                 c1, c2, c3 = st.columns(3)
                 with c1:
-                    metric_card("Total Dokumen PR", f"{total_pr_count:,}")
-                with c2:
                     metric_card("Total Item PR", f"{total_pr_rows:,}")
+                with c2:
+                    metric_card("Total Item PR Balance", total_pr_balance_rows)
                 with c3:
                     metric_card("PIC Terbanyak", top_pic_pr)
 
@@ -1000,7 +1022,7 @@ def main():
 
             with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging PR")
-                render_aging_bar(df_pr_f_aging, "No. PR", "Distribusi Dokumen PR berdasarkan Aging")
+                render_aging_bar(df_pr_f_aging, "No. PR", "Distribusi PR Balance berdasarkan Aging")
 
                 pic_aging_summary = summarize_pic_aging(df_pr_f_aging, "PIC Procurement", "No. PR")
 
