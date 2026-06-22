@@ -812,6 +812,7 @@ def render_sla_gauge(df: pd.DataFrame, threshold: int = 30, title: str = "SLA Co
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=sla_compliance,
+        number={'suffix': '%', 'font': {'size': 48, 'color': '#555'}},  # 🔹 tambahkan ini
         title={'text': f"{title} (≤{threshold} hari)"},
         gauge={
             'axis': {'range': [0, 100]},
@@ -824,6 +825,7 @@ def render_sla_gauge(df: pd.DataFrame, threshold: int = 30, title: str = "SLA Co
         }
     ))
     st.plotly_chart(fig, use_container_width=True)
+
 
 def summarize_pic_sla(df: pd.DataFrame, pic_col: str, doc_col: str, threshold: int = 30) -> pd.DataFrame:
     if df.empty or pic_col not in df.columns or "Aging" not in df.columns:
