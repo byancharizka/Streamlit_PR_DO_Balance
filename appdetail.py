@@ -81,10 +81,10 @@ h2, h3, h4, h5, h6 {
 
 /* ====== METRIC COMPONENTS ====== */
 [data-testid="stMetricLabel"] {
-    font-size: 0.5rem !important;
+    font-size: 0.7rem !important;
 }
 [data-testid="stMetricValue"] {
-    font-size: 0.7rem !important;
+    font-size: 0.5rem !important;
 }
 
 /* ====== CUSTOM METRIC CARD ====== */
