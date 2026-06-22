@@ -102,7 +102,7 @@ h2, h3, h4, h5, h6 {
 }
             
 .metric-card div {
-    font-size: 0.80rem !important;
+    font-size: 0.67rem !important;
 }            
 
 /* ====== SMALL NOTES ====== */
@@ -1108,7 +1108,7 @@ def main():
                 render_pic_aging_bar(pic_aging_summary)
 
             with st.container(border=True):
-                st.subheader("👥 Analisis PR Balance - Kinerja PIC Procurement")
+                st.subheader("👥 Analisis PR - Kinerja PIC Procurement")
                 #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
                 render_pic_aging_bar(pic_aging_summary_final)
 
@@ -1125,7 +1125,7 @@ def main():
                 st.subheader("📏 SLA Compliance PR Balance")
                 render_sla_gauge(df_pr_f_aging, threshold=30, title="SLA Compliance PR Balance")
 
-            pic_sla_summary = summarize_pic_sla(df_pr_f_aging, "PIC Procurement", "No. PR", threshold=30)
+            pic_sla_summary = summarize_pic_sla(df_pr_final_f_real_aging, "PIC Procurement", "transaction_number", threshold=30)
 
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance per PIC Procurement")
