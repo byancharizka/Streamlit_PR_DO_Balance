@@ -145,6 +145,21 @@ input, textarea {
     padding: 4px 6px !important;
 }
             
+@media (max-width: 768px) {
+    h1 { font-size: 1.2rem !important; }
+    h2, h3, h4 { font-size: 0.9rem !important; }
+    .metric-card {
+        font-size: 0.65rem !important;
+        padding: 4px !important;
+    }
+    [data-testid="stMetricValue"] {
+        font-size: 0.7rem !important;
+    }
+    .block-container {
+        padding-left: 0.5rem !important;
+        padding-right: 0.5rem !important;
+    }
+}
 
                         
 </style>
@@ -309,9 +324,6 @@ def get_api_data_new(endpoint: str, source: str = "eas", start_date=None, end_da
     df = pd.DataFrame(all_rows)
     df = safe_to_datetime(df, "transaction_date")
     return df
-
-
-
 
 
 def load_all_data() -> dict[str, pd.DataFrame]:
@@ -635,9 +647,8 @@ def render_pic_bar(summary_df: pd.DataFrame, x_col: str, y_col: str, color_col: 
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, title: str):
-    """Menampilkan heatmap aktivitas PIC berdasarkan jumlah transaksi unik per bulan."""
-    if df.empty or pic_col not in df.columns or date_col not in df.columns:
+def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, doc_col: str, title: str):
+    if df.empty or pic_col not in df.columns or date_col not in df.columns or doc_col not in df.columns:
         st.info("Data tidak tersedia untuk heatmap aktivitas PIC.")
         return
 
@@ -645,50 +656,34 @@ def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, title: str
     working[date_col] = pd.to_datetime(working[date_col], errors="coerce")
     working[pic_col] = working[pic_col].fillna("Unassigned")
 
-    bulan_map = {
-        1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
-        7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"
-    }
+    bulan_map = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
     working["Bulan"] = working[date_col].dt.month.map(bulan_map)
     bulan_order = list(bulan_map.values())
     working["Bulan"] = pd.Categorical(working["Bulan"], categories=bulan_order, ordered=True)
 
-    working["No. PR"] = working["No. PR"].astype(str).str.strip().str.upper()
+    # gunakan doc_col dinamis
+    working[doc_col] = working[doc_col].astype(str).str.strip().str.upper()
     summary = (
-        working.groupby([pic_col, "Bulan"])["No. PR"]
+        working.groupby([pic_col, "Bulan"])[doc_col]
         .nunique()
         .reset_index(name="Jumlah Transaksi")
         .sort_values("Bulan")
     )
 
-    # 🔥 Buat heatmap
-    fig = px.density_heatmap(
-        summary,
-        x="Bulan",
-        y=pic_col,
-        z="Jumlah Transaksi",
-        color_continuous_scale=["#138207", "#F2994A", "#A80B0B"],
-        text_auto=True   # 🔑 Tambahkan ini untuk menampilkan angka
-    )
-
-    # 🔧 Atur layout agar legenda di bawah dan heatmap lebih lebar
+    fig = px.density_heatmap(summary, x="Bulan", y=pic_col, z="Jumlah Transaksi",
+                             color_continuous_scale=["#138207","#F2994A","#A80B0B"], text_auto=True)
+    
+    # tambahkan pengaturan layout di sini
     fig.update_layout(
-        coloraxis_showscale=False,
+        coloraxis_showscale=False,   # 🔹 sembunyikan color bar
+        coloraxis_colorbar=dict(title=None),  # 🔹 hilangkan teks "sum of Jumlah Transaksi"
         xaxis_title="Bulan",
-        yaxis_title="PIC",
-        coloraxis_colorbar=dict(
-            title=None,
-            orientation="h",
-            yanchor="bottom",
-            y=-0.15,   # ubah dari -0.25 ke -0.15 atau -0.10
-            xanchor="center",
-            x=0.5
-        ),
+        yaxis_title="PIC Procurement",
         margin=dict(l=100, r=40, t=60, b=120),
         height=500
-    )
-
+        )
     st.plotly_chart(fig, use_container_width=True)
+
 
     # Tambahkan keterangan di bawah heatmap
     st.markdown(
@@ -887,6 +882,7 @@ def main():
     df_npr = data_old["npr"]
     df_pur = data_old["pur"]
     df_pr_final = data_new["pr"]
+    df_do_final = data_new["do"]
 
     # ---------- TOP FILTERS ----------
     col_head1, col_head2, col_head3, col_head4, col_head5 = st.columns([1, 1, 1, 1, 1])
@@ -930,6 +926,7 @@ def main():
     df_npr_f = df_npr.copy()
     df_pur_f = df_pur.copy()
     df_pr_final_f = df_pr_final.copy()
+    df_do_final_f = df_do_final.copy()
 
     # ---------- DATE FILTER ----------
     if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) == 2:
@@ -944,6 +941,7 @@ def main():
 
             # 🔹 Dataset baru (PR Final) pakai realisasi
         df_pr_final_f = apply_realization_filter(df_pr_final_f, report_start_date, report_end_date)
+        df_do_final_f = apply_realization_filter(df_do_final_f, report_start_date, report_end_date)
 
 
     # ---------- SEARCH FILTER ----------
@@ -961,21 +959,23 @@ def main():
     df_do_f = ensure_columns(df_do_f, ["Nominal", "No. DO", "PIC Purchasing"])
     df_npr_f = ensure_columns(df_npr_f, ["No. Transaksi"])
     df_pur_f = ensure_columns(df_pur_f, ["No. PUR", "PIC", "Status"])
-    df_pr_final_f_real = ensure_columns(df_pr_final_f, ["No. PR", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
+    df_pr_final_f_real = ensure_columns(df_pr_final_f, ["transaction_number", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
+    df_do_final_f_real = ensure_columns(df_do_final_f, ["transaction_number", "price", "quantity", "discount", "transaction_total", "tax1_value", "tax2_value"])
 
     df_pr_f = safe_to_numeric(df_pr_f, ["Nominal"])
     df_po_f = safe_to_numeric(df_po_f, ["Nominal"])
     df_grn_f = safe_to_numeric(df_grn_f, ["Nominal"])
     df_do_f = safe_to_numeric(df_do_f, ["Nominal"])
-    df_pr_final_f_real = safe_to_numeric(df_pr_final_f_real, ["price", "discount", "quantity", "tax1_percentage", "tax2_percentage"])
+    #df_pr_final_f_real = safe_to_numeric(df_pr_final_f_real, ["price", "discount", "quantity", "tax1_percentage", "tax2_percentage"])
     df_pr_final_f_real= safe_to_numeric(df_pr_final_f_real, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
+    df_do_final_f_real= safe_to_numeric(df_do_final_f_real, ["item_price", "item_discount", "item_quantity", "item_tax1_value", "item_tax2_value"])
     
     # ---------- METRICS ----------
     total_pr_unpr = safe_sum(df_pr_f, "Nominal")
     total_po_unpr = safe_sum(df_po_f, "Nominal")
     total_grn_unpr = safe_sum(df_grn_f, "Nominal")
     total_do_unpr = safe_sum(df_do_f, "Nominal")
-    total_pr = safe_sum(df_pr_final_f_real, "transaction_total")
+    #total_pr = safe_sum(df_pr_final_f_real, "transaction_total")
 
 
     df_pr_final_f_real["disc_per_unit"] = df_pr_final_f_real["item_price"] * (df_pr_final_f_real["item_discount"] / 100)
@@ -984,14 +984,22 @@ def main():
     df_pr_final_f_real["total_pr_row"] = df_pr_final_f_real["item_quantity"] * df_pr_final_f_real["net_price_unit"]
     total_pr = df_pr_final_f_real["total_pr_row"].sum()
 
-
+    df_do_final_f_real["disc_per_unit"] = df_do_final_f_real["item_price"] * (df_do_final_f_real["item_discount"] / 100)
+    #df_do_final_f_real["tax_unit"] = (df_do_final_f_real["item_price"] - df_do_final_f_real["disc_per_unit"]) * (df_do_final_f_real["item_tax1_percentage"] / 100)
+    df_do_final_f_real["tax_unit"] = df_do_final_f_real["item_tax1_value"] + df_do_final_f_real["item_tax1_value"]
+    #df_do_final_f_real["net_price_unit"] = df_do_final_f_real["item_price"] - df_do_final_f_real["disc_per_unit"] + df_do_final_f_real["tax_unit"]
+    df_do_final_f_real["net_price_unit"] = df_do_final_f_real["item_price"] - df_do_final_f_real["disc_per_unit"]
+    df_do_final_f_real["total_do_row"] = df_do_final_f_real["item_quantity"] * df_do_final_f_real["net_price_unit"]
+    total_do = df_do_final_f_real["total_do_row"].sum()
 
     total_pr_count = safe_unique_count(df_pr_final_f_real, "transaction_number")
     total_pr_balance_count = safe_unique_count(df_pr_f, "No. PR")
     total_pr_rows = len(df_pr_final_f_real)
     total_pr_balance_rows = len(df_pr_f)
-    total_do_count = safe_unique_count(df_do_f, "No. DO")
+    total_do_count = safe_unique_count(df_do_final_f_real, "transaction_number")
+    total_do_balance_count = safe_unique_count(df_do_f, "No. DO")
     total_do_rows = len(df_do_f)
+    total_do_balance_rows = len(df_do_f)
     total_npr_count = safe_unique_count(df_npr_f, "No. Transaksi")
     total_npr_rows = len(df_npr_f)
 
@@ -1055,12 +1063,63 @@ def main():
 
             with st.container(border=True):
                 st.subheader("🔥 Heatmap PR Balance - Aktivitas PIC Procurement")
-                render_pic_heatmap(
-                    df_pr_f,
-                    pic_col="PIC Procurement",
-                    date_col="transaction_date",
-                    title="Heatmap Aktivitas PIC Procurement per Bulan"
+                render_pic_heatmap(df_pr_f, "PIC Procurement", "transaction_date", "No. PR", "Heatmap Aktivitas PIC Procurement per Bulan")
+
+            df_pr_f_aging = calculate_aging(df_pr_f, "transaction_date")
+            df_pr_f_aging = categorize_aging(df_pr_f_aging)
+            df_pr_final_f_real_aging = calculate_aging(df_pr_final_f_real, "transaction_date")
+            df_pr_final_f_real_aging = categorize_aging(df_pr_final_f_real_aging)
+
+    # ---------- DO ----------
+    if selected_doc_type == "DO":
+        with col_kiri:
+            with st.container(border=True):
+                st.subheader("📊 Detail DO")
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    metric_card("Total DO", f"Rp {total_do:,.0f}")
+                with c2:
+                    metric_card("DO Balance", f"Rp {total_do_unpr:,.0f}")
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    metric_card("Total Transaksi DO", f"{total_do_count:,}")
+                with c2:
+                    metric_card("Total Transaksi DO Balance", f"{total_do_balance_count:,}")
+
+
+                #st.write("Kolom:", df_pr_final_f.columns)
+                #st.write("Contoh tanggal:", df_pr_final_f["transaction_date"].head())
+                #st.write(df_pr_final_f[["item_price", "item_discount", "item_quantity"]].head())
+
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    metric_card("Total Item DO", f"{total_do_rows:,}")
+                with c2:
+                    metric_card("Total Item DO Balance", total_do_balance_rows)
+                with c3:
+                    metric_card("PIC Terbanyak", top_pic_do)
+
+                do_summary = summarize_status(df_do_f, doc_col="No. DO", nominal_col="Nominal")
+
+                with st.container(border=True):
+                    st.subheader("🍩 Proporsi Nominal DO Balance per Status")
+                    render_status_pie(do_summary, "Persentase Distribusi Nominal DO Balance")
+
+            pic_summary_do = summarize_pic_status(df_do_f, "PIC Procurement", "No. DO")
+            with st.container(border=True):
+                st.subheader("👤 Analisis Transaksi DO Balance per PIC Procurement & per Status")
+                render_pic_bar(
+                    summary_df=pic_summary_do,
+                    x_col="PIC Procurement",
+                    y_col="Jumlah_Doc",
+                    color_col="Status DO",
                 )
+
+            with st.container(border=True):
+                st.subheader("🔥 Heatmap DO Balance - Aktivitas PIC Procurement")
+                render_pic_heatmap(df_do_f, "PIC Procurement", "transaction_date", "No. DO", "Heatmap Aktivitas PIC Procurement per Bulan")
 
             df_pr_f_aging = calculate_aging(df_pr_f, "transaction_date")
             df_pr_f_aging = categorize_aging(df_pr_f_aging)
