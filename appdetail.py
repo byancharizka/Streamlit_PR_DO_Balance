@@ -755,13 +755,13 @@ def render_aging_bar(df: pd.DataFrame, doc_col: str, chart_key: str = "aging_bar
 
 def summarize_pic_aging(df: pd.DataFrame, pic_col: str, doc_col: str) -> pd.DataFrame:
     if df.empty or pic_col not in df.columns or "Aging" not in df.columns or "Status" not in df.columns:
-        return pd.DataFrame(columns=[pic_col, "Avg_Aging", "Total_Doc", "Outstanding_Doc", "Completed_Doc", "Over90Pct"])
+        return pd.DataFrame(columns=[pic_col, "Average Aging", "Total_Doc", "Outstanding_Doc", "Completed_Doc", "Over90Pct"])
 
     working = assign_unassigned(df, pic_col)
 
     summary = (
         working.groupby(pic_col).agg(
-            Avg_Aging=("Aging", "mean"),
+            Average_Aging=("Aging", "mean"),   # 🔹 ubah nama kolom di sini
             Total_Doc=(doc_col, "nunique"),
             Outstanding_Doc=(doc_col, lambda x: (working.loc[x.index, "Status"] != "Complete").sum()),
             Completed_Doc=(doc_col, lambda x: (working.loc[x.index, "Status"] == "Complete").sum()),
@@ -782,17 +782,14 @@ def render_pic_aging_bar(summary_df: pd.DataFrame):
     ]
 
     fig = px.bar(
-        summary_df,
-        x="PIC Procurement",
-        y="Avg_Aging",
-        text="Avg_Aging",
-        color="Avg_Aging",
-        color_continuous_scale=[
-            (0.0, "#56CCF2"),
-            (0.5, "#F2C94C"),
-            (1.0, "#EB5757")
-    ],
+    summary_df,
+    x="PIC Procurement",
+    y="Average_Aging",   # 🔹 gunakan nama baru
+    text="Average_Aging",
+    color="Average_Aging",
+    color_continuous_scale=[(0.0, "#56CCF2"), (0.5, "#F2C94C"), (1.0, "#EB5757")]
     )
+
     # Tambahkan pengaturan ukuran teks
     fig.update_traces(
     texttemplate="%{text:.1f} hari",
@@ -871,6 +868,44 @@ def render_pic_sla_bar(summary_df: pd.DataFrame):
     )
     fig.update_layout(coloraxis_showscale=False)
     st.plotly_chart(fig, use_container_width=True)
+
+
+def render_sla_trend(df: pd.DataFrame, threshold: int = 30, date_col: str = "transaction_date"):
+    if df.empty or "Aging" not in df.columns or date_col not in df.columns:
+        st.info("Data tidak tersedia untuk trend SLA.")
+        return
+
+    # Pastikan kolom tanggal dalam format datetime
+    df = safe_to_datetime(df, date_col)
+
+    # Tambahkan kolom bulan (Period)
+    df["Bulan"] = df[date_col].dt.to_period("M").dt.to_timestamp()
+
+    # Hitung SLA compliance per bulan
+    sla_trend = (
+        df.groupby("Bulan")
+        .agg(SLA_Compliance=("Aging", lambda x: (x <= threshold).mean() * 100))
+        .reset_index()
+    )
+
+    # Buat line chart
+    fig = px.line(
+        sla_trend,
+        x="Bulan",
+        y="SLA_Compliance",
+        markers=True,
+        title=f"Trend SLA Compliance per Bulan (≤{threshold} hari)"
+    )
+    fig.update_traces(
+        texttemplate="%{y:.1f}%",
+        textposition="top center"
+    )
+    fig.update_layout(
+        yaxis=dict(title="SLA Compliance (%)", range=[0, 100])
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
 
 # =========================================================
 # 9) MAIN APP
@@ -1115,7 +1150,7 @@ def main():
 
                     if not df_download.empty:
                         st.download_button(
-                            label=f"Download {len(df_download):,} Baris Data (Filtered).xlsx",
+                            label=f"⬇️Download {len(df_download):,} Baris Data (Filtered).xlsx",
                             data=to_excel_bytes(df_download, sheet_name="Data_PR"),
                             file_name=f"Data_PR_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -1136,7 +1171,7 @@ def main():
 
                     filtered = df_pr_f[df_pr_f["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic].copy()
                     st.download_button(
-                        label=f"Download Data {selected_pic}.xlsx",
+                        label=f"⬇️Download Data {selected_pic}.xlsx",
                         data=to_excel_bytes(filtered, sheet_name="Data_PR"),
                         file_name=f"Data_PR_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -1229,7 +1264,7 @@ def main():
 
                     # Tombol download
                     st.download_button(
-                    label=f"⬇️ Unduh Data PR Aging ({selected_category_pr})",
+                    label=f"⬇️Download Data PR Aging ({selected_category_pr})",
                     data=to_excel_bytes(df_pr_filtered, sheet_name="PR Aging"),
                     file_name=f"PR_Aging_{selected_category_pr.replace(' ', '_')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1260,7 +1295,7 @@ def main():
 
                     # Tombol download
                     st.download_button(
-                    label=f"⬇️ Unduh Data PR Balance Aging ({selected_category_balance})",
+                    label=f"⬇️Download Data PR Balance Aging ({selected_category_balance})",
                     data=to_excel_bytes(df_balance_filtered, sheet_name="PR Balance Aging"),
                     file_name=f"PR_Balance_Aging_{selected_category_balance.replace(' ', '_')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1290,6 +1325,11 @@ def main():
                 #st.dataframe(pic_sla_summary, use_container_width=True, hide_index=True)
                 render_pic_sla_bar(pic_sla_summary)
 
+            with st.container(border=True):
+                st.subheader("📈 Trend SLA")
+                render_sla_trend(df_pr_final_valid, threshold=30, date_col="transaction_date")
+
+
             # Download PR Balance by status
             with st.container(border=True):
                 st.subheader("📥 Download Data PR (Periode & Status)")
@@ -1307,7 +1347,7 @@ def main():
 
                     if not df_download.empty:
                         st.download_button(
-                            label=f"Download {len(df_download):,} Baris Data (Filtered).xlsx",
+                            label=f"⬇️Download {len(df_download):,} Baris Data (Filtered).xlsx",
                             data=to_excel_bytes(df_download, sheet_name="Data_PR"),
                             file_name=f"Data_PR_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -1328,7 +1368,7 @@ def main():
 
                     filtered = df_pr_final_f[df_pr_final_f["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic].copy()
                     st.download_button(
-                        label=f"Download Data {selected_pic}.xlsx",
+                        label=f"⬇️Download Data {selected_pic}.xlsx",
                         data=to_excel_bytes(filtered, sheet_name="Data_PR"),
                         file_name=f"Data_PR_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
