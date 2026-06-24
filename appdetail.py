@@ -1151,6 +1151,36 @@ def main():
 
 
 
+            # Download per PIC PR
+            with st.container(border=True):
+                st.subheader("📥 Download Data per Categori Aging PR")
+
+                if not df_pr_final_valid.empty:
+                    # Filter data aging PR berdasarkan kategori yang dipilih
+                    selected_category_pr = st.selectbox(
+                        "Pilih kategori aging PR untuk diunduh 📂",
+                        ["Semua", "0-30 hari", "31-60 hari", "61-90 hari", ">90 hari"]
+                    )
+
+                    # Jika bukan 'Semua', filter sesuai kategori
+                    if selected_category_pr != "Semua":
+                        df_pr_filtered = df_pr_final_valid[
+                            df_pr_final_valid["Aging Category"] == selected_category_pr
+                        ].copy()
+                    else:
+                        df_pr_filtered = df_pr_final_valid.copy()
+
+                    # Tombol download
+                    st.download_button(
+                        label=f"⬇️ Unduh Data PR Aging ({selected_category_pr})",
+                        data=to_excel_bytes(df_pr_filtered, sheet_name="PR Aging"),
+                        file_name=f"PR_Aging_{selected_category_pr.replace(' ', '_')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                else:
+                    st.info("Data tidak tersedia untuk fitur download PR per Category Aging PR.")
+
+
     # =====================================================
     # RIGHT
     # =====================================================
