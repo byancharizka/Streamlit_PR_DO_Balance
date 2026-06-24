@@ -1126,7 +1126,24 @@ def main():
                 else:
                     st.info("Data PR Balance tidak tersedia untuk export.")
 
+            # Download per PIC PR
+            with st.container(border=True):
+                st.subheader("📥 Download Data PR Balance per PIC")
 
+                if not df_pr_f.empty and "PIC Procurement" in df_pr_f.columns:
+                    options = sorted(df_pr_f["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist())
+                    selected_pic = st.selectbox("Pilih PIC Procurement:", options, key="pr_balance_pic_select")
+
+                    filtered = df_pr_f[df_pr_f["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic].copy()
+                    st.download_button(
+                        label=f"Download Data {selected_pic}.xlsx",
+                        data=to_excel_bytes(filtered, sheet_name="Data_PR"),
+                        file_name=f"Data_PR_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                    st.caption(f"Menampilkan {len(filtered):,} baris data yang akan di-download.")
+                else:
+                    st.info("Data tidak tersedia untuk fitur download PR Balance per PIC.")
 
     # =====================================================
     # MID
@@ -1273,25 +1290,6 @@ def main():
                 #st.dataframe(pic_sla_summary, use_container_width=True, hide_index=True)
                 render_pic_sla_bar(pic_sla_summary)
 
-
-            # Download per PIC PR
-            with st.container(border=True):
-                st.subheader("📥 Download Data PR per PIC")
-
-                if not df_pr_f.empty and "PIC Procurement" in df_pr_f.columns:
-                    options = sorted(df_pr_f["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist())
-                    selected_pic = st.selectbox("Pilih PIC Procurement:", options, key="pr_pic_select")
-
-                    filtered = df_pr_f[df_pr_f["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic].copy()
-                    st.download_button(
-                        label=f"Download Data {selected_pic}.xlsx",
-                        data=to_excel_bytes(filtered, sheet_name="Data_PR"),
-                        file_name=f"Data_PR_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                else:
-                    st.info("Data tidak tersedia untuk fitur download PR per PIC.")
-
             # Download PR Balance by status
             with st.container(border=True):
                 st.subheader("📥 Download Data PR (Periode & Status)")
@@ -1319,6 +1317,25 @@ def main():
                         st.warning("Tidak ada data yang sesuai dengan filter yang dipilih.")
                 else:
                     st.info("Data PR tidak tersedia untuk export.")
+
+            # Download per PIC PR
+            with st.container(border=True):
+                st.subheader("📥 Download Data PR per PIC")
+
+                if not df_pr_final_f.empty and "PIC Procurement" in df_pr_final_f.columns:
+                    options = sorted(df_pr_final_f["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist())
+                    selected_pic = st.selectbox("Pilih PIC Procurement:", options, key="pr_pic_select")
+
+                    filtered = df_pr_final_f[df_pr_final_f["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic].copy()
+                    st.download_button(
+                        label=f"Download Data {selected_pic}.xlsx",
+                        data=to_excel_bytes(filtered, sheet_name="Data_PR"),
+                        file_name=f"Data_PR_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                    st.caption(f"Menampilkan {len(filtered):,} baris data yang akan di-download.")
+                else:
+                    st.info("Data tidak tersedia untuk fitur download PR per PIC.")
     
     # ---------- DO ----------
     if selected_doc_type == "DO":
