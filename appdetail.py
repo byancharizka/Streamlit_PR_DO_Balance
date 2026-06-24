@@ -233,12 +233,6 @@ def safe_mean(df: pd.DataFrame, col: str) -> float:
         return 0.0
     return float(df[col].mean()) if not df[col].dropna().empty else 0.0
 
-
-def safe_sum(df: pd.DataFrame, col: str) -> float:
-    if df.empty or col not in df.columns:
-        return 0.0
-    return float(df[col].sum())
-
 def safe_sum(df: pd.DataFrame, col: str) -> float:
     if df.empty:
         return 0.0
@@ -699,11 +693,28 @@ def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, doc_col: s
 def calculate_aging(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
     if df.empty or date_col not in df.columns:
         return df.copy()
+
     working = df.copy()
     working = safe_to_datetime(working, date_col)
+    working = safe_to_datetime(working, "date_inprogress")
+    working = safe_to_datetime(working, "date_complete")
+
     today = pd.to_datetime(TODAY)
-    working["Aging"] = (today - working[date_col]).dt.days
+
+    def compute_aging(row):
+        # Jika ada date_complete → pakai itu
+        if pd.notna(row.get("date_complete")):
+            return (row["date_complete"] - row[date_col]).days
+        # Jika tidak ada complete tapi ada inprogress → pakai itu
+        elif pd.notna(row.get("date_inprogress")):
+            return (row["date_inprogress"] - row[date_col]).days
+        # Jika keduanya kosong → pakai today
+        else:
+            return (today - row[date_col]).days
+
+    working["Aging"] = working.apply(compute_aging, axis=1)
     return working
+
 
 def categorize_aging(df: pd.DataFrame) -> pd.DataFrame:
     bins = [0, 30, 60, 90, float("inf")]
@@ -712,7 +723,7 @@ def categorize_aging(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def render_aging_bar(df: pd.DataFrame, doc_col: str):
+def render_aging_bar(df: pd.DataFrame, doc_col: str, chart_key: str = "aging_bar"):
     if df.empty or "Aging Category" not in df.columns:
         st.info("Data aging tidak tersedia.")
         return
@@ -724,20 +735,23 @@ def render_aging_bar(df: pd.DataFrame, doc_col: str):
     )
 
     fig = px.bar(
-    summary,
-    x="Aging Category",
-    y="Jumlah Transaksi",
-    color="Aging Category",
-    color_discrete_map={
-        "0-30 hari": "#2F80ED",   # biru tua
-        "31-60 hari": "#7ABBEE",  # biru muda
-        "61-90 hari": "#FCA27F",     # oranye
-        ">90 hari": "#EB5757"  # merah
-    },
-    text="Jumlah Transaksi"
+        summary,
+        x="Aging Category",
+        y="Jumlah Transaksi",
+        color="Aging Category",
+        color_discrete_map={
+            "0-30 hari": "#2F80ED",
+            "31-60 hari": "#7ABBEE",
+            "61-90 hari": "#FCA27F",
+            ">90 hari": "#EB5757"
+        },
+        text="Jumlah Transaksi"
     )
     fig.update_traces(textposition="outside")
-    st.plotly_chart(fig, use_container_width=True)
+
+    # ✅ tambahkan key unik di sini
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
+
 
 def summarize_pic_aging(df: pd.DataFrame, pic_col: str, doc_col: str) -> pd.DataFrame:
     if df.empty or pic_col not in df.columns or "Aging" not in df.columns or "Status" not in df.columns:
@@ -884,11 +898,19 @@ def main():
     df_pr_final = data_new["pr"]
     df_do_final = data_new["do"]
 
+    #df_pr = safe_to_datetime(df_pr, "date_inprogress")
+    #df_pr = safe_to_datetime(df_pr, "date_complete")
+
     # Pastikan kolom PIC dan Status sesuai
     df_pr_final = df_pr_final.rename(columns={
     "item_pic_procurement_name": "PIC Procurement",
     "status_description": "Status"
     })
+
+    # Pastikan kolom tanggal sudah dalam format datetime
+    df_pr_final = safe_to_datetime(df_pr_final, "transaction_date")
+    df_pr_final = safe_to_datetime(df_pr_final, "date_inprogress")
+    df_pr_final = safe_to_datetime(df_pr_final, "date_complete")
 
     # ---------- TOP FILTERS ----------
     col_head1, col_head2, col_head3, col_head4, col_head5 = st.columns([1, 1, 1, 1, 1])
@@ -1084,32 +1106,35 @@ def main():
     # =====================================================
         with col_tengah:
 
-            df_pr_f_aging = calculate_aging(df_pr_f, "transaction_date")
-            df_pr_f_aging = categorize_aging(df_pr_f_aging)
-            # Hitung aging
-            df_pr_final_f_real_aging = calculate_aging(df_pr_final_f_real, "transaction_date")
-            df_pr_final_f_real_aging = categorize_aging(df_pr_final_f_real_aging)
+            # 🔹 Filter hanya PR yang sudah punya tanggal inprogress atau complete
+            df_pr_valid = df_pr_final_f_real[
+            df_pr_final_f_real["date_inprogress"].isna() & df_pr_final_f_real["date_complete"].isna()
+            ].copy()
 
-            # Filter hanya PR yang belum complete
-            #df_pr_final_f_real_outstanding = df_pr_final_f_real[df_pr_final_f_real["Status"] = "Complete"]
-            # Filter hanya PR dengan status Complete atau In Progress
-            df_pr_final_f_real_selected = df_pr_final_f_real_aging[
-            (df_pr_final_f_real["Status"] == "Complete") | 
-            (df_pr_final_f_real["Status"] == "In Progress")
-            ]
+
+            df_pr_final_valid = df_pr_final_f_real[
+            df_pr_final_f_real["date_inprogress"].notna() | df_pr_final_f_real["date_complete"].notna()
+            ].copy()
+
+            # Lanjutkan proses aging hanya untuk PR yang valid
+            df_pr_valid = calculate_aging(df_pr_valid, "transaction_date")
+            df_pr_valid = categorize_aging(df_pr_valid)
+
+            df_pr_final_valid = calculate_aging(df_pr_final_valid, "transaction_date")
+            df_pr_final_valid = categorize_aging(df_pr_final_valid)
 
             with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging PR")
-                render_aging_bar(df_pr_final_f_real_selected, "transaction_number")
+                render_aging_bar(df_pr_final_valid, "transaction_number", chart_key="aging_pr")
 
             with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging PR Balance")
-                render_aging_bar(df_pr_f_aging, "No. PR")
+                render_aging_bar(df_pr_valid, "transaction_number", chart_key="aging_pr_outstanding")
 
 
 
-                pic_aging_summary = summarize_pic_aging(df_pr_f_aging, "PIC Procurement", "No. PR")
-                pic_aging_summary_final = summarize_pic_aging(df_pr_final_f_real_selected, "PIC Procurement", "transaction_number")
+                pic_aging_summary = summarize_pic_aging(df_pr_valid, "PIC Procurement", "transaction_number")
+                pic_aging_summary_final = summarize_pic_aging(df_pr_final_valid, "PIC Procurement", "transaction_number")
 
             with st.container(border=True):
                 st.subheader("👥 Analisis PR - Kinerja PIC Procurement")
@@ -1130,13 +1155,13 @@ def main():
     with col_kanan:
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance PR")
-                render_sla_gauge(df_pr_final_f_real_aging, threshold=30, title="SLA Compliance PR")
+                render_sla_gauge(df_pr_final_valid, threshold=30, title="SLA Compliance PR")
 
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance PR Balance")
-                render_sla_gauge(df_pr_f_aging, threshold=30, title="SLA Compliance PR Balance")
+                render_sla_gauge(df_pr_valid, threshold=30, title="SLA Compliance PR Balance")
 
-            pic_sla_summary = summarize_pic_sla(df_pr_final_f_real_aging, "PIC Procurement", "transaction_number", threshold=30)
+            pic_sla_summary = summarize_pic_sla(df_pr_final_valid, "PIC Procurement", "transaction_number", threshold=30)
 
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance per PIC Procurement")
