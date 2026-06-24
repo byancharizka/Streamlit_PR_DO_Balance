@@ -1161,15 +1161,31 @@ def main():
                 else:
                     st.info("Data PR Balance tidak tersedia untuk export.")
 
-            # Download per PIC PR
+            # Download per PIC PR Balance
             with st.container(border=True):
                 st.subheader("📥 Download Data PR Balance per PIC")
 
                 if not df_pr_final_f.empty and "PIC Procurement" in df_pr_final_f.columns:
-                    options = sorted(df_pr_final_f["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist())
+                    # Filter status hanya Need Approved, Approved, In Progress
+                    df_filtered_status = df_pr_final_f[
+                        df_pr_final_f["Status"].isin(["Need Approved", "Approved", "In Progress"])
+                    ].copy()
+
+                    # Tambahkan opsi "Semua"
+                    options = ["Semua"] + sorted(
+                        df_filtered_status["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist()
+                    )
+
                     selected_pic = st.selectbox("Pilih PIC Procurement:", options, key="pr_balance_pic_select")
 
-                    filtered = df_pr_final_f[df_pr_final_f["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic].copy()
+                    # Jika pilih "Semua", ambil semua data sesuai status
+                    if selected_pic == "Semua":
+                        filtered = df_filtered_status.copy()
+                    else:
+                        filtered = df_filtered_status[
+                            df_filtered_status["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic
+                        ].copy()
+
                     st.download_button(
                         label=f"⬇️Download Data {selected_pic}.xlsx",
                         data=to_excel_bytes(filtered, sheet_name="Data_PR"),
@@ -1363,25 +1379,41 @@ def main():
                 else:
                     st.info("Data PR tidak tersedia untuk export.")
 
-            # Download per PIC PR
+            # Download per PIC PR Balance
             with st.container(border=True):
                 st.subheader("📥 Download Data PR per PIC")
 
                 if not df_pr_final_real.empty and "PIC Procurement" in df_pr_final_real.columns:
-                    options = sorted(df_pr_final_real["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist())
+                    # Filter status hanya Need Approved, Approved, In Progress
+                    df_filtered_status = df_pr_final_real[
+                        df_pr_final_real["Status"].isin(["In Progress", "Complete"])
+                    ].copy()
+
+                    # Tambahkan opsi "Semua"
+                    options = ["Semua"] + sorted(
+                        df_filtered_status["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist()
+                    )
+
                     selected_pic = st.selectbox("Pilih PIC Procurement:", options, key="pr_pic_select")
 
-                    filtered = df_pr_final_real[df_pr_final_real["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic].copy()
+                    # Jika pilih "Semua", ambil semua data sesuai status
+                    if selected_pic == "Semua":
+                        filtered = df_filtered_status.copy()
+                    else:
+                        filtered = df_filtered_status[
+                            df_filtered_status["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic
+                        ].copy()
+
                     st.download_button(
                         label=f"⬇️Download Data {selected_pic}.xlsx",
                         data=to_excel_bytes(filtered, sheet_name="Data_PR"),
                         file_name=f"Data_PR_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key=f"download Data {selected_pic}"   # 🔹 key unik
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
                     st.caption(f"Menampilkan {len(filtered):,} baris data yang akan di-download.")
                 else:
-                    st.info("Data tidak tersedia untuk fitur download PR per PIC.")
+                    st.info("Data tidak tersedia untuk fitur download PR Balance per PIC.")
+
     
     # ---------- DO ----------
     if selected_doc_type == "DO":
