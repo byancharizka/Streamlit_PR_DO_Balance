@@ -717,7 +717,7 @@ def calculate_aging(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
 
 
 def categorize_aging(df: pd.DataFrame) -> pd.DataFrame:
-    bins = [0, 30, 60, 90, float("inf")]
+    bins = [-1, 30, 60, 90, float("inf")]   # 🔹 ubah dari 0 → -1
     labels = ["0-30 hari", "31-60 hari", "61-90 hari", ">90 hari"]
     df["Aging Category"] = pd.cut(df["Aging"], bins=bins, labels=labels, right=True)
     return df
@@ -1137,8 +1137,8 @@ def main():
             with st.container(border=True):
                 st.subheader("📥 Download Data PR Balance (Periode & Status)")
 
-                if not df_pr_f.empty and "Status" in df_pr_f.columns:
-                    all_statuses = sorted([s for s in df_pr_f["Status"].dropna().astype(str).unique().tolist() if s.strip()])
+                if not df_pr_final_f.empty and "Status" in df_pr_final_f.columns:
+                    all_statuses = sorted([s for s in df_pr_final_f["Status"].dropna().astype(str).unique().tolist() if s.strip()])
                     selected_statuses = st.multiselect(
                         "Pilih Status untuk di-download:",
                         all_statuses,
@@ -1146,7 +1146,7 @@ def main():
                         key="pr_balance_status_export"
                     )
 
-                    df_download = df_pr_f[df_pr_f["Status"].isin(selected_statuses)].copy()
+                    df_download = df_pr_final_f[df_pr_final_f["Status"].isin(selected_statuses)].copy()
 
                     if not df_download.empty:
                         st.download_button(
@@ -1165,11 +1165,11 @@ def main():
             with st.container(border=True):
                 st.subheader("📥 Download Data PR Balance per PIC")
 
-                if not df_pr_f.empty and "PIC Procurement" in df_pr_f.columns:
-                    options = sorted(df_pr_f["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist())
+                if not df_pr_final_f.empty and "PIC Procurement" in df_pr_final_f.columns:
+                    options = sorted(df_pr_final_f["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist())
                     selected_pic = st.selectbox("Pilih PIC Procurement:", options, key="pr_balance_pic_select")
 
-                    filtered = df_pr_f[df_pr_f["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic].copy()
+                    filtered = df_pr_final_f[df_pr_final_f["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic].copy()
                     st.download_button(
                         label=f"⬇️Download Data {selected_pic}.xlsx",
                         data=to_excel_bytes(filtered, sheet_name="Data_PR"),
@@ -1187,15 +1187,19 @@ def main():
 
             # 🔹 Filter hanya PR yang sudah punya tanggal inprogress atau complete
             #Aging PR
+            #df_pr_final_valid = df_pr_final_real[
+            #df_pr_final_real["date_inprogress"].notna() | df_pr_final_real["date_complete"].notna()
+            #].copy()
             df_pr_final_valid = df_pr_final_real[
-            df_pr_final_real["date_inprogress"].notna() | df_pr_final_real["date_complete"].notna()
+            df_pr_final_real["Status"].isin(["In Progress", "Complete"])
             ].copy()
+
             #Aging PR Balance
             # Filter PR Balance hanya untuk status aktif (exclude Complete & Draft)
             df_pr_valid = df_pr_final_f[
-            (~df_pr_final_f["Status"].str.contains("Complete", case=False, na=False)) &
-            (~df_pr_final_f["Status"].str.contains("Draft", case=False, na=False))
+            ~df_pr_final_f["Status"].isin(["Complete", "Draft"])
             ].copy()
+
 
             # Lanjutkan proses aging hanya untuk PR yang valid
             #Aging PR
@@ -1330,12 +1334,12 @@ def main():
                 render_sla_trend(df_pr_final_valid, threshold=30, date_col="transaction_date")
 
 
-            # Download PR Balance by status
+            # Download PR by period & status
             with st.container(border=True):
                 st.subheader("📥 Download Data PR (Periode & Status)")
 
-                if not df_pr_final_f.empty and "Status" in df_pr_final_f.columns:
-                    all_statuses = sorted([s for s in df_pr_final_f["Status"].dropna().astype(str).unique().tolist() if s.strip()])
+                if not df_pr_final_real.empty and "Status" in df_pr_final_real.columns:
+                    all_statuses = sorted([s for s in df_pr_final_real["Status"].dropna().astype(str).unique().tolist() if s.strip()])
                     selected_statuses = st.multiselect(
                         "Pilih Status untuk di-download:",
                         all_statuses,
@@ -1343,14 +1347,15 @@ def main():
                         key="pr_status_export"
                     )
 
-                    df_download = df_pr_final_f[df_pr_final_f["Status"].isin(selected_statuses)].copy()
+                    df_download = df_pr_final_real[df_pr_final_real["Status"].isin(selected_statuses)].copy()
 
                     if not df_download.empty:
                         st.download_button(
                             label=f"⬇️Download {len(df_download):,} Baris Data (Filtered).xlsx",
                             data=to_excel_bytes(df_download, sheet_name="Data_PR"),
                             file_name=f"Data_PR_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"download {len(df_download):,} Baris Data (Filtered)"   # 🔹 key unik
                         )
                         st.caption(f"Menampilkan {len(df_download):,} baris data yang akan di-download.")
                     else:
@@ -1362,16 +1367,17 @@ def main():
             with st.container(border=True):
                 st.subheader("📥 Download Data PR per PIC")
 
-                if not df_pr_final_f.empty and "PIC Procurement" in df_pr_final_f.columns:
-                    options = sorted(df_pr_final_f["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist())
+                if not df_pr_final_real.empty and "PIC Procurement" in df_pr_final_real.columns:
+                    options = sorted(df_pr_final_real["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist())
                     selected_pic = st.selectbox("Pilih PIC Procurement:", options, key="pr_pic_select")
 
-                    filtered = df_pr_final_f[df_pr_final_f["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic].copy()
+                    filtered = df_pr_final_real[df_pr_final_real["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic].copy()
                     st.download_button(
                         label=f"⬇️Download Data {selected_pic}.xlsx",
                         data=to_excel_bytes(filtered, sheet_name="Data_PR"),
                         file_name=f"Data_PR_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"download Data {selected_pic}"   # 🔹 key unik
                     )
                     st.caption(f"Menampilkan {len(filtered):,} baris data yang akan di-download.")
                 else:
