@@ -965,7 +965,7 @@ def main():
         df_do_f = apply_cumulative_filter(df_do_f, report_end_date)
         df_npr_f = apply_cumulative_filter(df_npr_f, report_end_date)
         df_pur_f = apply_cumulative_filter(df_pur_f, report_end_date)
-        #df_pr_final_f = apply_cumulative_filter(df_pr_final_f, report_end_date)
+        df_pr_final_f = apply_cumulative_filter(df_pr_final_f, report_end_date)
 
         # 🔹 Dataset baru (PR Final) pakai realisasi
         df_pr_f_real = apply_realization_filter(df_pr_f, report_start_date, report_end_date)
@@ -1108,21 +1108,22 @@ def main():
         with col_tengah:
 
             # 🔹 Filter hanya PR yang sudah punya tanggal inprogress atau complete
-            df_pr_valid = df_pr_final_f_real[
-            df_pr_final_f_real["date_inprogress"].isna() & df_pr_final_f_real["date_complete"].isna()
-            ].copy()
-
-
+            #Aging PR
             df_pr_final_valid = df_pr_final_f_real[
             df_pr_final_f_real["date_inprogress"].notna() | df_pr_final_f_real["date_complete"].notna()
             ].copy()
+            #Aging PR Balance
+            df_pr_valid = df_pr_final_f[
+            df_pr_final_f["date_inprogress"].isna() & df_pr_final_f["date_complete"].isna()
+            ].copy()
 
             # Lanjutkan proses aging hanya untuk PR yang valid
-            df_pr_valid = calculate_aging(df_pr_valid, "transaction_date")
-            df_pr_valid = categorize_aging(df_pr_valid)
-
+            #Aging PR
             df_pr_final_valid = calculate_aging(df_pr_final_valid, "transaction_date")
             df_pr_final_valid = categorize_aging(df_pr_final_valid)
+            #Aging PR Balance
+            df_pr_valid = calculate_aging(df_pr_valid, "transaction_date")
+            df_pr_valid = categorize_aging(df_pr_valid)
 
             with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging PR")
@@ -1267,15 +1268,7 @@ def main():
                 st.subheader("🔥 Heatmap DO Balance - Aktivitas PIC Procurement")
                 render_pic_heatmap(df_do_f, "PIC Procurement", "transaction_date", "No. DO", "Heatmap Aktivitas PIC Procurement per Bulan")
 
-            df_pr_f_aging = calculate_aging(df_pr_f, "transaction_date")
-            df_pr_f_aging = categorize_aging(df_pr_f_aging)
-            #df_pr_final_f_real_aging = calculate_aging(df_pr_final_f_real, "transaction_date")
-            #df_pr_final_f_real_aging = categorize_aging(df_pr_final_f_real_aging)
-            # Hitung aging untuk PR
-            df_pr_final_f_real_aging = calculate_aging(df_pr_final_f_real, "transaction_date")
-            df_pr_final_f_real_aging = categorize_aging(df_pr_final_f_real_aging)
 
-    
     
     # ---------- FOOTER INFO ----------
     with st.expander("ℹ️ Informasi Teknis Dashboard"):
