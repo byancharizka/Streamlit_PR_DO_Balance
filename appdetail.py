@@ -821,11 +821,11 @@ def render_sla_gauge(df: pd.DataFrame, threshold: int = 30, title: str = "SLA Co
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=sla_compliance,
-        number={'suffix': '%', 'font': {'size': 48, 'color': '#555'}},  # 🔹 tambahkan ini
+        number={'suffix': '%', 'font': {'size': 48, 'color': "#000"}},  # 🔹 tambahkan ini
         title={'text': f"{title} (≤{threshold} hari)"},
         gauge={
             'axis': {'range': [0, 100]},
-            'bar': {'color': "green"},
+            'bar': {'color': "blue"},
             'steps': [
                 {'range': [0, 50], 'color': "red"},
                 {'range': [50, 80], 'color': "yellow"},
@@ -969,8 +969,8 @@ def main():
 
         # 🔹 Dataset baru (PR Final) pakai realisasi
         df_pr_f_real = apply_realization_filter(df_pr_f, report_start_date, report_end_date)
-        df_pr_final_f_real = apply_realization_filter(df_pr_final_f, report_start_date, report_end_date)
-        df_do_final_f_real = apply_realization_filter(df_do_final_f, report_start_date, report_end_date)
+        df_pr_final_real = apply_realization_filter(df_pr_final, report_start_date, report_end_date)
+        df_do_final_real = apply_realization_filter(df_do_final, report_start_date, report_end_date)
 
 
     # ---------- SEARCH FILTER ----------
@@ -980,7 +980,7 @@ def main():
     df_do_f = apply_search_filter(df_do_f, search_number, search_status, search_pic)
     df_npr_f = apply_search_filter(df_npr_f, search_number, search_status, search_pic)
     df_pur_f = apply_search_filter(df_pur_f, search_number, search_status, search_pic)
-    df_pr_final_f_real = apply_search_filter(df_pr_final_f_real, search_number, search_status, search_pic)
+    df_pr_final_real = apply_search_filter(df_pr_final_real, search_number, search_status, search_pic)
 
     # ---------- ENSURE IMPORTANT COLUMNS ----------
     df_pr_f = ensure_columns(df_pr_f, ["Nominal", "No. PR", "Status", "PIC Procurement"])
@@ -989,46 +989,46 @@ def main():
     df_do_f = ensure_columns(df_do_f, ["Nominal", "No. DO", "PIC Purchasing"])
     df_npr_f = ensure_columns(df_npr_f, ["No. Transaksi"])
     df_pur_f = ensure_columns(df_pur_f, ["No. PUR", "PIC", "Status"])
-    df_pr_final_f_real = ensure_columns(df_pr_final_f_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
-    df_do_final_f_real = ensure_columns(df_do_final_f_real, ["transaction_number", "price", "quantity", "discount", "transaction_total", "tax1_value", "tax2_value"])
+    df_pr_final_real = ensure_columns(df_pr_final_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
+    df_do_final_real = ensure_columns(df_do_final_real, ["transaction_number", "price", "quantity", "discount", "transaction_total", "tax1_value", "tax2_value"])
 
     df_pr_f = safe_to_numeric(df_pr_f, ["Nominal"])
     df_po_f = safe_to_numeric(df_po_f, ["Nominal"])
     df_grn_f = safe_to_numeric(df_grn_f, ["Nominal"])
     df_do_f = safe_to_numeric(df_do_f, ["Nominal"])
-    #df_pr_final_f_real = safe_to_numeric(df_pr_final_f_real, ["price", "discount", "quantity", "tax1_percentage", "tax2_percentage"])
-    df_pr_final_f_real= safe_to_numeric(df_pr_final_f_real, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
-    df_do_final_f_real= safe_to_numeric(df_do_final_f_real, ["item_price", "item_discount", "item_quantity", "item_tax1_value", "item_tax2_value"])
+    #df_pr_final_real = safe_to_numeric(df_pr_final_real, ["price", "discount", "quantity", "tax1_percentage", "tax2_percentage"])
+    df_pr_final_real= safe_to_numeric(df_pr_final_real, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
+    df_do_final_real= safe_to_numeric(df_do_final_real, ["item_price", "item_discount", "item_quantity", "item_tax1_value", "item_tax2_value"])
     
     # ---------- METRICS ----------
     total_pr_unpr = safe_sum(df_pr_f, "Nominal")
     total_po_unpr = safe_sum(df_po_f, "Nominal")
     total_grn_unpr = safe_sum(df_grn_f, "Nominal")
     total_do_unpr = safe_sum(df_do_f, "Nominal")
-    #total_pr = safe_sum(df_pr_final_f_real, "transaction_total")
+    #total_pr = safe_sum(df_pr_final_real, "transaction_total")
 
-    df_pr_final_f_real = normalize_text_columns(df_pr_final_f_real, ["item_PIC_Procurement"])
+    df_pr_final_real = normalize_text_columns(df_pr_final_real, ["item_PIC_Procurement"])
 
 
-    df_pr_final_f_real["disc_per_unit"] = df_pr_final_f_real["item_price"] * (df_pr_final_f_real["item_discount"] / 100)
-    df_pr_final_f_real["tax_unit"] = (df_pr_final_f_real["item_price"] - df_pr_final_f_real["disc_per_unit"]) * (df_pr_final_f_real["item_tax1_percentage"] / 100)
-    df_pr_final_f_real["net_price_unit"] = df_pr_final_f_real["item_price"] - df_pr_final_f_real["disc_per_unit"] + df_pr_final_f_real["tax_unit"]
-    df_pr_final_f_real["total_pr_row"] = df_pr_final_f_real["item_quantity"] * df_pr_final_f_real["net_price_unit"]
-    total_pr = df_pr_final_f_real["total_pr_row"].sum()
+    df_pr_final_real["disc_per_unit"] = df_pr_final_real["item_price"] * (df_pr_final_real["item_discount"] / 100)
+    df_pr_final_real["tax_unit"] = (df_pr_final_real["item_price"] - df_pr_final_real["disc_per_unit"]) * (df_pr_final_real["item_tax1_percentage"] / 100)
+    df_pr_final_real["net_price_unit"] = df_pr_final_real["item_price"] - df_pr_final_real["disc_per_unit"] + df_pr_final_real["tax_unit"]
+    df_pr_final_real["total_pr_row"] = df_pr_final_real["item_quantity"] * df_pr_final_real["net_price_unit"]
+    total_pr = df_pr_final_real["total_pr_row"].sum()
 
-    df_do_final_f_real["disc_per_unit"] = df_do_final_f_real["item_price"] * (df_do_final_f_real["item_discount"] / 100)
-    #df_do_final_f_real["tax_unit"] = (df_do_final_f_real["item_price"] - df_do_final_f_real["disc_per_unit"]) * (df_do_final_f_real["item_tax1_percentage"] / 100)
-    df_do_final_f_real["tax_unit"] = df_do_final_f_real["item_tax1_value"] + df_do_final_f_real["item_tax1_value"]
-    #df_do_final_f_real["net_price_unit"] = df_do_final_f_real["item_price"] - df_do_final_f_real["disc_per_unit"] + df_do_final_f_real["tax_unit"]
-    df_do_final_f_real["net_price_unit"] = df_do_final_f_real["item_price"] - df_do_final_f_real["disc_per_unit"]
-    df_do_final_f_real["total_do_row"] = df_do_final_f_real["item_quantity"] * df_do_final_f_real["net_price_unit"]
-    total_do = df_do_final_f_real["total_do_row"].sum()
+    df_do_final_real["disc_per_unit"] = df_do_final_real["item_price"] * (df_do_final_real["item_discount"] / 100)
+    #df_do_final_real["tax_unit"] = (df_do_final_real["item_price"] - df_do_final_real["disc_per_unit"]) * (df_do_final_real["item_tax1_percentage"] / 100)
+    df_do_final_real["tax_unit"] = df_do_final_real["item_tax1_value"] + df_do_final_real["item_tax1_value"]
+    #df_do_final_real["net_price_unit"] = df_do_final_real["item_price"] - df_do_final_real["disc_per_unit"] + df_do_final_real["tax_unit"]
+    df_do_final_real["net_price_unit"] = df_do_final_real["item_price"] - df_do_final_real["disc_per_unit"]
+    df_do_final_real["total_do_row"] = df_do_final_real["item_quantity"] * df_do_final_real["net_price_unit"]
+    total_do = df_do_final_real["total_do_row"].sum()
 
-    total_pr_count = safe_unique_count(df_pr_final_f_real, "transaction_number")
+    total_pr_count = safe_unique_count(df_pr_final_real, "transaction_number")
     total_pr_balance_count = safe_unique_count(df_pr_f, "No. PR")
-    total_pr_rows = len(df_pr_final_f_real)
+    total_pr_rows = len(df_pr_final_real)
     total_pr_balance_rows = len(df_pr_f)
-    total_do_count = safe_unique_count(df_do_final_f_real, "transaction_number")
+    total_do_count = safe_unique_count(df_do_final_real, "transaction_number")
     total_do_balance_count = safe_unique_count(df_do_f, "No. DO")
     total_do_rows = len(df_do_f)
     total_do_balance_rows = len(df_do_f)
@@ -1098,7 +1098,33 @@ def main():
                 st.subheader("🔥 Heatmap PR Balance - Aktivitas PIC Procurement")
                 render_pic_heatmap(df_pr_f, "PIC Procurement", "transaction_date", "No. PR", "Heatmap Aktivitas PIC Procurement per Bulan")
 
+        # Download PR Balance by status
+            with st.container(border=True):
+                st.subheader("📥 Download Data PR Balance (Periode & Status)")
 
+                if not df_pr_f.empty and "Status" in df_pr_f.columns:
+                    all_statuses = sorted([s for s in df_pr_f["Status"].dropna().astype(str).unique().tolist() if s.strip()])
+                    selected_statuses = st.multiselect(
+                        "Pilih Status untuk di-download:",
+                        all_statuses,
+                        default=all_statuses,
+                        key="pr_balance_status_export"
+                    )
+
+                    df_download = df_pr_f[df_pr_f["Status"].isin(selected_statuses)].copy()
+
+                    if not df_download.empty:
+                        st.download_button(
+                            label=f"Download {len(df_download):,} Baris Data (Filtered).xlsx",
+                            data=to_excel_bytes(df_download, sheet_name="Data_PR"),
+                            file_name=f"Data_PR_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                        st.caption(f"Menampilkan {len(df_download):,} baris data yang akan di-download.")
+                    else:
+                        st.warning("Tidak ada data yang sesuai dengan filter yang dipilih.")
+                else:
+                    st.info("Data PR Balance tidak tersedia untuk export.")
 
 
 
@@ -1109,12 +1135,14 @@ def main():
 
             # 🔹 Filter hanya PR yang sudah punya tanggal inprogress atau complete
             #Aging PR
-            df_pr_final_valid = df_pr_final_f_real[
-            df_pr_final_f_real["date_inprogress"].notna() | df_pr_final_f_real["date_complete"].notna()
+            df_pr_final_valid = df_pr_final_real[
+            df_pr_final_real["date_inprogress"].notna() | df_pr_final_real["date_complete"].notna()
             ].copy()
             #Aging PR Balance
+            # Filter PR Balance hanya untuk status aktif (exclude Complete & Draft)
             df_pr_valid = df_pr_final_f[
-            df_pr_final_f["date_inprogress"].isna() & df_pr_final_f["date_complete"].isna()
+            (~df_pr_final_f["Status"].str.contains("Complete", case=False, na=False)) &
+            (~df_pr_final_f["Status"].str.contains("Draft", case=False, na=False))
             ].copy()
 
             # Lanjutkan proses aging hanya untuk PR yang valid
@@ -1124,6 +1152,18 @@ def main():
             #Aging PR Balance
             df_pr_valid = calculate_aging(df_pr_valid, "transaction_date")
             df_pr_valid = categorize_aging(df_pr_valid)
+            #df_pr_valid = df_pr_valid.drop_duplicates(subset=["transaction_number"])
+
+            # Filter hanya PR valid aktif, exclude Draft
+            df_pr_final_valid = df_pr_final_valid[
+            ~df_pr_final_valid["Status"].str.contains("Draft", case=False, na=False)
+            ].copy()
+            # Filter hanya PR aktif, exclude Draft
+            #df_pr_valid = df_pr_valid[
+            #~df_pr_valid["Status"].str.contains("Draft", case=False, na=False)
+            #].copy()
+
+
 
             with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging PR")
@@ -1151,7 +1191,7 @@ def main():
 
 
 
-            # Download per PIC PR
+            # Download per Category PR Aging
             with st.container(border=True):
                 st.subheader("📥 Download Data per Categori Aging PR")
 
@@ -1172,13 +1212,46 @@ def main():
 
                     # Tombol download
                     st.download_button(
-                        label=f"⬇️ Unduh Data PR Aging ({selected_category_pr})",
-                        data=to_excel_bytes(df_pr_filtered, sheet_name="PR Aging"),
-                        file_name=f"PR_Aging_{selected_category_pr.replace(' ', '_')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    label=f"⬇️ Unduh Data PR Aging ({selected_category_pr})",
+                    data=to_excel_bytes(df_pr_filtered, sheet_name="PR Aging"),
+                    file_name=f"PR_Aging_{selected_category_pr.replace(' ', '_')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"download_pr_aging_{selected_category_pr}"   # 🔹 key unik
                     )
+
                 else:
-                    st.info("Data tidak tersedia untuk fitur download PR per Category Aging PR.")
+                    st.info("Data tidak tersedia untuk fitur download per Category Aging PR.")
+
+            # Download per Category PR Balance Aging
+            with st.container(border=True):
+                st.subheader("📥 Download Data per Categori Aging PR Balance")
+
+                if not df_pr_valid.empty:
+                    # Filter data aging PR berdasarkan kategori yang dipilih
+                    selected_category_balance = st.selectbox(
+                        "Pilih kategori aging PR Balance untuk diunduh 📂",
+                        ["Semua", "0-30 hari", "31-60 hari", "61-90 hari", ">90 hari"]
+                    )
+
+                    # Jika bukan 'Semua', filter sesuai kategori
+                    if selected_category_balance != "Semua":
+                        df_balance_filtered = df_pr_valid[
+                            df_pr_valid["Aging Category"] == selected_category_balance
+                        ].copy()
+                    else:
+                        df_balance_filtered = df_pr_valid.copy()
+
+                    # Tombol download
+                    st.download_button(
+                    label=f"⬇️ Unduh Data PR Balance Aging ({selected_category_balance})",
+                    data=to_excel_bytes(df_balance_filtered, sheet_name="PR Balance Aging"),
+                    file_name=f"PR_Balance_Aging_{selected_category_balance.replace(' ', '_')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"download_pr_balance_{selected_category_balance}"   # 🔹 key unik
+                    )
+
+                else:
+                    st.info("Data tidak tersedia untuk fitur download per Category Aging PR Balance.")
 
 
     # =====================================================
@@ -1219,12 +1292,12 @@ def main():
                 else:
                     st.info("Data tidak tersedia untuk fitur download PR per PIC.")
 
-        # Download PR by status
+            # Download PR Balance by status
             with st.container(border=True):
                 st.subheader("📥 Download Data PR (Periode & Status)")
 
-                if not df_pr_f.empty and "Status" in df_pr_f.columns:
-                    all_statuses = sorted([s for s in df_pr_f["Status"].dropna().astype(str).unique().tolist() if s.strip()])
+                if not df_pr_final_f.empty and "Status" in df_pr_final_f.columns:
+                    all_statuses = sorted([s for s in df_pr_final_f["Status"].dropna().astype(str).unique().tolist() if s.strip()])
                     selected_statuses = st.multiselect(
                         "Pilih Status untuk di-download:",
                         all_statuses,
@@ -1232,7 +1305,7 @@ def main():
                         key="pr_status_export"
                     )
 
-                    df_download = df_pr_f[df_pr_f["Status"].isin(selected_statuses)].copy()
+                    df_download = df_pr_final_f[df_pr_final_f["Status"].isin(selected_statuses)].copy()
 
                     if not df_download.empty:
                         st.download_button(
