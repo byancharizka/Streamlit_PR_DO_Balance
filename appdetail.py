@@ -702,13 +702,13 @@ def calculate_aging(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
     today = pd.to_datetime(TODAY)
 
     def compute_aging(row):
-        # Jika ada date_complete → pakai itu
-        if pd.notna(row.get("date_complete")):
-            return (row["date_complete"] - row[date_col]).days
-        # Jika tidak ada complete tapi ada inprogress → pakai itu
-        elif pd.notna(row.get("date_inprogress")):
+        # 🔹 Prioritas pertama: date_inprogress
+        if pd.notna(row.get("date_inprogress")):
             return (row["date_inprogress"] - row[date_col]).days
-        # Jika keduanya kosong → pakai today
+        # 🔹 Kalau inprogress kosong tapi ada complete → pakai complete
+        elif pd.notna(row.get("date_complete")):
+            return (row["date_complete"] - row[date_col]).days
+        # 🔹 Kalau keduanya kosong → pakai today
         else:
             return (today - row[date_col]).days
 
