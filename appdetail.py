@@ -1188,8 +1188,8 @@ def main():
 
                     st.download_button(
                         label=f"⬇️Download Data {selected_pic}.xlsx",
-                        data=to_excel_bytes(filtered, sheet_name="Data_PR"),
-                        file_name=f"Data_PR_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        data=to_excel_bytes(filtered, sheet_name="Data_PR_Balance"),
+                        file_name=f"Data_PR_balance_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
                     st.caption(f"Menampilkan {len(filtered):,} baris data yang akan di-download.")
@@ -1379,7 +1379,7 @@ def main():
                 else:
                     st.info("Data PR tidak tersedia untuk export.")
 
-            # Download per PIC PR Balance
+            # Download per PIC PR
             with st.container(border=True):
                 st.subheader("📥 Download Data PR per PIC")
 
