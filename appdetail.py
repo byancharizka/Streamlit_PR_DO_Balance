@@ -967,7 +967,8 @@ def main():
         df_pur_f = apply_cumulative_filter(df_pur_f, report_end_date)
         #df_pr_final_f = apply_cumulative_filter(df_pr_final_f, report_end_date)
 
-            # 🔹 Dataset baru (PR Final) pakai realisasi
+        # 🔹 Dataset baru (PR Final) pakai realisasi
+        df_pr_f_real = apply_realization_filter(df_pr_f, report_start_date, report_end_date)
         df_pr_final_f_real = apply_realization_filter(df_pr_final_f, report_start_date, report_end_date)
         df_do_final_f_real = apply_realization_filter(df_do_final_f, report_start_date, report_end_date)
 
