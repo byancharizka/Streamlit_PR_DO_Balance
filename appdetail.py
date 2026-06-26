@@ -1423,7 +1423,7 @@ def main():
                 if not df_pr_final_real.empty and "PIC Procurement" in df_pr_final_real.columns:
                     # Filter status hanya Need Approved, Approved, In Progress
                     df_filtered_status = df_pr_final_real[
-                        df_pr_final_real["Status"].isin(["In Progress", "Complete"])
+                        df_pr_final_real["Status"].isin(["Approved", "In Progress", "Complete"])
                     ].copy()
 
                     # Tambahkan opsi "Semua"
