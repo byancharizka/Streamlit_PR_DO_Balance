@@ -726,22 +726,29 @@ def calculate_aging(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
     working = safe_to_datetime(working, date_col)
     working = safe_to_datetime(working, "date_inprogress")
     working = safe_to_datetime(working, "date_complete")
+    working = safe_to_datetime(working, "date_approved")
 
     today = pd.Timestamp.today().normalize()
 
     # Default aging = today - transaction_date
     working["Aging"] = (today - working[date_col]).dt.days
 
-    # Jika ada complete date → ganti aging
+    # Jika ada date_complete → ganti aging
     mask_complete = working["date_complete"].notna()
     working.loc[mask_complete, "Aging"] = (
         working.loc[mask_complete, "date_complete"] - working.loc[mask_complete, date_col]
     ).dt.days
 
-    # Jika ada inprogress date → ganti aging
+    # Jika ada date_inprogress → ganti aging
     mask_inprogress = working["date_inprogress"].notna()
     working.loc[mask_inprogress, "Aging"] = (
         working.loc[mask_inprogress, "date_inprogress"] - working.loc[mask_inprogress, date_col]
+    ).dt.days
+
+    # ✅ Dahulukan date_approved (override semua)
+    mask_approved = working["date_approved"].notna()
+    working.loc[mask_approved, "Aging"] = (
+        working.loc[mask_approved, "date_approved"] - working.loc[mask_approved, date_col]
     ).dt.days
 
     return working
@@ -839,7 +846,7 @@ def render_pic_aging_bar(summary_df: pd.DataFrame):
 
     st.plotly_chart(fig, use_container_width=True)
 
-def render_sla_gauge(df: pd.DataFrame, threshold: int = 30, title: str = "SLA Compliance"):
+def render_sla_gauge(df: pd.DataFrame, threshold: int = 10, title: str = "SLA Compliance"):
     if df.empty or "Aging" not in df.columns:
         st.info("Data aging tidak tersedia untuk SLA.")
         return
@@ -999,6 +1006,7 @@ def main():
 
     # Pastikan kolom tanggal sudah dalam format datetime
     df_pr_final = safe_to_datetime(df_pr_final, "transaction_date")
+    df_pr_final = safe_to_datetime(df_pr_final, "date_approved")
     df_pr_final = safe_to_datetime(df_pr_final, "date_inprogress")
     df_pr_final = safe_to_datetime(df_pr_final, "date_complete")
 
@@ -1228,7 +1236,7 @@ def main():
             #df_pr_final_real["date_inprogress"].notna() | df_pr_final_real["date_complete"].notna()
             #].copy()
             df_pr_final_valid = df_pr_final_real[
-            df_pr_final_real["Status"].isin(["In Progress", "Complete"])
+            df_pr_final_real["Status"].isin(["Approved", "In Progress", "Complete"])
             ].copy()
 
             #Aging PR Balance
