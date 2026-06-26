@@ -9,6 +9,8 @@ import pytz
 import requests
 import streamlit as st
 import plotly.graph_objects as go
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
 
 # =========================================================
 # 1) PAGE CONFIG - WAJIB PALING ATAS
@@ -32,10 +34,14 @@ logger = logging.getLogger(__name__)
 # 3) APP CONFIG
 # =========================================================
 TIMEZONE = pytz.timezone("Asia/Jakarta")
-TODAY = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+# Ambil tanggal hari ini
+today = date.today()
 
-DEFAULT_START_DATE = date(2026, 1, 1)
-REQUEST_TIMEOUT = int(os.getenv("SIBIMA_API_TIMEOUT", "30"))
+# Default: tanggal 1 bulan aktif sampai hari ini
+DEFAULT_START_DATE = date(today.year, today.month, 1)
+DEFAULT_END_DATE = today
+REQUEST_TIMEOUT = int(os.getenv("SIBIMA_API_TIMEOUT", "120"))
+
 
 BASE_URL = {
     "outstanding": "https://eas.sibima.id/api/dashboard/",
@@ -50,6 +56,17 @@ for key in BASE_URL:
     if not BASE_URL[key].endswith("/"):
         BASE_URL[key] += "/"
 
+def create_session():
+    session = requests.Session()
+    retries = Retry(
+        total=3,
+        backoff_factor=2,
+        status_forcelist=[502, 503, 504, 429],
+    )
+    adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
 
 # =========================================================
 # 4) CSS CUSTOM
@@ -256,7 +273,7 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Data") -> bytes:
 # =========================================================
 # 6) API FETCHING
 # =========================================================
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def get_api_data_old(endpoint: str, source: str = "outstanding", start_date=None, end_date=None):
     base_url = BASE_URL.get(source, BASE_URL["outstanding"])
     url = f"{base_url}{endpoint}"
@@ -264,7 +281,11 @@ def get_api_data_old(endpoint: str, source: str = "outstanding", start_date=None
 
     try:
         logger.info("Fetching endpoint=%s from source=%s params=%s", endpoint, source, params)
-        response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+
+        # 🔹 Gunakan session dengan retry
+        session = create_session()
+        response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+
         response.raise_for_status()
         payload = response.json()
 
@@ -273,101 +294,85 @@ def get_api_data_old(endpoint: str, source: str = "outstanding", start_date=None
             if isinstance(data_layer, dict):
                 rows = data_layer.get("data", [])
                 if isinstance(rows, list):
-                    return pd.DataFrame(rows)
+                    df = pd.DataFrame(rows)
+                    df = safe_to_datetime(df, "transaction_date")
+                    return df
         return pd.DataFrame()
 
     except Exception as e:
         st.warning(f"Gagal mengambil data dari endpoint {endpoint} ({source}): {e}")
         return pd.DataFrame()
-    
+
+@st.cache_data(ttl=300, show_spinner=False)
 def get_api_data_new(endpoint: str, source: str = "eas", start_date=None, end_date=None):
     base_url = BASE_URL.get(source, BASE_URL["eas"])
     url = f"{base_url}{endpoint}"
     params = {
         "date_start": start_date,
         "date_end": end_date,
-        "token": API_TOKEN,
-        "page": 1
+        "token": API_TOKEN
     }
 
-    all_rows = []
-    while True:
-        response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+    try:
+        # 🔹 Gunakan session dengan retry
+        session = create_session()
+        response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+
         response.raise_for_status()
         payload = response.json()
 
         rows = payload.get("data", [])
         if isinstance(rows, list):
+            all_rows = []
             for row in rows:
                 items = row.get("items", [])
                 if items:
                     for item in items:
-                        # aman: prefix item
                         flat = {**row, **{f"item_{k}": v for k, v in item.items()}}
                         all_rows.append(flat)
                 else:
                     all_rows.append(row)
 
-        meta = payload.get("meta", {})
-        if meta.get("current_page", 1) >= meta.get("last_page", 1):
-            break
-        params["page"] += 1
+            df = pd.DataFrame(all_rows)
+            df = safe_to_datetime(df, "transaction_date")
+            return df
 
-    # ✅ konversi ke DataFrame dan pastikan kolom tanggal jadi datetime
-    df = pd.DataFrame(all_rows)
-    df = safe_to_datetime(df, "transaction_date")
-    return df
+        return pd.DataFrame()
+
+    except Exception as e:
+        st.warning(f"Gagal mengambil data dari endpoint {endpoint} ({source}): {e}")
+        return pd.DataFrame()
 
 
-def load_all_data() -> dict[str, pd.DataFrame]:
+def load_all_data(start_date=None, end_date=None) -> dict[str, pd.DataFrame]:
     endpoint_map = {
         "pr": ("pr-balance", {"Tgl. PR": "transaction_date"}),
         "po": ("po-balance", {"Tgl. PO": "transaction_date"}),
         "grn": ("grn-balance", {"Tgl. GRN": "transaction_date"}),
         "do": ("do-balance", {"Tgl. DO": "transaction_date"}),
         "npr": ("outstanding-npr", {"Tanggal": "transaction_date"}),
-        "pur": ("outstanding-pur", {"Tanggal": "transaction_date"})
+        #"pur": ("outstanding-pur", {"Tanggal": "transaction_date"})
     }
 
     result = {}
     for key, (endpoint, rename_map) in endpoint_map.items():
-        # 🔹 gunakan fungsi yang benar
-        df = get_api_data_old(endpoint, source="outstanding")
+        df = get_api_data_old(endpoint, source="outstanding", start_date=start_date, end_date=end_date)
 
         if not df.empty:
             df = df.rename(columns=rename_map)
+            df = safe_to_datetime(df, "transaction_date")
         result[key] = df
 
     return result
 
 
-def get_pr_history(transaction_number: str) -> pd.DataFrame:
-    """
-    Ambil data history PR berdasarkan nomor transaksi.
-    """
-    url = f"{BASE_URL['eas']}dashboard/pr-balance-history"
-    params = {"transaction_number": transaction_number, "token": API_TOKEN}
-
-    try:
-        response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-        payload = response.json()
-        if isinstance(payload, dict):
-            return pd.DataFrame(payload.get("data", []))
-        return pd.DataFrame()
-    except Exception as e:
-        logger.warning(f"Gagal ambil history untuk {transaction_number}: {e}")
-        return pd.DataFrame()
-
 
 def load_all_data_new(start_date=None, end_date=None) -> dict[str, pd.DataFrame]:
-    """
-    Loader API baru (EAS) + PR history.
-    """
+    # Mapping endpoint baru sesuai API kamu
     endpoint_map_new = {
-        "do": "delivery-orders",
         "pr": "purchase-requests",
         "po": "purchase-orders",
+        "do": "delivery-orders",
     }
 
     result_new = {}
@@ -375,34 +380,10 @@ def load_all_data_new(start_date=None, end_date=None) -> dict[str, pd.DataFrame]
         df = get_api_data_new(endpoint, source="eas", start_date=start_date, end_date=end_date)
         result_new[key] = df
 
-        # 🔹 Tambahkan PR history
-        if key == "pr" and not df.empty and "transaction_number" in df.columns:
-            history_frames = []
-            for num in df["transaction_number"].dropna().unique():
-                hist_df = get_pr_history(num)
-                if not hist_df.empty:
-                    hist_df["transaction_number"] = num
-                    history_frames.append(hist_df)
-
-            result_new["pr_history"] = pd.concat(history_frames, ignore_index=True) if history_frames else pd.DataFrame()
-
     return result_new
 
 
-def merge_pr_with_history(pr_df: pd.DataFrame, pr_history_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Gabungkan PR utama dengan history berdasarkan transaction_number.
-    """
-    if pr_df.empty or pr_history_df.empty:
-        return pr_df.copy()
 
-    history_df = pr_history_df.copy()
-    for col in ["date_draft", "date_need_approve", "date_inprogress", "date_complete"]:
-        if col in history_df.columns:
-            history_df = safe_to_datetime(history_df, col)
-
-    merged = pr_df.merge(history_df, on="transaction_number", how="left")
-    return merged
 
 # =========================================================
 # 7) FILTERS & TRANSFORM
@@ -746,20 +727,23 @@ def calculate_aging(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
     working = safe_to_datetime(working, "date_inprogress")
     working = safe_to_datetime(working, "date_complete")
 
-    today = pd.to_datetime(TODAY)
+    today = pd.Timestamp.today().normalize()
 
-    def compute_aging(row):
-        # 🔹 Prioritas pertama: date_inprogress
-        if pd.notna(row.get("date_inprogress")):
-            return (row["date_inprogress"] - row[date_col]).days
-        # 🔹 Kalau inprogress kosong tapi ada complete → pakai complete
-        elif pd.notna(row.get("date_complete")):
-            return (row["date_complete"] - row[date_col]).days
-        # 🔹 Kalau keduanya kosong → pakai today
-        else:
-            return (today - row[date_col]).days
+    # Default aging = today - transaction_date
+    working["Aging"] = (today - working[date_col]).dt.days
 
-    working["Aging"] = working.apply(compute_aging, axis=1)
+    # Jika ada complete date → ganti aging
+    mask_complete = working["date_complete"].notna()
+    working.loc[mask_complete, "Aging"] = (
+        working.loc[mask_complete, "date_complete"] - working.loc[mask_complete, date_col]
+    ).dt.days
+
+    # Jika ada inprogress date → ganti aging
+    mask_inprogress = working["date_inprogress"].notna()
+    working.loc[mask_inprogress, "Aging"] = (
+        working.loc[mask_inprogress, "date_inprogress"] - working.loc[mask_inprogress, date_col]
+    ).dt.days
+
     return working
 
 
@@ -958,46 +942,59 @@ def render_sla_trend(df: pd.DataFrame, threshold: int = 30, date_col: str = "tra
 # 9) MAIN APP
 # =========================================================
 
-# API lama → tetap sendiri
-data_old = load_all_data()
-
-# API baru → sudah include PR history
-data_new = load_all_data_new(start_date=DEFAULT_START_DATE, end_date=date.today())
-
-# Gabungkan PR utama + history
-pr_df = data_new.get("pr", pd.DataFrame())
-pr_history_df = data_new.get("pr_history", pd.DataFrame())
-pr_merged = merge_pr_with_history(pr_df, pr_history_df)
-
 def main():
     st.title("SIBIMA Performance Dashboard")
 
+    # ---------- TOP FILTERS ----------
+    today = date.today()
+    default_start = date(today.year, today.month, 1)
+
+    col_head1, col_head2, col_head3, col_head4, col_head5 = st.columns([1, 1, 1, 1, 1])
+
+    with col_head1:
+        selected_date_range = st.date_input(
+            "Select Date Range 📅",
+            value=(default_start, today),
+            max_value=today
+        )
+
+    with col_head2:
+        selected_doc_type = st.selectbox("Pilih Jenis Dokumen 📑", ["PR", "PO", "GRN", "DO", "NPR", "PUR"])
+
+    with col_head3:
+        search_number = st.text_input("Cari Nomor Transaksi 🔍", placeholder="No. PR / No. DO / No. NPR / No. PUR")
+
+    with col_head4:
+        search_status = st.text_input("Cari Status 🔍", placeholder="Complete / In Progress / Approved / Need Approve")
+
+    with col_head5:
+        search_pic = st.text_input("Cari PIC 🔍", placeholder="PIC Procurement / PIC Purchasing / PIC PUR")
+
     # ---------- LOAD DATA ----------
+    if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) == 2:
+        start_date, end_date = selected_date_range
+    else:
+        start_date, end_date = default_start, today
+
     with st.spinner("Mengambil data dashboard..."):
-        # gunakan data_old yang sudah ada
-        df_pr = data_old["pr"]
-        df_po = data_old["po"]
-        df_grn = data_old["grn"]
-        df_do = data_old["do"]
-        df_npr = data_old["npr"]
-        df_pur = data_old["pur"]
+        data_old = load_all_data()
+        data_new = load_all_data_new(start_date=start_date, end_date=end_date)
 
-        # data dari API baru
-        df_pr_final = data_new["pr"]
-        df_do_final = data_new["do"]
+    # ---------- ASSIGN DATAFRAME ----------
+    df_pr = data_old["pr"]
+    df_po = data_old["po"]
+    df_grn = data_old["grn"]
+    df_do = data_old["do"]
+    df_npr = data_old["npr"]
+    #df_pur = data_old["pur"]
 
-
-    # Pastikan kolom Status dan Status PO sudah ada
-    # Ubah status PR jika PO dibatalkan
-
-
-    #df_pr = safe_to_datetime(df_pr, "date_inprogress")
-    #df_pr = safe_to_datetime(df_pr, "date_complete")
+    df_pr_final = data_new["pr"]
+    df_do_final = data_new["do"]
 
     # Pastikan kolom PIC dan Status sesuai
     df_pr_final = df_pr_final.rename(columns={
-    "item_pic_procurement_name": "PIC Procurement",
-    "status_description": "Status"
+        "item_pic_procurement_name": "PIC Procurement",
+        "status_description": "Status"
     })
 
     # Pastikan kolom tanggal sudah dalam format datetime
@@ -1005,47 +1002,13 @@ def main():
     df_pr_final = safe_to_datetime(df_pr_final, "date_inprogress")
     df_pr_final = safe_to_datetime(df_pr_final, "date_complete")
 
-    # ---------- TOP FILTERS ----------
-    col_head1, col_head2, col_head3, col_head4, col_head5 = st.columns([1, 1, 1, 1, 1])
-
-    with col_head1:
-        selected_date_range = st.date_input(
-            "Select Date Range 📅",
-            value=(DEFAULT_START_DATE, date.today()),
-            max_value=date.today()
-        )
-
-    with col_head2:
-        selected_doc_type = st.selectbox(
-            "Pilih Jenis Dokumen 📑",
-            ["PR", "PO", "GRN", "DO", "NPR", "PUR"]
-    )
-
-    with col_head3:
-        search_number = st.text_input(
-            "Cari Nomor Transaksi 🔍",
-            placeholder="No. PR / No. DO / No. NPR / No. PUR"
-        )
-
-    with col_head4:
-        search_status = st.text_input(
-            "Cari Status 🔍",
-            placeholder="Complete / In Progress / Approved / Need Approve"
-        )
-
-    with col_head5:
-        search_pic = st.text_input(
-            "Cari PIC 🔍",
-            placeholder="PIC Procurement / PIC Purchasing / PIC PUR"
-        )
-
     # ---------- DEFAULT SAFE COPY ----------
     df_pr_f = df_pr.copy()
     df_po_f = df_po.copy()
     df_grn_f = df_grn.copy()
     df_do_f = df_do.copy()
     df_npr_f = df_npr.copy()
-    df_pur_f = df_pur.copy()
+    #df_pur_f = df_pur.copy()
     df_pr_final_f = df_pr_final.copy()
     df_do_final_f = df_do_final.copy()
 
@@ -1057,7 +1020,7 @@ def main():
         df_grn_f = apply_cumulative_filter(df_grn_f, report_end_date)
         df_do_f = apply_cumulative_filter(df_do_f, report_end_date)
         df_npr_f = apply_cumulative_filter(df_npr_f, report_end_date)
-        df_pur_f = apply_cumulative_filter(df_pur_f, report_end_date)
+        #df_pur_f = apply_cumulative_filter(df_pur_f, report_end_date)
         df_pr_final_f = apply_cumulative_filter(df_pr_final_f, report_end_date)
 
         # 🔹 Dataset baru (PR Final) pakai realisasi
@@ -1065,24 +1028,24 @@ def main():
         df_pr_final_real = apply_realization_filter(df_pr_final, report_start_date, report_end_date)
         df_do_final_real = apply_realization_filter(df_do_final, report_start_date, report_end_date)
 
-
     # ---------- SEARCH FILTER ----------
     df_pr_f = apply_search_filter(df_pr_f, search_number, search_status, search_pic)
     df_po_f = apply_search_filter(df_po_f, search_number, search_status, search_pic)
     df_grn_f = apply_search_filter(df_grn_f, search_number, search_status, search_pic)
     df_do_f = apply_search_filter(df_do_f, search_number, search_status, search_pic)
     df_npr_f = apply_search_filter(df_npr_f, search_number, search_status, search_pic)
-    df_pur_f = apply_search_filter(df_pur_f, search_number, search_status, search_pic)
+    #df_pur_f = apply_search_filter(df_pur_f, search_number, search_status, search_pic)
     df_pr_final_real = apply_search_filter(df_pr_final_real, search_number, search_status, search_pic)
 
+
     # ---------- ENSURE IMPORTANT COLUMNS ----------
-    df_pr_f = ensure_columns(df_pr_f, ["Nominal", "No. PR", "Status", "PIC Procurement", "Status PO"])
+    df_pr_f = ensure_columns(df_pr_f, ["Nominal", "No. PR", "Status", "PIC Procurement"])
     df_po_f = ensure_columns(df_po_f, ["Nominal"])
     df_grn_f = ensure_columns(df_grn_f, ["Nominal"])
     df_do_f = ensure_columns(df_do_f, ["Nominal", "No. DO", "PIC Purchasing"])
     df_npr_f = ensure_columns(df_npr_f, ["No. Transaksi"])
-    df_pur_f = ensure_columns(df_pur_f, ["No. PUR", "PIC", "Status"])
-    df_pr_final_real = ensure_columns(df_pr_final_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage", "po_status"])
+    #df_pur_f = ensure_columns(df_pur_f, ["No. PUR", "PIC", "Status"])
+    df_pr_final_real = ensure_columns(df_pr_final_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
     df_do_final_real = ensure_columns(df_do_final_real, ["transaction_number", "price", "quantity", "discount", "transaction_total", "tax1_value", "tax2_value"])
 
     df_pr_f = safe_to_numeric(df_pr_f, ["Nominal"])
@@ -1101,30 +1064,6 @@ def main():
     #total_pr = safe_sum(df_pr_final_real, "transaction_total")
 
     df_pr_final_real = normalize_text_columns(df_pr_final_real, ["item_PIC_Procurement"])
-
-    # Pastikan kolom Status dan Status PO sudah ada
-    #df_pr_f = ensure_columns(df_pr_f, ["Status", "Status PO"])
-
-    # Ubah status PR jika PO dibatalkan
-    df_pr_f.loc[
-        df_pr_f["Status PO"].str.contains("PO Dibatalkan", case=False, na=False),
-        "Status"
-        ] = "In Progress"
-    
-
-    # Ubah status PR jika PO dibatalkan
-    df_pr_final_real.loc[
-        df_pr_final_real["po_status"].str.contains("PO Dibatalkan", case=False, na=False),
-        "Status"
-        ] = "In Progress"
-    
-        # Ubah status PR jika PO dibatalkan
-    df_pr_final_f.loc[
-        df_pr_final_f["po_status"].str.contains("PO Dibatalkan", case=False, na=False),
-        "Status"
-        ] = "In Progress"
-
-
 
 
     df_pr_final_real["disc_per_unit"] = df_pr_final_real["item_price"] * (df_pr_final_real["item_discount"] / 100)
@@ -1156,7 +1095,7 @@ def main():
 
     top_pic_pr = get_top_pic(df_pr_f, "PIC Procurement", "No. PR")
     top_pic_do = get_top_pic(df_do_f, "PIC Purchasing", "No. DO")
-    top_pic_pur = get_top_pic(df_pur_f, "PIC", "No. PUR")
+    #top_pic_pur = get_top_pic(df_pur_f, "PIC", "No. PUR")
 
     # ---------- LAYOUT ----------
     col_kiri, col_tengah, col_kanan = st.columns([1, 1, 1], gap="small")
@@ -1193,6 +1132,7 @@ def main():
                     metric_card("Total Item PR Balance", total_pr_balance_rows)
                 with c3:
                     metric_card("PIC Terbanyak", top_pic_pr)
+
 
                 pr_summary = summarize_status(df_pr_f, doc_col="No. PR", nominal_col="Nominal")
 
