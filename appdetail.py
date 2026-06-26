@@ -718,7 +718,12 @@ def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, doc_col: s
     )
 
 
-def calculate_aging(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
+def calculate_aging(df: pd.DataFrame, date_col: str, prefer: str = "approved") -> pd.DataFrame:
+    """
+    Hitung aging dengan prioritas tanggal sesuai preferensi.
+    prefer bisa: "approved", "inprogress", "complete"
+    Default: "approved"
+    """
     if df.empty or date_col not in df.columns:
         return df.copy()
 
@@ -733,23 +738,24 @@ def calculate_aging(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
     # Default aging = today - transaction_date
     working["Aging"] = (today - working[date_col]).dt.days
 
-    # Jika ada date_complete → ganti aging
-    mask_complete = working["date_complete"].notna()
-    working.loc[mask_complete, "Aging"] = (
-        working.loc[mask_complete, "date_complete"] - working.loc[mask_complete, date_col]
-    ).dt.days
+    # Urutan prioritas berdasarkan prefer
+    if prefer == "approved":
+        mask_approved = working["date_approved"].notna()
+        working.loc[mask_approved, "Aging"] = (
+            working.loc[mask_approved, "date_approved"] - working.loc[mask_approved, date_col]
+        ).dt.days
 
-    # Jika ada date_inprogress → ganti aging
-    mask_inprogress = working["date_inprogress"].notna()
-    working.loc[mask_inprogress, "Aging"] = (
-        working.loc[mask_inprogress, "date_inprogress"] - working.loc[mask_inprogress, date_col]
-    ).dt.days
+    if prefer in ["approved", "inprogress"]:
+        mask_inprogress = working["date_inprogress"].notna()
+        working.loc[mask_inprogress, "Aging"] = (
+            working.loc[mask_inprogress, "date_inprogress"] - working.loc[mask_inprogress, date_col]
+        ).dt.days
 
-    # ✅ Dahulukan date_approved (override semua)
-    mask_approved = working["date_approved"].notna()
-    working.loc[mask_approved, "Aging"] = (
-        working.loc[mask_approved, "date_approved"] - working.loc[mask_approved, date_col]
-    ).dt.days
+    if prefer in ["approved", "inprogress", "complete"]:
+        mask_complete = working["date_complete"].notna()
+        working.loc[mask_complete, "Aging"] = (
+            working.loc[mask_complete, "date_complete"] - working.loc[mask_complete, date_col]
+        ).dt.days
 
     return working
 
@@ -1248,10 +1254,12 @@ def main():
 
             # Lanjutkan proses aging hanya untuk PR yang valid
             #Aging PR
-            df_pr_final_valid = calculate_aging(df_pr_final_valid, "transaction_date")
+            #df_pr_final_valid = calculate_aging(df_pr_final_valid, "transaction_date")
+            df_pr_final_valid = calculate_aging(df_pr_final_valid, "transaction_date", prefer="approved")
             df_pr_final_valid = categorize_aging(df_pr_final_valid)
             #Aging PR Balance
-            df_pr_valid = calculate_aging(df_pr_valid, "transaction_date")
+            #df_pr_valid = calculate_aging(df_pr_valid, "transaction_date")
+            df_pr_valid = calculate_aging(df_pr_valid, "transaction_date", prefer="approved")
             df_pr_valid = categorize_aging(df_pr_valid)
             #df_pr_valid = df_pr_valid.drop_duplicates(subset=["transaction_number"])
 
