@@ -1099,7 +1099,7 @@ def main():
     avg_nominal_do = safe_mean(df_do_f, "Nominal")
 
     top_pic_pr = get_top_pic(df_pr_f, "PIC Procurement", "No. PR")
-    top_pic_do = get_top_pic(df_do_f, "PIC Purchasing", "No. DO")
+    top_pic_do = get_top_pic(df_do_f, "PIC Procurement", "No. DO")
     #top_pic_pur = get_top_pic(df_pur_f, "PIC", "No. PUR")
 
     # ---------- LAYOUT ----------
@@ -1159,7 +1159,7 @@ def main():
                 st.subheader("🔥 Heatmap PR Balance - Aktivitas PIC Procurement")
                 render_pic_heatmap(df_pr_f, "PIC Procurement", "transaction_date", "No. PR", "Heatmap Aktivitas PIC Procurement per Bulan")
 
-        # Download PR Balance by status
+            # Download PR Balance by status
             with st.container(border=True):
                 st.subheader("📥 Download Data PR Balance (Periode & Status)")
 
@@ -1172,16 +1172,16 @@ def main():
                         key="pr_balance_status_export"
                     )
 
-                    df_download = df_pr_final_f[df_pr_final_f["Status"].isin(selected_statuses)].copy()
+                    df_download_pr_balance = df_pr_final_f[df_pr_final_f["Status"].isin(selected_statuses)].copy()
 
                     if not df_download.empty:
                         st.download_button(
-                            label=f"⬇️Download {len(df_download):,} Baris Data (Filtered).xlsx",
-                            data=to_excel_bytes(df_download, sheet_name="Data_PR"),
+                            label=f"⬇️Download {len(df_download_pr_balance):,} Baris Data (Filtered).xlsx",
+                            data=to_excel_bytes(df_download_pr_balance, sheet_name="Data_PR"),
                             file_name=f"Data_PR_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
-                        st.caption(f"Menampilkan {len(df_download):,} baris data yang akan di-download.")
+                        st.caption(f"Menampilkan {len(df_download_pr_balance):,} baris data yang akan di-download.")
                     else:
                         st.warning("Tidak ada data yang sesuai dengan filter yang dipilih.")
                 else:
@@ -1223,7 +1223,7 @@ def main():
                     st.info("Data tidak tersedia untuk fitur download PR Balance per PIC.")
 
     # =====================================================
-    # MID
+    # MID PR
     # =====================================================
         with col_tengah:
 
@@ -1496,6 +1496,69 @@ def main():
             with st.container(border=True):
                 st.subheader("🔥 Heatmap DO Balance - Aktivitas PIC Procurement")
                 render_pic_heatmap(df_do_f, "PIC Procurement", "transaction_date", "No. DO", "Heatmap Aktivitas PIC Procurement per Bulan")
+
+            # Download DO Balance by status
+            with st.container(border=True):
+                st.subheader("📥 Download Data DO Balance (Periode & Status)")
+
+                if not df_do_final_f.empty and "Status" in df_do_final_f.columns:
+                    all_statuses = sorted([s for s in df_do_final_f["Status"].dropna().astype(str).unique().tolist() if s.strip()])
+                    selected_statuses = st.multiselect(
+                        "Pilih Status untuk di-download:",
+                        all_statuses,
+                        default=all_statuses,
+                        key="do_balance_status_export"
+                    )
+
+                    df_download_do_balance = df_do_final_f[df_do_final_f["Status"].isin(selected_statuses)].copy()
+
+                    if not df_download_do_balance.empty:
+                        st.download_button(
+                            label=f"⬇️Download {len(df_download_do_balance):,} Baris Data (Filtered).xlsx",
+                            data=to_excel_bytes(df_download_do_balance, sheet_name="Data_PR"),
+                            file_name=f"Data_DO_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                        st.caption(f"Menampilkan {len(df_download_do_balance):,} baris data yang akan di-download.")
+                    else:
+                        st.warning("Tidak ada data yang sesuai dengan filter yang dipilih.")
+                else:
+                    st.info("Data DO Balance tidak tersedia untuk export.")
+
+            # Download per PIC PR Balance
+            with st.container(border=True):
+                st.subheader("📥 Download Data DO Balance per PIC")
+
+                if not df_do_final_f.empty and "PIC Procurement" in df_do_final_f.columns:
+                    # Filter status hanya Need Approved, Approved, In Progress
+                    df_filtered_status = df_do_final_f[
+                        df_do_final_f["Status"].isin(["Need Approved", "Approved", "In Progress"])
+                    ].copy()
+
+                    # Tambahkan opsi "Semua"
+                    options = ["Semua"] + sorted(
+                        df_filtered_status["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist()
+                    )
+
+                    selected_pic = st.selectbox("Pilih PIC Procurement:", options, key="do_balance_pic_select")
+
+                    # Jika pilih "Semua", ambil semua data sesuai status
+                    if selected_pic == "Semua":
+                        filtered = df_filtered_status.copy()
+                    else:
+                        filtered = df_filtered_status[
+                            df_filtered_status["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic
+                        ].copy()
+
+                    st.download_button(
+                        label=f"⬇️Download Data {selected_pic}.xlsx",
+                        data=to_excel_bytes(filtered, sheet_name="Data_DO_Balance"),
+                        file_name=f"Data_DO_balance_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                    st.caption(f"Menampilkan {len(filtered):,} baris data yang akan di-download.")
+                else:
+                    st.info("Data tidak tersedia untuk fitur download DO Balance per PIC.")
 
 
 
