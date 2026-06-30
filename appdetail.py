@@ -1005,16 +1005,28 @@ def main():
     df_do_final = data_new["do"]
 
     # Pastikan kolom PIC dan Status sesuai
+    #PR
     df_pr_final = df_pr_final.rename(columns={
+        "item_pic_procurement_name": "PIC Procurement",
+        "status_description": "Status"
+    })
+    #PO
+    df_do_final = df_do_final.rename(columns={
         "item_pic_procurement_name": "PIC Procurement",
         "status_description": "Status"
     })
 
     # Pastikan kolom tanggal sudah dalam format datetime
+    #PR
     df_pr_final = safe_to_datetime(df_pr_final, "transaction_date")
     df_pr_final = safe_to_datetime(df_pr_final, "date_approved")
     df_pr_final = safe_to_datetime(df_pr_final, "date_inprogress")
     df_pr_final = safe_to_datetime(df_pr_final, "date_complete")
+    #DO
+    df_do_final = safe_to_datetime(df_do_final, "transaction_date")
+    df_do_final = safe_to_datetime(df_do_final, "date_approved")
+    df_do_final = safe_to_datetime(df_do_final, "date_inprogress")
+    df_do_final = safe_to_datetime(df_do_final, "date_complete")
 
     # ---------- DEFAULT SAFE COPY ----------
     df_pr_f = df_pr.copy()
@@ -1036,6 +1048,7 @@ def main():
         df_npr_f = apply_cumulative_filter(df_npr_f, report_end_date)
         #df_pur_f = apply_cumulative_filter(df_pur_f, report_end_date)
         df_pr_final_f = apply_cumulative_filter(df_pr_final_f, report_end_date)
+        df_do_final_f = apply_cumulative_filter(df_do_final_f, report_end_date)
 
         # 🔹 Dataset baru (PR Final) pakai realisasi
         df_pr_f_real = apply_realization_filter(df_pr_f, report_start_date, report_end_date)
@@ -1060,7 +1073,7 @@ def main():
     df_npr_f = ensure_columns(df_npr_f, ["No. Transaksi"])
     #df_pur_f = ensure_columns(df_pur_f, ["No. PUR", "PIC", "Status"])
     df_pr_final_real = ensure_columns(df_pr_final_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
-    df_do_final_real = ensure_columns(df_do_final_real, ["transaction_number", "price", "quantity", "discount", "transaction_total", "tax1_value", "tax2_value"])
+    df_do_final_real = ensure_columns(df_do_final_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
 
     df_pr_f = safe_to_numeric(df_pr_f, ["Nominal"])
     df_po_f = safe_to_numeric(df_po_f, ["Nominal"])
@@ -1068,7 +1081,7 @@ def main():
     df_do_f = safe_to_numeric(df_do_f, ["Nominal"])
     #df_pr_final_real = safe_to_numeric(df_pr_final_real, ["price", "discount", "quantity", "tax1_percentage", "tax2_percentage"])
     df_pr_final_real= safe_to_numeric(df_pr_final_real, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
-    df_do_final_real= safe_to_numeric(df_do_final_real, ["item_price", "item_discount", "item_quantity", "item_tax1_value", "item_tax2_value"])
+    df_do_final_real= safe_to_numeric(df_do_final_real, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
     
     # ---------- METRICS ----------
     total_pr_unpr = safe_sum(df_pr_f, "Nominal")
@@ -1078,6 +1091,7 @@ def main():
     #total_pr = safe_sum(df_pr_final_real, "transaction_total")
 
     df_pr_final_real = normalize_text_columns(df_pr_final_real, ["item_PIC_Procurement"])
+    df_do_final_real = normalize_text_columns(df_do_final_real, ["item_PIC_Procurement"])
 
 
     df_pr_final_real["disc_per_unit"] = df_pr_final_real["item_price"] * (df_pr_final_real["item_discount"] / 100)
@@ -1087,11 +1101,17 @@ def main():
     total_pr = df_pr_final_real["total_pr_row"].sum()
 
     df_do_final_real["disc_per_unit"] = df_do_final_real["item_price"] * (df_do_final_real["item_discount"] / 100)
+    df_do_final_real["tax_unit"] = (df_do_final_real["item_price"] - df_do_final_real["disc_per_unit"]) * (df_do_final_real["item_tax1_percentage"] / 100)
+    df_do_final_real["net_price_unit"] = df_do_final_real["item_price"] - df_do_final_real["disc_per_unit"] + df_do_final_real["tax_unit"]
+    df_do_final_real["total_pr_row"] = df_do_final_real["item_quantity"] * df_do_final_real["net_price_unit"]
+    total_do = df_do_final_real["total_pr_row"].sum()
+
+    #df_do_final_real["disc_per_unit"] = df_do_final_real["item_price"] * (df_do_final_real["item_discount"] / 100)
     #df_do_final_real["tax_unit"] = (df_do_final_real["item_price"] - df_do_final_real["disc_per_unit"]) * (df_do_final_real["item_tax1_percentage"] / 100)
-    df_do_final_real["tax_unit"] = df_do_final_real["item_tax1_value"] + df_do_final_real["item_tax1_value"]
+    #df_do_final_real["tax_unit"] = df_do_final_real["item_tax1_value"] + df_do_final_real["item_tax1_value"]
     #df_do_final_real["net_price_unit"] = df_do_final_real["item_price"] - df_do_final_real["disc_per_unit"] + df_do_final_real["tax_unit"]
-    df_do_final_real["net_price_unit"] = df_do_final_real["item_price"] - df_do_final_real["disc_per_unit"]
-    df_do_final_real["total_do_row"] = df_do_final_real["item_quantity"] * df_do_final_real["net_price_unit"]
+    #df_do_final_real["net_price_unit"] = df_do_final_real["item_price"] - df_do_final_real["disc_per_unit"]
+    #df_do_final_real["total_do_row"] = df_do_final_real["item_quantity"] * df_do_final_real["net_price_unit"]
     total_do = df_do_final_real["total_do_row"].sum()
 
     total_pr_count = safe_unique_count(df_pr_final_real, "transaction_number")
@@ -1100,7 +1120,7 @@ def main():
     total_pr_balance_rows = len(df_pr_f)
     total_do_count = safe_unique_count(df_do_final_real, "transaction_number")
     total_do_balance_count = safe_unique_count(df_do_f, "No. DO")
-    total_do_rows = len(df_do_f)
+    total_do_rows = len(df_do_final_real)
     total_do_balance_rows = len(df_do_f)
     total_npr_count = safe_unique_count(df_npr_f, "No. Transaksi")
     total_npr_rows = len(df_npr_f)
@@ -1364,9 +1384,9 @@ def main():
 
 
     # =====================================================
-    # RIGHT
+    # RIGHT - PR
     # =====================================================
-    with col_kanan:
+        with col_kanan:
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance PR")
                 render_sla_gauge(df_pr_final_valid, threshold=10, title="SLA Compliance PR")
@@ -1451,9 +1471,11 @@ def main():
                 else:
                     st.info("Data tidak tersedia untuk fitur download PR Balance per PIC.")
 
-    
-    # ---------- DO ----------
-    if selected_doc_type == "DO":
+
+    # =====================================================
+    # LEFT - DO
+    # =====================================================
+    elif selected_doc_type == "DO":
         with col_kiri:
             with st.container(border=True):
                 st.subheader("📊 Detail DO")
@@ -1477,34 +1499,14 @@ def main():
 
                 c1, c2, c3 = st.columns(3)
                 with c1:
-                    metric_card("Total Item DO", f"{total_do_rows:,}")
+                    metric_card("Total Item PR", f"{total_pr_rows:,}")
                 with c2:
-                    metric_card("Total Item DO Balance", total_do_balance_rows)
+                    metric_card("Total Item PR Balance", total_pr_balance_rows)
                 with c3:
-                    metric_card("PIC Terbanyak", top_pic_do)
-
-                do_summary = summarize_status(df_do_f, doc_col="No. DO", nominal_col="Nominal")
-
-                with st.container(border=True):
-                    st.subheader("🍩 Proporsi Nominal DO Balance per Status")
-                    render_status_pie(do_summary, "Persentase Distribusi Nominal DO Balance")
-
-            pic_summary_do = summarize_pic_status(df_do_f, "PIC Procurement", "No. DO")
-            with st.container(border=True):
-                st.subheader("👤 Analisis Transaksi DO Balance per PIC Procurement & per Status")
-                render_pic_bar(
-                    summary_df=pic_summary_do,
-                    x_col="PIC Procurement",
-                    y_col="Jumlah_Doc",
-                    color_col="Status DO",
-                )
-
-            with st.container(border=True):
-                st.subheader("🔥 Heatmap DO Balance - Aktivitas PIC Procurement")
-                render_pic_heatmap(df_do_f, "PIC Procurement", "transaction_date", "No. DO", "Heatmap Aktivitas PIC Procurement per Bulan")
+                    metric_card("PIC Terbanyak", top_pic_pr)
+    # tampilkan semua komponen DO
 
 
-    
     # ---------- FOOTER INFO ----------
     with st.expander("ℹ️ Informasi Teknis Dashboard"):
         selected_report_date = (
