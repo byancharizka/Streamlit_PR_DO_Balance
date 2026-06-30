@@ -1251,12 +1251,14 @@ def main():
             df_pr_final_valid = df_pr_final_real[
             df_pr_final_real["Status"].isin(["Approved", "In Progress", "Complete"])
             ].copy()
+            df_pr_final_valid = apply_search_filter(df_pr_final_valid, search_number, search_status, search_pic)
 
             #Aging PR Balance
             # Filter PR Balance hanya untuk status aktif (exclude Complete & Draft)
             df_pr_valid = df_pr_final_f[
             ~df_pr_final_f["Status"].isin(["Complete", "Draft"])
             ].copy()
+            df_pr_valid = apply_search_filter(df_pr_valid, search_number, search_status, search_pic)
 
 
             # Lanjutkan proses aging hanya untuk PR yang valid
@@ -1579,12 +1581,14 @@ def main():
             df_do_final_valid = df_do_final_real[
             df_do_final_real["Status"].isin(["Approved", "In Progress", "Complete"])
             ].copy()
+            df_do_final_valid = apply_search_filter(df_do_final_valid, search_number, search_status, search_pic)
 
             #Aging DO Balance
             # Filter DO Balance hanya untuk status aktif (exclude Complete & Draft)
             df_do_valid = df_do_final_f[
             ~df_do_final_f["Status"].isin(["Complete", "Draft"])
             ].copy()
+            df_do_valid = apply_search_filter(df_do_valid, search_number, search_status, search_pic)
 
 
             # Lanjutkan proses aging hanya untuk DO yang valid
