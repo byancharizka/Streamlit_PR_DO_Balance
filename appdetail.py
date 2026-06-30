@@ -1375,7 +1375,7 @@ def main():
                 st.subheader("📏 SLA Compliance PR Balance")
                 render_sla_gauge(df_pr_valid, threshold=5, title="SLA Compliance PR Balance")
 
-            pic_sla_summary = summarize_pic_sla(df_pr_final_valid, "PIC Procurement", "transaction_number", threshold=10)
+            pic_sla_summary = summarize_pic_sla(df_pr_final_valid, "PIC Procurement", "transaction_number", threshold=5)
 
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance per PIC Procurement")
@@ -1685,6 +1685,93 @@ def main():
                 else:
                     st.info("Data tidak tersedia untuk fitur download per Category Aging DO Balance.")
 
+    # =====================================================
+    # RIGHT - DO
+    # =====================================================
+        with col_kanan:
+            with st.container(border=True):
+                st.subheader("📏 SLA Compliance DO")
+                render_sla_gauge(df_do_final_valid, threshold=5, title="SLA Compliance DO")
+
+            with st.container(border=True):
+                st.subheader("📏 SLA Compliance DO Balance")
+                render_sla_gauge(df_do_valid, threshold=5, title="SLA Compliance DO Balance")
+
+            pic_sla_summary_do = summarize_pic_sla(df_do_final_valid, "PIC Procurement", "transaction_number", threshold=5)
+
+            with st.container(border=True):
+                st.subheader("📏 SLA Compliance per PIC Procurement")
+                #st.dataframe(pic_sla_summary, use_container_width=True, hide_index=True)
+                render_pic_sla_bar(pic_sla_summary_do)
+
+            with st.container(border=True):
+                st.subheader("📈 Trend SLA")
+                render_sla_trend(df_do_final_valid, threshold=5, date_col="transaction_date")
+
+
+            # Download DO by period & status
+            with st.container(border=True):
+                st.subheader("📥 Download Data DO (Periode & Status)")
+
+                if not df_do_final_real.empty and "Status" in df_do_final_real.columns:
+                    all_statuses_do = sorted([s for s in df_do_final_real["Status"].dropna().astype(str).unique().tolist() if s.strip()])
+                    selected_statuses_do = st.multiselect(
+                        "Pilih Status untuk di-download:",
+                        all_statuses_do,
+                        default=all_statuses_do,
+                        key="do_status_export"
+                    )
+
+                    df_download_do = df_do_final_real[df_do_final_real["Status"].isin(selected_statuses_do)].copy()
+
+                    if not df_download_do.empty:
+                        st.download_button(
+                            label=f"⬇️Download {len(df_download_do):,} Baris Data (Filtered).xlsx",
+                            data=to_excel_bytes(df_download_do, sheet_name="Data_DO"),
+                            file_name=f"Data_DO_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"download {len(df_download_do):,} Baris Data (Filtered)"   # 🔹 key unik
+                        )
+                        st.caption(f"Menampilkan {len(df_download_do):,} baris data yang akan di-download.")
+                    else:
+                        st.warning("Tidak ada data yang sesuai dengan filter yang dipilih.")
+                else:
+                    st.info("Data DO tidak tersedia untuk export.")
+
+            # Download per PIC DO
+            with st.container(border=True):
+                st.subheader("📥 Download Data DO per PIC")
+
+                if not df_do_final_real.empty and "PIC Procurement" in df_do_final_real.columns:
+                    # Filter status hanya Need Approved, Approved, In Progress
+                    df_filtered_status_do = df_do_final_real[
+                        df_do_final_real["Status"].isin(["Approved", "In Progress", "Complete"])
+                    ].copy()
+
+                    # Tambahkan opsi "Semua"
+                    options = ["Semua"] + sorted(
+                        df_filtered_status_do["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist()
+                    )
+
+                    selected_pic_do = st.selectbox("Pilih PIC Procurement:", options, key="pr_pic_select")
+
+                    # Jika pilih "Semua", ambil semua data sesuai status
+                    if selected_pic_do == "Semua":
+                        filtered_do = df_filtered_status_do.copy()
+                    else:
+                        filtered_do = df_filtered_status_do[
+                            df_filtered_status_do["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic_do
+                        ].copy()
+
+                    st.download_button(
+                        label=f"⬇️Download Data {selected_pic_do}.xlsx",
+                        data=to_excel_bytes(filtered_do, sheet_name="Data_DO"),
+                        file_name=f"Data_DO_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                    st.caption(f"Menampilkan {len(filtered_do):,} baris data yang akan di-download.")
+                else:
+                    st.info("Data tidak tersedia untuk fitur download DO Balance per PIC.")
 
 
     # ---------- FOOTER INFO ----------
