@@ -721,23 +721,23 @@ def calculate_aging(df: pd.DataFrame, date_col: str, prefer: str = "approved") -
     # Default aging = today - transaction_date
     working["Aging"] = (today - working[date_col]).dt.days
 
-    # Urutan prioritas berdasarkan prefer
+    # Terapkan prioritas sesuai prefer
     if prefer == "approved":
-        mask_approved = working["date_approved"].notna()
-        working.loc[mask_approved, "Aging"] = (
-            working.loc[mask_approved, "date_approved"] - working.loc[mask_approved, date_col]
+        mask = working["date_approved"].notna()
+        working.loc[mask, "Aging"] = (
+            working.loc[mask, "date_approved"] - working.loc[mask, date_col]
         ).dt.days
 
-    if prefer in ["approved", "inprogress"]:
-        mask_inprogress = working["date_inprogress"].notna()
-        working.loc[mask_inprogress, "Aging"] = (
-            working.loc[mask_inprogress, "date_inprogress"] - working.loc[mask_inprogress, date_col]
+    elif prefer == "inprogress":
+        mask = working["date_inprogress"].notna()
+        working.loc[mask, "Aging"] = (
+            working.loc[mask, "date_inprogress"] - working.loc[mask, date_col]
         ).dt.days
 
-    if prefer in ["approved", "inprogress", "complete"]:
-        mask_complete = working["date_complete"].notna()
-        working.loc[mask_complete, "Aging"] = (
-            working.loc[mask_complete, "date_complete"] - working.loc[mask_complete, date_col]
+    elif prefer == "complete":
+        mask = working["date_complete"].notna()
+        working.loc[mask, "Aging"] = (
+            working.loc[mask, "date_complete"] - working.loc[mask, date_col]
         ).dt.days
 
     return working
