@@ -514,25 +514,6 @@ def summarize_status(df: pd.DataFrame, doc_col: str, nominal_col: str = "Nominal
     )
     return summary
 
-def summarize_status_do(df: pd.DataFrame, doc_col: str, nominal_col: str = "Nominal") -> pd.DataFrame:
-    if df.empty or "Status DO" not in df.columns:
-        return pd.DataFrame(columns=["Status", "Total_Doc", "Total_Amount"])  # ubah ke Status
-
-    working_do = df.copy()
-    working_do = ensure_columns(working_do, [doc_col, nominal_col, "Status DO"])
-    working_do = safe_to_numeric(working_do, [nominal_col])
-
-    summary_do = (
-        working_do.groupby("Status DO", dropna=False)
-        .agg(
-            Total_Doc=(doc_col, "nunique"),
-            Total_Amount=(nominal_col, "sum")
-        )
-        .reset_index()
-        .rename(columns={"Status DO": "Status"})  # tambahkan ini
-    )
-    return summary_do
-
 
 def summarize_pic_status(df: pd.DataFrame, pic_col: str, doc_col: str) -> pd.DataFrame:
     if df.empty or pic_col not in df.columns or "Status" not in df.columns or doc_col not in df.columns:
@@ -1010,10 +991,14 @@ def main():
         "item_pic_procurement_name": "PIC Procurement",
         "status_description": "Status"
     })
-    #PO
+    #DO
     df_do_final = df_do_final.rename(columns={
         "item_pic_procurement_name": "PIC Procurement",
         "status_description": "Status"
+    })
+
+    df_do = df_do.rename(columns={
+        "Status DO": "Status"
     })
 
     # Pastikan kolom tanggal sudah dalam format datetime
@@ -1499,12 +1484,33 @@ def main():
 
                 c1, c2, c3 = st.columns(3)
                 with c1:
-                    metric_card("Total Item PR", f"{total_pr_rows:,}")
+                    metric_card("Total Item DO", f"{total_do_rows:,}")
                 with c2:
-                    metric_card("Total Item PR Balance", total_pr_balance_rows)
+                    metric_card("Total Item DO Balance", total_do_balance_rows)
                 with c3:
-                    metric_card("PIC Terbanyak", top_pic_pr)
-    # tampilkan semua komponen DO
+                    metric_card("PIC Terbanyak", top_pic_do)
+
+
+                do_summary = summarize_status(df_do_f, doc_col="No. DO", nominal_col="Nominal")
+
+                with st.container(border=True):
+                    st.subheader("🍩 Proporsi Nominal DO Balance per Status")
+                    render_status_pie(do_summary, "Persentase Distribusi Nominal DO Balance")
+
+            pic_summary_do = summarize_pic_status(df_do_f, "PIC Procurement", "No. DO")
+            with st.container(border=True):
+                st.subheader("👤 Analisis Transaksi DO Balance per PIC Procurement & per Status")
+                render_pic_bar(
+                    summary_df=pic_summary_do,
+                    x_col="PIC Procurement",
+                    y_col="Jumlah_Doc",
+                    color_col="Status",
+                )
+
+            with st.container(border=True):
+                st.subheader("🔥 Heatmap DO Balance - Aktivitas PIC Procurement")
+                render_pic_heatmap(df_do_f, "PIC Procurement", "transaction_date", "No. DO", "Heatmap Aktivitas PIC Procurement per Bulan")
+
 
 
     # ---------- FOOTER INFO ----------
