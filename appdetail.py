@@ -1279,8 +1279,6 @@ def main():
             #~df_pr_valid["Status"].str.contains("Draft", case=False, na=False)
             #].copy()
 
-
-
             with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging PR")
                 render_aging_bar(df_pr_final_valid, "transaction_number", chart_key="aging_pr")
@@ -1288,8 +1286,6 @@ def main():
             with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging PR Balance")
                 render_aging_bar(df_pr_valid, "transaction_number", chart_key="aging_pr_outstanding")
-
-
 
                 pic_aging_summary = summarize_pic_aging(df_pr_valid, "PIC Procurement", "transaction_number")
                 pic_aging_summary_final = summarize_pic_aging(df_pr_final_valid, "PIC Procurement", "transaction_number")
@@ -1303,9 +1299,6 @@ def main():
                 st.subheader("👥 Rata-rata Proses PR Balance")
                 #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
                 render_pic_aging_bar(pic_aging_summary)
-
-
-
 
             # Download per Category PR Aging
             with st.container(border=True):
@@ -1628,6 +1621,71 @@ def main():
                 st.subheader("👥 Rata-rata Proses DO Balance")
                 #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
                 render_pic_aging_bar(pic_aging_summary_do)
+
+
+            # Download per Category DO Aging
+            with st.container(border=True):
+                st.subheader("📥 Download Data per Categori Aging DO")
+
+                if not df_do_final_valid.empty:
+                    # Filter data aging DO berdasarkan kategori yang dipilih
+                    selected_category_do = st.selectbox(
+                        "Pilih kategori aging DO untuk diunduh 📂",
+                        ["Semua", "0-30 hari", "31-60 hari", "61-90 hari", ">90 hari"]
+                    )
+
+                    # Jika bukan 'Semua', filter sesuai kategori
+                    if selected_category_do != "Semua":
+                        df_do_filtered = df_do_final_valid[
+                            df_do_final_valid["Aging Category"] == selected_category_do
+                        ].copy()
+                    else:
+                        df_do_filtered = df_do_final_valid.copy()
+
+                    # Tombol download
+                    st.download_button(
+                    label=f"⬇️Download Data DO Aging ({selected_category_do})",
+                    data=to_excel_bytes(df_do_filtered, sheet_name="DO Aging"),
+                    file_name=f"DO_Aging_{selected_category_do.replace(' ', '_')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"download_do_aging_{selected_category_do}"   # 🔹 key unik
+                    )
+
+                else:
+                    st.info("Data tidak tersedia untuk fitur download per Category Aging DO.")
+
+            # Download per Category DO Balance Aging
+            with st.container(border=True):
+                st.subheader("📥 Download Data per Categori Aging DO Balance")
+
+                if not df_do_valid.empty:
+                    # Filter data aging DO berdasarkan kategori yang dipilih
+                    selected_category_do_balance = st.selectbox(
+                        "Pilih kategori aging DO Balance untuk diunduh 📂",
+                        ["Semua", "0-30 hari", "31-60 hari", "61-90 hari", ">90 hari"]
+                    )
+
+                    # Jika bukan 'Semua', filter sesuai kategori
+                    if selected_category_do_balance != "Semua":
+                        df_balance_do_filtered = df_do_valid[
+                            df_do_valid["Aging Category"] == selected_category_do_balance
+                        ].copy()
+                    else:
+                        df_balance_do_filtered = df_do_valid.copy()
+
+                    # Tombol download
+                    st.download_button(
+                    label=f"⬇️Download Data DO Balance Aging ({selected_category_do_balance})",
+                    data=to_excel_bytes(df_balance_do_filtered, sheet_name="DO Balance Aging"),
+                    file_name=f"DO_Balance_Aging_{selected_category_do_balance.replace(' ', '_')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"download_do_balance_{selected_category_do_balance}"   # 🔹 key unik
+                    )
+
+                else:
+                    st.info("Data tidak tersedia untuk fitur download per Category Aging DO Balance.")
+
+
 
     # ---------- FOOTER INFO ----------
     with st.expander("ℹ️ Informasi Teknis Dashboard"):
