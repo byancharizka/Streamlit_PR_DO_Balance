@@ -1288,12 +1288,12 @@ def main():
                 pic_aging_summary_final = summarize_pic_aging(df_pr_final_valid, "PIC Procurement", "transaction_number")
 
             with st.container(border=True):
-                st.subheader("👥 Analisis PR - Kinerja PIC Procurement")
+                st.subheader("👥 Rata-rata Proses PR")
                 #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
                 render_pic_aging_bar(pic_aging_summary_final)
 
             with st.container(border=True):
-                st.subheader("👥 Analisis PR Balance - Kinerja PIC Procurement")
+                st.subheader("👥 Rata-rata Proses PR Balance")
                 #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
                 render_pic_aging_bar(pic_aging_summary)
 
