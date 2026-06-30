@@ -1174,7 +1174,7 @@ def main():
 
                     df_download_pr_balance = df_pr_final_f[df_pr_final_f["Status"].isin(selected_statuses)].copy()
 
-                    if not df_download.empty:
+                    if not df_download_pr_balance.empty:
                         st.download_button(
                             label=f"⬇️Download {len(df_download_pr_balance):,} Baris Data (Filtered).xlsx",
                             data=to_excel_bytes(df_download_pr_balance, sheet_name="Data_PR"),
@@ -1560,7 +1560,58 @@ def main():
                 else:
                     st.info("Data tidak tersedia untuk fitur download DO Balance per PIC.")
 
+    # =====================================================
+    # MID DO
+    # =====================================================
+        with col_tengah:
 
+            # 🔹 Filter hanya DO yang sudah punya tanggal inprogress atau complete
+            #Aging DO
+            df_do_final_valid = df_do_final_real[
+            df_do_final_real["Status"].isin(["Approved", "In Progress", "Complete"])
+            ].copy()
+
+            #Aging DO Balance
+            # Filter DO Balance hanya untuk status aktif (exclude Complete & Draft)
+            df_do_valid = df_do_final_f[
+            ~df_do_final_f["Status"].isin(["Complete", "Draft"])
+            ].copy()
+
+
+            # Lanjutkan proses aging hanya untuk DO yang valid
+            #Aging DO
+            df_do_final_valid = calculate_aging(df_do_final_valid, "transaction_date", prefer="approved")
+            df_do_final_valid = categorize_aging(df_do_final_valid)
+            #Aging DO Balance
+            df_do_valid = calculate_aging(df_do_valid, "transaction_date", prefer="approved")
+            df_do_valid = categorize_aging(df_do_valid)
+
+            # Filter hanya DO valid aktif, exclude Draft
+            df_do_final_valid = df_do_final_valid[
+            ~df_do_final_valid["Status"].str.contains("Draft", case=False, na=False)
+            ].copy()
+
+            with st.container(border=True):
+                st.subheader("⏳ Distribusi Aging DO")
+                render_aging_bar(df_do_final_valid, "transaction_number", chart_key="aging_do")
+
+            with st.container(border=True):
+                st.subheader("⏳ Distribusi Aging DO Balance")
+                render_aging_bar(df_do_valid, "transaction_number", chart_key="aging_do_outstanding")
+
+
+                pic_aging_summary_do = summarize_pic_aging(df_do_valid, "PIC Procurement", "transaction_number")
+                pic_aging_summary_final_do = summarize_pic_aging(df_do_final_valid, "PIC Procurement", "transaction_number")
+
+            with st.container(border=True):
+                st.subheader("👥 Rata-rata Proses DO")
+                #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
+                render_pic_aging_bar(pic_aging_summary_final_do)
+
+            with st.container(border=True):
+                st.subheader("👥 Rata-rata Proses DO Balance")
+                #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
+                render_pic_aging_bar(pic_aging_summary_do)
 
     # ---------- FOOTER INFO ----------
     with st.expander("ℹ️ Informasi Teknis Dashboard"):
