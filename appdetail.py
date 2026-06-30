@@ -835,7 +835,7 @@ def render_pic_aging_bar(summary_df: pd.DataFrame):
 
     st.plotly_chart(fig, use_container_width=True)
 
-def render_sla_gauge(df: pd.DataFrame, threshold: int = 10, title: str = "SLA Compliance"):
+def render_sla_gauge(df: pd.DataFrame, threshold: int = 5, title: str = "SLA Compliance"):
     if df.empty or "Aging" not in df.columns:
         st.info("Data aging tidak tersedia untuk SLA.")
         return
@@ -860,7 +860,7 @@ def render_sla_gauge(df: pd.DataFrame, threshold: int = 10, title: str = "SLA Co
     st.plotly_chart(fig, use_container_width=True)
 
 
-def summarize_pic_sla(df: pd.DataFrame, pic_col: str, doc_col: str, threshold: int = 10) -> pd.DataFrame:
+def summarize_pic_sla(df: pd.DataFrame, pic_col: str, doc_col: str, threshold: int = 5) -> pd.DataFrame:
     if df.empty or pic_col not in df.columns or "Aging" not in df.columns:
         return pd.DataFrame(columns=[pic_col, "Total_Doc", "SLA_Compliance"])
 
@@ -897,7 +897,7 @@ def render_pic_sla_bar(summary_df: pd.DataFrame):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_sla_trend(df: pd.DataFrame, threshold: int = 10, date_col: str = "transaction_date"):
+def render_sla_trend(df: pd.DataFrame, threshold: int = 5, date_col: str = "transaction_date"):
     if df.empty or "Aging" not in df.columns or date_col not in df.columns:
         st.info("Data tidak tersedia untuk trend SLA.")
         return
@@ -1376,11 +1376,11 @@ def main():
         with col_kanan:
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance PR")
-                render_sla_gauge(df_pr_final_valid, threshold=10, title="SLA Compliance PR")
+                render_sla_gauge(df_pr_final_valid, threshold=5, title="SLA Compliance PR")
 
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance PR Balance")
-                render_sla_gauge(df_pr_valid, threshold=10, title="SLA Compliance PR Balance")
+                render_sla_gauge(df_pr_valid, threshold=5, title="SLA Compliance PR Balance")
 
             pic_sla_summary = summarize_pic_sla(df_pr_final_valid, "PIC Procurement", "transaction_number", threshold=10)
 
@@ -1391,7 +1391,7 @@ def main():
 
             with st.container(border=True):
                 st.subheader("📈 Trend SLA")
-                render_sla_trend(df_pr_final_valid, threshold=10, date_col="transaction_date")
+                render_sla_trend(df_pr_final_valid, threshold=5, date_col="transaction_date")
 
 
             # Download PR by period & status
