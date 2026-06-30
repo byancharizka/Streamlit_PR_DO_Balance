@@ -478,7 +478,7 @@ def assign_unassigned(df: pd.DataFrame, col: str) -> pd.DataFrame:
 
 
 def get_top_pic(df: pd.DataFrame, pic_col: str, doc_col: str) -> str:
-    if df.empty or pic_col not in df.columns or doc_col not in df.columns:
+    if df.empty or pic_col not in df.columns or doc_col not in df.columns or "Status" not in df.columns:
         return "Tidak ada"
 
     working = assign_unassigned(df, pic_col)
@@ -487,13 +487,29 @@ def get_top_pic(df: pd.DataFrame, pic_col: str, doc_col: str) -> str:
     if working.empty:
         return "Tidak ada"
 
-    grouped = (
-        working.groupby(pic_col, dropna=False)[doc_col]
-        .nunique()
-        .sort_values(ascending=False)
+    # 🔹 Urutan prioritas status (semakin tinggi nilainya, semakin pending)
+    status_priority = {
+        "Need Approve": 4,
+        "Approved": 3,
+        "In Progress": 2,
+        "Complete": 1
+    }
+
+    working["Status_Score"] = working["Status"].map(status_priority).fillna(0)
+
+    summary = (
+        working.groupby(pic_col)
+        .agg(
+            Total_Doc=(doc_col, "nunique"),
+            Avg_Status_Score=("Status_Score", "mean")
+        )
+        .reset_index()
     )
 
-    return grouped.index[0] if not grouped.empty else "Tidak ada"
+    # 🔹 Urutkan berdasarkan jumlah dokumen dan tingkat pending (semakin tinggi skor, semakin pending)
+    summary = summary.sort_values(["Total_Doc", "Avg_Status_Score"], ascending=[False, False])
+
+    return summary.iloc[0][pic_col] if not summary.empty else "Tidak ada"
 
 
 def summarize_status(df: pd.DataFrame, doc_col: str, nominal_col: str = "Nominal") -> pd.DataFrame:
