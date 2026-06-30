@@ -514,7 +514,6 @@ def summarize_status(df: pd.DataFrame, doc_col: str, nominal_col: str = "Nominal
     )
     return summary
 
-
 def summarize_pic_status(df: pd.DataFrame, pic_col: str, doc_col: str) -> pd.DataFrame:
     if df.empty or pic_col not in df.columns or "Status" not in df.columns or doc_col not in df.columns:
         return pd.DataFrame(columns=[pic_col, "Status", "Jumlah_Doc"])
@@ -529,19 +528,6 @@ def summarize_pic_status(df: pd.DataFrame, pic_col: str, doc_col: str) -> pd.Dat
     )
     return summary
 
-def summarize_pic_status_do(df: pd.DataFrame, pic_col: str, doc_col: str) -> pd.DataFrame:
-    if df.empty or pic_col not in df.columns or "Status DO" not in df.columns or doc_col not in df.columns:
-        return pd.DataFrame(columns=[pic_col, "Status DO", "Jumlah_Doc"])
-
-    working_do = assign_unassigned(df, pic_col)
-
-    summary_do = (
-        working_do.groupby([pic_col, "Status DO"], dropna=False)
-        .agg(Jumlah_Doc=(doc_col, "nunique"))
-        .reset_index()
-        .sort_values(by="Jumlah_Doc", ascending=False)
-    )
-    return summary_do
 # =========================================================
 # 8) CHART HELPERS
 # =========================================================
