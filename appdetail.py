@@ -1916,17 +1916,47 @@ def main():
 
 
     # =====================================================
-    # RIGHT NPR
+    # 📈 RIGHT - NPR Timeline
     # =====================================================
         with col_kanan:
-
             with st.container(border=True):
-                df_npr_f['transaction_date'] = pd.to_datetime(df_npr_f['transaction_date'], errors='coerce')
-                timeline = df_npr_f.groupby(df_npr_f['transaction_date'].dt.date)['No. Transaksi'].count().reset_index(name='Jumlah NPR')
-                fig = px.line(timeline, x='transaction_date', y='Jumlah NPR', title='Timeline NPR')
-                st.plotly_chart(fig, use_container_width=True)
+                st.subheader("📈 Timeline NPR per Tanggal Transaksi")
 
+                if df_npr_f.empty:
+                    st.info("Data NPR tidak tersedia.")
+                else:
+                    # Pastikan kolom tanggal valid
+                    df_npr_f['transaction_date'] = pd.to_datetime(df_npr_f['transaction_date'], errors='coerce')
 
+                    # Hitung jumlah NPR unik per tanggal
+                    timeline = (
+                        df_npr_f.groupby(df_npr_f['transaction_date'].dt.date)['No. Transaksi']
+                        .nunique()
+                        .reset_index(name='Jumlah_Doc')
+                    )
+
+                    # Line chart timeline NPR
+                    fig = px.line(
+                        timeline,
+                        x='transaction_date',
+                        y='Jumlah_Doc',
+                        markers=True,
+                        title='Timeline NPR (Jumlah NPR Unik per Hari)',
+                        line_shape='linear',
+                        color_discrete_sequence=['#56CCF2']
+                    )
+
+                    fig.update_traces(
+                        textposition="top center",
+                        textfont=dict(size=10, color="black")
+                    )
+                    fig.update_layout(
+                        yaxis_title="Jumlah NPR",
+                        xaxis_title="Tanggal Transaksi",
+                        margin=dict(l=40, r=40, t=60, b=80)
+                    )
+
+                    st.plotly_chart(fig, use_container_width=True)
 
 
     # ---------- FOOTER INFO ----------
