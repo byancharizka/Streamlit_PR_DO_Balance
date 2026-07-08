@@ -1274,9 +1274,10 @@ def main():
 
                 if not df_pr_valid.empty and "PIC Procurement" in df_pr_valid.columns:
                     # Filter status hanya Need Approve, Approved, In Progress
-                    df_filtered_status = df_pr_valid[
-                        df_pr_valid["Status"].isin(["Need Approve", "Approved", "In Progress"])
-                    ].copy()
+                    df_filtered_status = df_pr_valid.copy()
+                    #[
+                        #df_pr_valid["Status"].isin(["Need Approve", "Approved", "In Progress"])
+                    #].copy()
 
                     # Tambahkan opsi "Semua"
                     options = ["Semua"] + sorted(
