@@ -1142,6 +1142,7 @@ def main():
     #df_pr_final_valid = df_pr_final_real[
     #df_pr_final_real["date_inprogress"].notna() | df_pr_final_real["date_complete"].notna()
     #].copy()
+    #PR
     df_pr_final_valid = df_pr_final_real[
     df_pr_final_real["Status"].isin(["Approved", "In Progress", "Complete"])
     ].copy()
@@ -1154,6 +1155,35 @@ def main():
     ].copy()
     df_pr_valid = apply_search_filter(df_pr_valid, search_number, search_status, search_pic)
 
+
+    #DO
+    # 🔹 Filter hanya DO yang sudah punya tanggal inprogress atau complete
+    #Aging DO
+    df_do_final_valid = df_do_final_real[
+    df_do_final_real["Status"].isin(["Approved", "In Progress", "Complete"])
+    ].copy()
+    df_do_final_valid = apply_search_filter(df_do_final_valid, search_number, search_status, search_pic)
+
+    #Aging DO Balance
+    # Filter DO Balance hanya untuk status aktif (exclude Complete & Draft)
+    df_do_valid = df_do_final_f[
+    ~df_do_final_f["Status"].isin(["Complete", "Draft"])
+    ].copy()
+    df_do_valid = apply_search_filter(df_do_valid, search_number, search_status, search_pic)
+
+
+    # Lanjutkan proses aging hanya untuk DO yang valid
+    #Aging DO
+    df_do_final_valid = calculate_aging(df_do_final_valid, "transaction_date", prefer="approved")
+    df_do_final_valid = categorize_aging(df_do_final_valid)
+    #Aging DO Balance
+    df_do_valid = calculate_aging(df_do_valid, "transaction_date", prefer="approved")
+    df_do_valid = categorize_aging(df_do_valid)
+
+    # Filter hanya DO valid aktif, exclude Draft
+    df_do_final_valid = df_do_final_valid[
+    ~df_do_final_valid["Status"].str.contains("Draft", case=False, na=False)
+    ].copy()
     # =====================================================
     # LEFT - PR
     # =====================================================
@@ -1529,8 +1559,8 @@ def main():
             with st.container(border=True):
                 st.subheader("📥 Download Data DO Balance (Periode & Status)")
 
-                if not df_do_final_f.empty and "Status" in df_do_final_f.columns:
-                    all_statuses = sorted([s for s in df_do_final_f["Status"].dropna().astype(str).unique().tolist() if s.strip()])
+                if not df_do_valid.empty and "Status" in df_do_valid.columns:
+                    all_statuses = sorted([s for s in df_do_valid["Status"].dropna().astype(str).unique().tolist() if s.strip()])
                     selected_statuses = st.multiselect(
                         "Pilih Status untuk di-download:",
                         all_statuses,
@@ -1538,7 +1568,7 @@ def main():
                         key="do_balance_status_export"
                     )
 
-                    df_download_do_balance = df_do_final_f[df_do_final_f["Status"].isin(selected_statuses)].copy()
+                    df_download_do_balance = df_do_valid[df_do_valid["Status"].isin(selected_statuses)].copy()
 
                     if not df_download_do_balance.empty:
                         st.download_button(
@@ -1557,11 +1587,9 @@ def main():
             with st.container(border=True):
                 st.subheader("📥 Download Data DO Balance per PIC")
 
-                if not df_do_final_f.empty and "PIC Procurement" in df_do_final_f.columns:
+                if not df_do_valid.empty and "PIC Procurement" in df_do_valid.columns:
                     # Filter status hanya Need Approve, Approved, In Progress
-                    df_filtered_status = df_do_final_f[
-                        df_do_final_f["Status"].isin(["Need Approve", "Approved", "In Progress"])
-                    ].copy()
+                    df_filtered_status = df_do_valid.copy()
 
                     # Tambahkan opsi "Semua"
                     options = ["Semua"] + sorted(
@@ -1592,34 +1620,6 @@ def main():
     # MID DO
     # =====================================================
         with col_tengah:
-
-            # 🔹 Filter hanya DO yang sudah punya tanggal inprogress atau complete
-            #Aging DO
-            df_do_final_valid = df_do_final_real[
-            df_do_final_real["Status"].isin(["Approved", "In Progress", "Complete"])
-            ].copy()
-            df_do_final_valid = apply_search_filter(df_do_final_valid, search_number, search_status, search_pic)
-
-            #Aging DO Balance
-            # Filter DO Balance hanya untuk status aktif (exclude Complete & Draft)
-            df_do_valid = df_do_final_f[
-            ~df_do_final_f["Status"].isin(["Complete", "Draft"])
-            ].copy()
-            df_do_valid = apply_search_filter(df_do_valid, search_number, search_status, search_pic)
-
-
-            # Lanjutkan proses aging hanya untuk DO yang valid
-            #Aging DO
-            df_do_final_valid = calculate_aging(df_do_final_valid, "transaction_date", prefer="approved")
-            df_do_final_valid = categorize_aging(df_do_final_valid)
-            #Aging DO Balance
-            df_do_valid = calculate_aging(df_do_valid, "transaction_date", prefer="approved")
-            df_do_valid = categorize_aging(df_do_valid)
-
-            # Filter hanya DO valid aktif, exclude Draft
-            df_do_final_valid = df_do_final_valid[
-            ~df_do_final_valid["Status"].str.contains("Draft", case=False, na=False)
-            ].copy()
 
             with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging DO")
@@ -1765,9 +1765,10 @@ def main():
 
                 if not df_do_final_real.empty and "PIC Procurement" in df_do_final_real.columns:
                     # Filter status hanya Need Approve, Approved, In Progress
-                    df_filtered_status_do = df_do_final_real[
-                        df_do_final_real["Status"].isin(["Approve", "In Progress", "Complete"])
-                    ].copy()
+                    df_filtered_status_do = df_do_final_real.copy()
+                    #[
+                        #df_do_final_real["Status"].isin(["Approve", "In Progress", "Complete"])
+                    #].copy()
 
                     # Tambahkan opsi "Semua"
                     options = ["Semua"] + sorted(
@@ -1854,8 +1855,8 @@ def main():
             with st.container(border=True):
                 st.subheader("📥 Download Data DO Balance (Periode & Status)")
 
-                if not df_do_final_f.empty and "Status" in df_do_final_f.columns:
-                    all_statuses = sorted([s for s in df_do_final_f["Status"].dropna().astype(str).unique().tolist() if s.strip()])
+                if not df_do_valid.empty and "Status" in df_do_valid.columns:
+                    all_statuses = sorted([s for s in df_do_valid["Status"].dropna().astype(str).unique().tolist() if s.strip()])
                     selected_statuses = st.multiselect(
                         "Pilih Status untuk di-download:",
                         all_statuses,
@@ -1863,7 +1864,7 @@ def main():
                         key="do_balance_status_export"
                     )
 
-                    df_download_do_balance = df_do_final_f[df_do_final_f["Status"].isin(selected_statuses)].copy()
+                    df_download_do_balance = df_do_valid_f[df_do_valid["Status"].isin(selected_statuses)].copy()
 
                     if not df_download_do_balance.empty:
                         st.download_button(
@@ -1882,11 +1883,12 @@ def main():
             with st.container(border=True):
                 st.subheader("📥 Download Data DO Balance per PIC")
 
-                if not df_do_final_f.empty and "PIC Procurement" in df_do_final_f.columns:
+                if not df_do_valid.empty and "PIC Procurement" in df_do_valid.columns:
                     # Filter status hanya Need Approve, Approved, In Progress
-                    df_filtered_status = df_do_final_f[
-                        df_do_final_f["Status"].isin(["Need Approve", "Approved", "In Progress"])
-                    ].copy()
+                    df_filtered_status = df_do_valid.copy()
+                    #[
+                        #df_do_final_f["Status"].isin(["Need Approve", "Approved", "In Progress"])
+                    #].copy()
 
                     # Tambahkan opsi "Semua"
                     options = ["Semua"] + sorted(
@@ -2090,9 +2092,10 @@ def main():
 
                 if not df_do_final_real.empty and "PIC Procurement" in df_do_final_real.columns:
                     # Filter status hanya Need Approve, Approved, In Progress
-                    df_filtered_status_do = df_do_final_real[
-                        df_do_final_real["Status"].isin(["Approve", "In Progress", "Complete"])
-                    ].copy()
+                    df_filtered_status_do = df_do_final_real
+                    #[
+                        #df_do_final_real["Status"].isin(["Approve", "In Progress", "Complete"])
+                    #].copy()
 
                     # Tambahkan opsi "Semua"
                     options = ["Semua"] + sorted(
