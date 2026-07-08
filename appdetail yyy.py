@@ -373,7 +373,7 @@ def load_all_data_new(start_date=None, end_date=None) -> dict[str, pd.DataFrame]
         "pr": "purchase-requests",
         "po": "purchase-orders",
         "do": "delivery-orders",
-        #"npr": "purchase-requests",
+        "npr": "outstanding-npr"
     }
 
     result_new = {}
@@ -1027,7 +1027,7 @@ def main():
     df_po_f = df_po.copy()
     df_grn_f = df_grn.copy()
     df_do_f = df_do.copy()
-    df_npr_f = df_npr.copy()
+    #df_npr_f = df_npr.copy()
     #df_pur_f = df_pur.copy()
     df_pr_final_f = df_pr_final.copy()
     df_do_final_f = df_do_final.copy()
@@ -1040,7 +1040,7 @@ def main():
         df_po_f = apply_cumulative_filter(df_po_f, report_end_date)
         df_grn_f = apply_cumulative_filter(df_grn_f, report_end_date)
         df_do_f = apply_cumulative_filter(df_do_f, report_end_date)
-        df_npr_f = apply_cumulative_filter(df_npr_f, report_end_date)
+        #df_npr_f = apply_cumulative_filter(df_npr_f, report_end_date)
         #df_pur_f = apply_cumulative_filter(df_pur_f, report_end_date)
         df_pr_final_f = apply_cumulative_filter(df_pr_final_f, report_end_date)
         df_do_final_f = apply_cumulative_filter(df_do_final_f, report_end_date)
@@ -1057,7 +1057,7 @@ def main():
     df_po_f = apply_search_filter(df_po_f, search_number, search_status, search_pic)
     df_grn_f = apply_search_filter(df_grn_f, search_number, search_status, search_pic)
     df_do_f = apply_search_filter(df_do_f, search_number, search_status, search_pic)
-    df_npr_f = apply_search_filter(df_npr_f, search_number, search_status, search_pic)
+    #df_npr_f = apply_search_filter(df_npr_f, search_number, search_status, search_pic)
     #df_pur_f = apply_search_filter(df_pur_f, search_number, search_status, search_pic)
     #df_pr_final_real = apply_search_filter(df_pr_final_real, search_number, search_status, search_pic)
 
@@ -1067,7 +1067,7 @@ def main():
     df_po_f = ensure_columns(df_po_f, ["Nominal"])
     df_grn_f = ensure_columns(df_grn_f, ["Nominal"])
     df_do_f = ensure_columns(df_do_f, ["Nominal", "No. DO", "PIC Purchasing"])
-    df_npr_f = ensure_columns(df_npr_f, ["Status", "Sales"])
+    #df_npr_f = ensure_columns(df_npr_f, ["No. Transaksi"])
     #df_pur_f = ensure_columns(df_pur_f, ["No. PUR", "PIC", "Status"])
     df_pr_final_real = ensure_columns(df_pr_final_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
     df_do_final_real = ensure_columns(df_do_final_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
@@ -1184,8 +1184,6 @@ def main():
     df_do_final_valid = df_do_final_valid[
     ~df_do_final_valid["Status"].str.contains("Draft", case=False, na=False)
     ].copy()
-
-    
     # =====================================================
     # LEFT - PR
     # =====================================================
@@ -1798,134 +1796,331 @@ def main():
                     st.info("Data tidak tersedia untuk fitur download DO Balance per PIC.")
 
 
+
     # =====================================================
     # LEFT - NPR
     # =====================================================
-    if selected_doc_type == "NPR":
+    elif selected_doc_type == "NPR":
         with col_kiri:
             with st.container(border=True):
-                st.subheader("📊 Detail NPR per Status")
+                st.subheader("📊 Detail NPR")
 
-                if df_npr_f.empty:
-                    st.info("Data NPR tidak tersedia.")
-                else:
-                    status_summary = (
-                        df_npr_f.groupby("Status")["No. Transaksi"]
-                        .nunique()
-                        .reset_index(name="Jumlah_Doc")
-                    )
+                c1, c2 = st.columns(2)
+                with c1:
+                    metric_card("Total NPR", f"Rp {total_npr:,.0f}")
+                with c2:
+                    metric_card("DO Balance", f"Rp {total_do_unpr:,.0f}")
 
-                    # Warna status konsisten dengan PR
-                    STATUS_COLORS = {
-                        "Complete": "#00CC96",
-                        "In Progress": "#F2C94C",
-                        "Approved": "#F2994A",
-                        "Need Approve": "#EB5757",
-                        "Request": "#56CCF2"  # tambahan untuk NPR
-                    }
-
-                    # Pie chart berdasarkan jumlah dokumen
-                    fig = px.pie(
-                        status_summary,
-                        values="Jumlah_Doc",
-                        names="Status",
-                        color="Status",
-                        color_discrete_map=STATUS_COLORS,
-                        hole=0.45,
-                        title="Proporsi Jumlah NPR per Status"
-                    )
-
-                    # Tampilkan persentase dan jumlah
-                    fig.update_traces(
-                        textinfo="percent+value",
-                        texttemplate="%{percent:.1%}<br>(%{value} dokumen)"
-                    )
-
-                    st.plotly_chart(fig, use_container_width=True)
+                c1, c2 = st.columns(2)
+                with c1:
+                    metric_card("Total Transaksi DO", f"{total_do_count:,}")
+                with c2:
+                    metric_card("Total Transaksi DO Balance", f"{total_do_balance_count:,}")
 
 
+                #st.write("Kolom:", df_pr_final_f.columns)
+                #st.write("Contoh tanggal:", df_pr_final_f["transaction_date"].head())
+                #st.write(df_pr_final_f[["item_price", "item_discount", "item_quantity"]].head())
+
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    metric_card("Total Item DO", f"{total_do_rows:,}")
+                with c2:
+                    metric_card("Total Item DO Balance", total_do_balance_rows)
+                with c3:
+                    metric_card("PIC Terbanyak", top_pic_do)
 
 
-    # =====================================================
-    # MID NPR
-    # =====================================================
+                do_summary = summarize_status(df_do_f, doc_col="No. DO", nominal_col="Nominal")
 
-        with col_tengah:
+                with st.container(border=True):
+                    st.subheader("🍩 Proporsi Nominal DO Balance per Status")
+                    render_status_pie(do_summary, "Persentase Distribusi Nominal DO Balance")
+
+            pic_summary_do = summarize_pic_status(df_do_f, "PIC Procurement", "No. DO")
             with st.container(border=True):
-                st.subheader("👥 Analisis Aktivitas NPR per Sales & per Status")
+                st.subheader("👤 Analisis Transaksi DO Balance per PIC Procurement & per Status")
+                render_pic_bar(
+                    summary_df=pic_summary_do,
+                    x_col="PIC Procurement",
+                    y_col="Jumlah_Doc",
+                    color_col="Status",
+                )
 
-                if df_npr_f.empty:
-                    st.info("Data NPR tidak tersedia.")
-                else:
-                    # Pastikan kolom Status dan Sales ada
-                    df_npr_f = assign_unassigned(df_npr_f, "Sales")
-                    df_npr_f = assign_unassigned(df_npr_f, "Status")
+            with st.container(border=True):
+                st.subheader("🔥 Heatmap DO Balance - Aktivitas PIC Procurement")
+                render_pic_heatmap(df_do_f, "PIC Procurement", "transaction_date", "No. DO", "Heatmap Aktivitas PIC Procurement per Bulan")
 
-                    # Ringkas jumlah NPR per Sales dan Status
-                    sales_summary = (
-                        df_npr_f.groupby(["Sales", "Status"])
-                        .agg(Jumlah_Doc=("No. Transaksi", "nunique"))
-                        .reset_index()
-                        .sort_values(by="Jumlah_Doc", ascending=False)
+            # Download DO Balance by status
+            with st.container(border=True):
+                st.subheader("📥 Download Data DO Balance (Periode & Status)")
+
+                if not df_do_valid.empty and "Status" in df_do_valid.columns:
+                    all_statuses = sorted([s for s in df_do_valid["Status"].dropna().astype(str).unique().tolist() if s.strip()])
+                    selected_statuses = st.multiselect(
+                        "Pilih Status untuk di-download:",
+                        all_statuses,
+                        default=all_statuses,
+                        key="do_balance_status_export"
                     )
 
-                    # Warna status sama seperti PR
-                    STATUS_COLORS = {
-                        "Complete": "#00CC96",
-                        "Pro": "#F2C94C",
-                        "Approved": "#F2994A",
-                        "Need Approve": "#EB5757",
-                        "Request": "#56CCF2"  # tambahan untuk NPR
-                    }
+                    df_download_do_balance = df_do_valid_f[df_do_valid["Status"].isin(selected_statuses)].copy()
 
-                    # Buat stacked bar chart
-                    fig = px.bar(
-                        sales_summary,
-                        x="Sales",
-                        y="Jumlah_Doc",
-                        color="Status",
-                        color_discrete_map=STATUS_COLORS,
-                        text="Jumlah_Doc",
-                        title="Analisis Transaksi NPR per Sales & per Status"
-                    )
-
-                    # Tambahkan label total di atas tiap Sales
-                    totals = sales_summary.groupby("Sales")["Jumlah_Doc"].sum().reset_index()
-                    for _, row in totals.iterrows():
-                        fig.add_annotation(
-                            x=row["Sales"],
-                            y=row["Jumlah_Doc"],
-                            text=f"{row['Jumlah_Doc']}",
-                            showarrow=False,
-                            font=dict(size=12, color="black"),
-                            yshift=10
+                    if not df_download_do_balance.empty:
+                        st.download_button(
+                            label=f"⬇️Download {len(df_download_do_balance):,} Baris Data (Filtered).xlsx",
+                            data=to_excel_bytes(df_download_do_balance, sheet_name="Data_PR"),
+                            file_name=f"Data_DO_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
+                        st.caption(f"Menampilkan {len(df_download_do_balance):,} baris data yang akan di-download.")
+                    else:
+                        st.warning("Tidak ada data yang sesuai dengan filter yang dipilih.")
+                else:
+                    st.info("Data DO Balance tidak tersedia untuk export.")
 
-                    fig.update_traces(
-                        textposition="inside",
-                        textfont=dict(size=10, color="white")
+            # Download per PIC PR Balance
+            with st.container(border=True):
+                st.subheader("📥 Download Data DO Balance per PIC")
+
+                if not df_do_valid.empty and "PIC Procurement" in df_do_valid.columns:
+                    # Filter status hanya Need Approve, Approved, In Progress
+                    df_filtered_status = df_do_valid.copy()
+                    #[
+                        #df_do_final_f["Status"].isin(["Need Approve", "Approved", "In Progress"])
+                    #].copy()
+
+                    # Tambahkan opsi "Semua"
+                    options = ["Semua"] + sorted(
+                        df_filtered_status["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist()
                     )
-                    fig.update_layout(
-                        uniformtext_mode="hide",
-                        yaxis_title="Jumlah NPR",
-                        xaxis_title="Sales",
-                        margin=dict(l=40, r=40, t=60, b=80)
+
+                    selected_pic = st.selectbox("Pilih PIC Procurement:", options, key="do_balance_pic_select")
+
+                    # Jika pilih "Semua", ambil semua data sesuai status
+                    if selected_pic == "Semua":
+                        filtered = df_filtered_status.copy()
+                    else:
+                        filtered = df_filtered_status[
+                            df_filtered_status["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic
+                        ].copy()
+
+                    st.download_button(
+                        label=f"⬇️Download Data {selected_pic}.xlsx",
+                        data=to_excel_bytes(filtered, sheet_name="Data_DO_Balance"),
+                        file_name=f"Data_DO_balance_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
-
-                    st.plotly_chart(fig, use_container_width=True)
-
+                    st.caption(f"Menampilkan {len(filtered):,} baris data yang akan di-download.")
+                else:
+                    st.info("Data tidak tersedia untuk fitur download DO Balance per PIC.")
 
     # =====================================================
-    # RIGHT NPR
+    # MID DO
+    # =====================================================
+        with col_tengah:
+
+            # 🔹 Filter hanya DO yang sudah punya tanggal inprogress atau complete
+            #Aging DO
+            df_do_final_valid = df_do_final_real[
+            df_do_final_real["Status"].isin(["Approved", "In Progress", "Complete"])
+            ].copy()
+            df_do_final_valid = apply_search_filter(df_do_final_valid, search_number, search_status, search_pic)
+
+            #Aging DO Balance
+            # Filter DO Balance hanya untuk status aktif (exclude Complete & Draft)
+            df_do_valid = df_do_final_f[
+            ~df_do_final_f["Status"].isin(["Complete", "Draft"])
+            ].copy()
+            df_do_valid = apply_search_filter(df_do_valid, search_number, search_status, search_pic)
+
+
+            # Lanjutkan proses aging hanya untuk DO yang valid
+            #Aging DO
+            df_do_final_valid = calculate_aging(df_do_final_valid, "transaction_date", prefer="approved")
+            df_do_final_valid = categorize_aging(df_do_final_valid)
+            #Aging DO Balance
+            df_do_valid = calculate_aging(df_do_valid, "transaction_date", prefer="approved")
+            df_do_valid = categorize_aging(df_do_valid)
+
+            # Filter hanya DO valid aktif, exclude Draft
+            df_do_final_valid = df_do_final_valid[
+            ~df_do_final_valid["Status"].str.contains("Draft", case=False, na=False)
+            ].copy()
+
+            with st.container(border=True):
+                st.subheader("⏳ Distribusi Aging DO")
+                render_aging_bar(df_do_final_valid, "transaction_number", chart_key="aging_do")
+
+            with st.container(border=True):
+                st.subheader("⏳ Distribusi Aging DO Balance")
+                render_aging_bar(df_do_valid, "transaction_number", chart_key="aging_do_outstanding")
+
+
+                pic_aging_summary_do = summarize_pic_aging(df_do_valid, "PIC Procurement", "transaction_number")
+                pic_aging_summary_final_do = summarize_pic_aging(df_do_final_valid, "PIC Procurement", "transaction_number")
+
+            with st.container(border=True):
+                st.subheader("👥 Rata-rata Proses DO")
+                #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
+                render_pic_aging_bar(pic_aging_summary_final_do)
+
+            with st.container(border=True):
+                st.subheader("👥 Rata-rata Proses DO Balance")
+                #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
+                render_pic_aging_bar(pic_aging_summary_do)
+
+
+            # Download per Category DO Aging
+            with st.container(border=True):
+                st.subheader("📥 Download Data per Categori Aging DO")
+
+                if not df_do_final_valid.empty:
+                    # Filter data aging DO berdasarkan kategori yang dipilih
+                    selected_category_do = st.selectbox(
+                        "Pilih kategori aging DO untuk diunduh 📂",
+                        ["Semua", "0-30 hari", "31-60 hari", "61-90 hari", ">90 hari"]
+                    )
+
+                    # Jika bukan 'Semua', filter sesuai kategori
+                    if selected_category_do != "Semua":
+                        df_do_filtered = df_do_final_valid[
+                            df_do_final_valid["Aging Category"] == selected_category_do
+                        ].copy()
+                    else:
+                        df_do_filtered = df_do_final_valid.copy()
+
+                    # Tombol download
+                    st.download_button(
+                    label=f"⬇️Download Data DO Aging ({selected_category_do})",
+                    data=to_excel_bytes(df_do_filtered, sheet_name="DO Aging"),
+                    file_name=f"DO_Aging_{selected_category_do.replace(' ', '_')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"download_do_aging_{selected_category_do}"   # 🔹 key unik
+                    )
+
+                else:
+                    st.info("Data tidak tersedia untuk fitur download per Category Aging DO.")
+
+            # Download per Category DO Balance Aging
+            with st.container(border=True):
+                st.subheader("📥 Download Data per Categori Aging DO Balance")
+
+                if not df_do_valid.empty:
+                    # Filter data aging DO berdasarkan kategori yang dipilih
+                    selected_category_do_balance = st.selectbox(
+                        "Pilih kategori aging DO Balance untuk diunduh 📂",
+                        ["Semua", "0-30 hari", "31-60 hari", "61-90 hari", ">90 hari"]
+                    )
+
+                    # Jika bukan 'Semua', filter sesuai kategori
+                    if selected_category_do_balance != "Semua":
+                        df_balance_do_filtered = df_do_valid[
+                            df_do_valid["Aging Category"] == selected_category_do_balance
+                        ].copy()
+                    else:
+                        df_balance_do_filtered = df_do_valid.copy()
+
+                    # Tombol download
+                    st.download_button(
+                    label=f"⬇️Download Data DO Balance Aging ({selected_category_do_balance})",
+                    data=to_excel_bytes(df_balance_do_filtered, sheet_name="DO Balance Aging"),
+                    file_name=f"DO_Balance_Aging_{selected_category_do_balance.replace(' ', '_')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"download_do_balance_{selected_category_do_balance}"   # 🔹 key unik
+                    )
+
+                else:
+                    st.info("Data tidak tersedia untuk fitur download per Category Aging DO Balance.")
+
+    # =====================================================
+    # RIGHT - DO
     # =====================================================
         with col_kanan:
+            with st.container(border=True):
+                st.subheader("📏 SLA Compliance DO")
+                render_sla_gauge(df_do_final_valid, threshold=5, title="SLA Compliance DO")
 
             with st.container(border=True):
-                df_npr_f['transaction_date'] = pd.to_datetime(df_npr_f['transaction_date'], errors='coerce')
-                timeline = df_npr_f.groupby(df_npr_f['transaction_date'].dt.date)['No. Transaksi'].count().reset_index(name='Jumlah NPR')
-                fig = px.line(timeline, x='transaction_date', y='Jumlah NPR', title='Timeline NPR')
-                st.plotly_chart(fig, use_container_width=True)
+                st.subheader("📏 SLA Compliance DO Balance")
+                render_sla_gauge(df_do_valid, threshold=5, title="SLA Compliance DO Balance")
 
+            pic_sla_summary_do = summarize_pic_sla(df_do_final_valid, "PIC Procurement", "transaction_number", threshold=5)
+
+            with st.container(border=True):
+                st.subheader("📏 SLA Compliance per PIC Procurement")
+                #st.dataframe(pic_sla_summary, use_container_width=True, hide_index=True)
+                render_pic_sla_bar(pic_sla_summary_do)
+
+            with st.container(border=True):
+                st.subheader("📈 Trend SLA")
+                render_sla_trend(df_do_final_valid, threshold=5, date_col="transaction_date")
+
+
+            # Download DO by period & status
+            with st.container(border=True):
+                st.subheader("📥 Download Data DO (Periode & Status)")
+
+                if not df_do_final_real.empty and "Status" in df_do_final_real.columns:
+                    all_statuses_do = sorted([s for s in df_do_final_real["Status"].dropna().astype(str).unique().tolist() if s.strip()])
+                    selected_statuses_do = st.multiselect(
+                        "Pilih Status untuk di-download:",
+                        all_statuses_do,
+                        default=all_statuses_do,
+                        key="do_status_export"
+                    )
+
+                    df_download_do = df_do_final_real[df_do_final_real["Status"].isin(selected_statuses_do)].copy()
+
+                    if not df_download_do.empty:
+                        st.download_button(
+                            label=f"⬇️Download {len(df_download_do):,} Baris Data (Filtered).xlsx",
+                            data=to_excel_bytes(df_download_do, sheet_name="Data_DO"),
+                            file_name=f"Data_DO_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"download {len(df_download_do):,} Baris Data (Filtered)"   # 🔹 key unik
+                        )
+                        st.caption(f"Menampilkan {len(df_download_do):,} baris data yang akan di-download.")
+                    else:
+                        st.warning("Tidak ada data yang sesuai dengan filter yang dipilih.")
+                else:
+                    st.info("Data DO tidak tersedia untuk export.")
+
+            # Download per PIC DO
+            with st.container(border=True):
+                st.subheader("📥 Download Data DO per PIC")
+
+                if not df_do_final_real.empty and "PIC Procurement" in df_do_final_real.columns:
+                    # Filter status hanya Need Approve, Approved, In Progress
+                    df_filtered_status_do = df_do_final_real
+                    #[
+                        #df_do_final_real["Status"].isin(["Approve", "In Progress", "Complete"])
+                    #].copy()
+
+                    # Tambahkan opsi "Semua"
+                    options = ["Semua"] + sorted(
+                        df_filtered_status_do["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist()
+                    )
+
+                    selected_pic_do = st.selectbox("Pilih PIC Procurement:", options, key="pr_pic_select")
+
+                    # Jika pilih "Semua", ambil semua data sesuai status
+                    if selected_pic_do == "Semua":
+                        filtered_do = df_filtered_status_do.copy()
+                    else:
+                        filtered_do = df_filtered_status_do[
+                            df_filtered_status_do["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic_do
+                        ].copy()
+
+                    st.download_button(
+                        label=f"⬇️Download Data {selected_pic_do}.xlsx",
+                        data=to_excel_bytes(filtered_do, sheet_name="Data_DO"),
+                        file_name=f"Data_DO_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                    st.caption(f"Menampilkan {len(filtered_do):,} baris data yang akan di-download.")
+                else:
+                    st.info("Data tidak tersedia untuk fitur download DO Balance per PIC.")
 
 
 
