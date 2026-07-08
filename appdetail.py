@@ -1240,10 +1240,10 @@ def main():
             with st.container(border=True):
                 st.subheader("📥 Download Data PR Balance per PIC")
 
-                if not df_pr_final_f.empty and "PIC Procurement" in df_pr_final_f.columns:
-                    # Filter status hanya Need Approved, Approved, In Progress
-                    df_filtered_status = df_pr_final_f[
-                        df_pr_final_f["Status"].isin(["Need Approved", "Approved", "In Progress"])
+                if not df_pr_valid.empty and "PIC Procurement" in df_pr_valid.columns:
+                    # Filter status hanya Need Approve, Approved, In Progress
+                    df_filtered_status = df_pr_valid[
+                        df_pr_valid["Status"].isin(["Need Approve", "Approved", "In Progress"])
                     ].copy()
 
                     # Tambahkan opsi "Semua"
@@ -1439,10 +1439,11 @@ def main():
                 st.subheader("📥 Download Data PR per PIC")
 
                 if not df_pr_final_real.empty and "PIC Procurement" in df_pr_final_real.columns:
-                    # Filter status hanya Need Approved, Approved, In Progress
-                    df_filtered_status = df_pr_final_real[
-                        df_pr_final_real["Status"].isin(["Approved", "In Progress", "Complete"])
-                    ].copy()
+                    # Filter status hanya Need Approve, Approved, In Progress
+                    df_filtered_status = df_pr_final_real.copy()
+                    #[
+                        #df_pr_final_real["Status"].isin(["Approved", "In Progress", "Complete"])
+                    #].copy()
 
                     # Tambahkan opsi "Semua"
                     options = ["Semua"] + sorted(
@@ -1557,9 +1558,9 @@ def main():
                 st.subheader("📥 Download Data DO Balance per PIC")
 
                 if not df_do_final_f.empty and "PIC Procurement" in df_do_final_f.columns:
-                    # Filter status hanya Need Approved, Approved, In Progress
+                    # Filter status hanya Need Approve, Approved, In Progress
                     df_filtered_status = df_do_final_f[
-                        df_do_final_f["Status"].isin(["Need Approved", "Approved", "In Progress"])
+                        df_do_final_f["Status"].isin(["Need Approve", "Approved", "In Progress"])
                     ].copy()
 
                     # Tambahkan opsi "Semua"
@@ -1763,9 +1764,9 @@ def main():
                 st.subheader("📥 Download Data DO per PIC")
 
                 if not df_do_final_real.empty and "PIC Procurement" in df_do_final_real.columns:
-                    # Filter status hanya Need Approved, Approved, In Progress
+                    # Filter status hanya Need Approve, Approved, In Progress
                     df_filtered_status_do = df_do_final_real[
-                        df_do_final_real["Status"].isin(["Approved", "In Progress", "Complete"])
+                        df_do_final_real["Status"].isin(["Approve", "In Progress", "Complete"])
                     ].copy()
 
                     # Tambahkan opsi "Semua"
@@ -1882,9 +1883,9 @@ def main():
                 st.subheader("📥 Download Data DO Balance per PIC")
 
                 if not df_do_final_f.empty and "PIC Procurement" in df_do_final_f.columns:
-                    # Filter status hanya Need Approved, Approved, In Progress
+                    # Filter status hanya Need Approve, Approved, In Progress
                     df_filtered_status = df_do_final_f[
-                        df_do_final_f["Status"].isin(["Need Approved", "Approved", "In Progress"])
+                        df_do_final_f["Status"].isin(["Need Approve", "Approved", "In Progress"])
                     ].copy()
 
                     # Tambahkan opsi "Semua"
@@ -2088,9 +2089,9 @@ def main():
                 st.subheader("📥 Download Data DO per PIC")
 
                 if not df_do_final_real.empty and "PIC Procurement" in df_do_final_real.columns:
-                    # Filter status hanya Need Approved, Approved, In Progress
+                    # Filter status hanya Need Approve, Approved, In Progress
                     df_filtered_status_do = df_do_final_real[
-                        df_do_final_real["Status"].isin(["Approved", "In Progress", "Complete"])
+                        df_do_final_real["Status"].isin(["Approve", "In Progress", "Complete"])
                     ].copy()
 
                     # Tambahkan opsi "Semua"
