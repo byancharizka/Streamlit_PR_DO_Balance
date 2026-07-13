@@ -956,7 +956,7 @@ def main():
         )
 
     with col_head2:
-        selected_doc_type = st.selectbox("Pilih Jenis Dokumen 📑", ["PR", "PO", "GRN", "DO", "NPR", "PUR"])
+        selected_doc_type = st.selectbox("Pilih Jenis Dokumen 📑", ["PR", "DO", "NPR", "PUR"])
 
     with col_head3:
         search_number = st.text_input("Cari Nomor Transaksi 🔍", placeholder="No. PR / No. DO / No. NPR / No. PUR")
