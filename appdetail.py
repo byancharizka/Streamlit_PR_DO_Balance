@@ -372,7 +372,9 @@ def load_all_data_new(start_date=None, end_date=None) -> dict[str, pd.DataFrame]
     endpoint_map_new = {
         "pr": "purchase-requests",
         "po": "purchase-orders",
+        "grn" : "goods-receipt-notes",
         "do": "delivery-orders",
+        "si" : "sales-orders"
         #"npr": "purchase-requests",
     }
 
@@ -986,8 +988,10 @@ def main():
     #df_pur = data_old["pur"]
 
     df_pr_final = data_new["pr"]
+    df_po_final = data_new["po"]
+    df_grn_final = data_new["grn"]
     df_do_final = data_new["do"]
-    #df_npr_final = data_new["npr"]
+    df_si_final = data_new["si"]
 
     # Pastikan kolom PIC dan Status sesuai
     #PR
@@ -995,9 +999,23 @@ def main():
         "item_pic_procurement_name": "PIC Procurement",
         "status_description": "Status"
     })
+    #PO
+    df_po_final = df_po_final.rename(columns={
+        "item_pic_procurement_name": "PIC Procurement",
+        "status_description": "Status"
+    })
+    #GRN
+    df_grn_final = df_grn_final.rename(columns={
+        "item_pic_procurement_name": "PIC Procurement",
+        "status_description": "Status"
+    })
     #DO
     df_do_final = df_do_final.rename(columns={
         "item_pic_procurement_name": "PIC Procurement",
+        "status_description": "Status"
+    })
+    #SI
+    df_si_final = df_si_final.rename(columns={
         "status_description": "Status"
     })
 
@@ -1030,8 +1048,10 @@ def main():
     df_npr_f = df_npr.copy()
     #df_pur_f = df_pur.copy()
     df_pr_final_f = df_pr_final.copy()
+    df_po_final_f = df_po_final.copy()
+    df_grn_final_f = df_grn_final.copy()
     df_do_final_f = df_do_final.copy()
-    #df_npr_final_f = df_pr_final.copy()
+    df_si_final_f = df_si_final.copy()
 
     # ---------- DATE FILTER ----------
     if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) == 2:
@@ -1043,13 +1063,19 @@ def main():
         df_npr_f = apply_cumulative_filter(df_npr_f, report_end_date)
         #df_pur_f = apply_cumulative_filter(df_pur_f, report_end_date)
         df_pr_final_f = apply_cumulative_filter(df_pr_final_f, report_end_date)
+        df_po_final_f = apply_cumulative_filter(df_po_final_f, report_end_date)
+        df_grn_final_f = apply_cumulative_filter(df_grn_final_f, report_end_date)
         df_do_final_f = apply_cumulative_filter(df_do_final_f, report_end_date)
+        df_si_final_f = apply_cumulative_filter(df_si_final_f, report_end_date)
         #df_npr_final_f = apply_cumulative_filter(df_npr_final_f, report_end_date)
 
         # 🔹 Dataset baru (PR Final) pakai realisasi
         df_pr_f_real = apply_realization_filter(df_pr_f, report_start_date, report_end_date)
         df_pr_final_real = apply_realization_filter(df_pr_final, report_start_date, report_end_date)
+        df_po_final_real = apply_realization_filter(df_po_final, report_start_date, report_end_date)
+        df_grn_final_real = apply_realization_filter(df_grn_final, report_start_date, report_end_date)
         df_do_final_real = apply_realization_filter(df_do_final, report_start_date, report_end_date)
+        df_si_final_real = apply_realization_filter(df_si_final, report_start_date, report_end_date)
         #df_npr_final_real = apply_realization_filter(df_npr_final, report_start_date, report_end_date)
 
     # ---------- SEARCH FILTER ----------
@@ -1070,7 +1096,10 @@ def main():
     df_npr_f = ensure_columns(df_npr_f, ["Status", "Sales"])
     #df_pur_f = ensure_columns(df_pur_f, ["No. PUR", "PIC", "Status"])
     df_pr_final_real = ensure_columns(df_pr_final_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
+    df_po_final_real = ensure_columns(df_po_final_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
+    df_grn_final_real = ensure_columns(df_grn_final_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
     df_do_final_real = ensure_columns(df_do_final_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
+    df_si_final_real = ensure_columns(df_si_final_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
 
     df_pr_f = safe_to_numeric(df_pr_f, ["Nominal"])
     df_po_f = safe_to_numeric(df_po_f, ["Nominal"])
@@ -1078,7 +1107,17 @@ def main():
     df_do_f = safe_to_numeric(df_do_f, ["Nominal"])
     #df_pr_final_real = safe_to_numeric(df_pr_final_real, ["price", "discount", "quantity", "tax1_percentage", "tax2_percentage"])
     df_pr_final_real= safe_to_numeric(df_pr_final_real, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
+    df_po_final_real= safe_to_numeric(df_po_final_real, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
+    df_grn_final_real= safe_to_numeric(df_grn_final_real, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
     df_do_final_real= safe_to_numeric(df_do_final_real, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
+    df_si_final_real= safe_to_numeric(df_si_final_real, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
+
+    # Merge berdasarkan nomor transaksi
+    merged = (df_pr_final_real
+          .merge(df_po_final_real, left_on='transaction_number', right_on='pr_transaction_numbers', how='outer')
+          .merge(df_grn_final_real, left_on='transaction_number', right_on='po_transaction_number', how='outer')
+          .merge(df_do_final_real, left_on='so_transaction_number', right_on='so_transaction_number', how='outer')
+          .merge(df_si_final_real,, left_on='so_transaction_number', right_on='so_transaction_number', how='outer'))
     
     # ---------- METRICS ----------
     total_pr_unpr = safe_sum(df_pr_f, "Nominal")
@@ -1185,7 +1224,7 @@ def main():
     ~df_do_final_valid["Status"].str.contains("Draft", case=False, na=False)
     ].copy()
 
-    
+
     # =====================================================
     # LEFT - PR
     # =====================================================
