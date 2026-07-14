@@ -17,7 +17,7 @@ from requests.packages.urllib3.util.retry import Retry
 # =========================================================
 st.set_page_config(
     layout="wide",
-    page_title="SIBIMA Performance Dashboard",
+    page_title="SIBIMA Performance Dashboard - PROCUREMENT",
     initial_sidebar_state="expanded"
 )
 
@@ -49,7 +49,7 @@ BASE_URL = {
     "brp": "https://brp.sibima.id/api/"
 }
 
-API_TOKEN = os.getenv("SIBIMA_API_TOKEN", "44b71f38c25ddd02cd31b409f85e9f3aca4f337f02f2fa90237afc2a0736")
+API_TOKEN = os.getenv("SIBIMA_API_TOKEN", "7e92e63988bb1333d28c756718c13f4b0d911aa4b7fc749ddf9b1a0c02d6")
 
 # Pastikan setiap URL diakhiri dengan "/"
 for key in BASE_URL:
@@ -956,7 +956,7 @@ def main():
         )
 
     with col_head2:
-        selected_doc_type = st.selectbox("Pilih Jenis Dokumen 📑", ["PR", "PO", "GRN", "DO", "NPR", "PUR"])
+        selected_doc_type = st.selectbox("Pilih Jenis Dokumen 📑", ["PR", "DO", "NPR", "PUR"])
 
     with col_head3:
         search_number = st.text_input("Cari Nomor Transaksi 🔍", placeholder="No. PR / No. DO / No. NPR / No. PUR")
