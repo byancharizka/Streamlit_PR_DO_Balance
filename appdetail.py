@@ -940,7 +940,7 @@ def render_sla_trend(df: pd.DataFrame, threshold: int = 5, date_col: str = "tran
 # =========================================================
 
 def main():
-    st.title("SIBIMA Performance Dashboard")
+    st.title("SIBIMA Performance Dashboard - PROCUREMENT")
 
     # ---------- TOP FILTERS ----------
     today = date.today()
