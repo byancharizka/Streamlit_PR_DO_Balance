@@ -1117,7 +1117,7 @@ def main():
           .merge(df_po_final_real, left_on='transaction_number', right_on='pr_transaction_numbers', how='outer')
           .merge(df_grn_final_real, left_on='transaction_number', right_on='po_transaction_number', how='outer')
           .merge(df_do_final_real, left_on='so_transaction_number', right_on='so_transaction_number', how='outer')
-          .merge(df_si_final_real,, left_on='so_transaction_number', right_on='so_transaction_number', how='outer'))
+          .merge(df_si_final_real, left_on='so_transaction_number', right_on='so_transaction_number', how='outer'))
     
     # ---------- METRICS ----------
     total_pr_unpr = safe_sum(df_pr_f, "Nominal")
