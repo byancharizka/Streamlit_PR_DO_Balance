@@ -1113,11 +1113,11 @@ def main():
     df_si_final_real= safe_to_numeric(df_si_final_real, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
 
     # Merge berdasarkan nomor transaksi
-    merged = (df_pr_final_real
-          .merge(df_po_final_real, left_on='transaction_number', right_on='pr_transaction_numbers', how='outer')
-          .merge(df_grn_final_real, left_on='transaction_number', right_on='po_transaction_number', how='outer')
-          .merge(df_do_final_real, left_on='so_transaction_number', right_on='so_transaction_number', how='outer')
-          .merge(df_si_final_real, left_on='so_transaction_number', right_on='so_transaction_number', how='outer'))
+    #merged = (df_pr_final_real
+          #.merge(df_po_final_real, left_on='transaction_number', right_on='pr_transaction_numbers', how='outer')
+          #.merge(df_grn_final_real, left_on='transaction_number', right_on='po_transaction_number', how='outer')
+          #.merge(df_do_final_real, left_on='so_transaction_number', right_on='so_transaction_number', how='outer')
+          #.merge(df_si_final_real, left_on='so_transaction_number', right_on='so_transaction_number', how='outer'))
     
     # ---------- METRICS ----------
     total_pr_unpr = safe_sum(df_pr_f, "Nominal")
