@@ -1244,8 +1244,8 @@ def main():
             with st.container(border=True):
                 st.subheader("📥 Download Data PR Balance (Periode & Status)")
 
-                if not df_pr_valid.empty and "Status" in df_pr_valid.columns:
-                    all_statuses = sorted([s for s in df_pr_valid["Status"].dropna().astype(str).unique().tolist() if s.strip()])
+                if not df_pr_f.empty and "Status" in df_pr_f.columns:
+                    all_statuses = sorted([s for s in df_pr_f["Status"].dropna().astype(str).unique().tolist() if s.strip()])
                     selected_statuses = st.multiselect(
                         "Pilih Status untuk di-download:",
                         all_statuses,
@@ -1253,7 +1253,7 @@ def main():
                         key="pr_balance_status_export"
                     )
 
-                    df_download_pr_balance = df_pr_valid[df_pr_valid["Status"].isin(selected_statuses)].copy()
+                    df_download_pr_balance = df_pr_f[df_pr_f["Status"].isin(selected_statuses)].copy()
 
                     if not df_download_pr_balance.empty:
                         st.download_button(
@@ -1272,9 +1272,9 @@ def main():
             with st.container(border=True):
                 st.subheader("📥 Download Data PR Balance per PIC")
 
-                if not df_pr_valid.empty and "PIC Procurement" in df_pr_valid.columns:
+                if not df_pr_f.empty and "PIC Procurement" in df_pr_f.columns:
                     # Filter status hanya Need Approve, Approved, In Progress
-                    df_filtered_status = df_pr_valid.copy()
+                    df_filtered_status = df_pr_f.copy()
                     #[
                         #df_pr_valid["Status"].isin(["Need Approve", "Approved", "In Progress"])
                     #].copy()
