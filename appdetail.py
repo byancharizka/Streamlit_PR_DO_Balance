@@ -370,6 +370,7 @@ def load_all_data(start_date=None, end_date=None) -> dict[str, pd.DataFrame]:
 def load_all_data_new(start_date=None, end_date=None) -> dict[str, pd.DataFrame]:
     # Mapping endpoint baru sesuai API kamu
     endpoint_map_new = {
+        "so": "sales-orders",
         "pr": "purchase-requests",
         "po": "purchase-orders",
         "grn" : "goods-receipt-notes",
@@ -987,6 +988,7 @@ def main():
     df_npr = data_old["npr"]
     #df_pur = data_old["pur"]
 
+    df_so_final = data_new["so"]
     df_pr_final = data_new["pr"]
     df_po_final = data_new["po"]
     df_grn_final = data_new["grn"]
@@ -994,29 +996,43 @@ def main():
     df_si_final = data_new["si"]
 
     # Pastikan kolom PIC dan Status sesuai
+    #SO
+    df_so_final = df_so_final.rename(columns={
+        "status_description": "Status",
+        "item_id": "detail_id"
+    })
     #PR
     df_pr_final = df_pr_final.rename(columns={
         "item_pic_procurement_name": "PIC Procurement",
-        "status_description": "Status"
+        "status_description": "Status",
+        "item_id": "pr_detail_id",
+        "item_so_detail_id" : "so_detail_id"
     })
     #PO
     df_po_final = df_po_final.rename(columns={
         "item_pic_procurement_name": "PIC Procurement",
-        "status_description": "Status"
+        "status_description": "Status",
+        "item_id": "po_detail_id",
+        "item_pr_detail_id" : "pr_detail_id"
     })
     #GRN
     df_grn_final = df_grn_final.rename(columns={
         "item_pic_procurement_name": "PIC Procurement",
-        "status_description": "Status"
+        "status_description": "Status",
+        "item_id": "grn_detail_id",
+        "item_po_detail_id" : "po_detail_id"
     })
     #DO
     df_do_final = df_do_final.rename(columns={
         "item_pic_procurement_name": "PIC Procurement",
-        "status_description": "Status"
+        "status_description": "Status",
+        "item_id": "do_detail_id",
+        "item_grn_detail_id" : "grn_detail_id"
     })
     #SI
     df_si_final = df_si_final.rename(columns={
-        "status_description": "Status"
+        "status_description": "Status",
+        "item_do_detail_id" : "do_detail_id"
     })
 
     df_do = df_do.rename(columns={
@@ -1047,6 +1063,7 @@ def main():
     df_do_f = df_do.copy()
     df_npr_f = df_npr.copy()
     #df_pur_f = df_pur.copy()
+    df_so_final_f = df_so_final.copy()
     df_pr_final_f = df_pr_final.copy()
     df_po_final_f = df_po_final.copy()
     df_grn_final_f = df_grn_final.copy()
@@ -1062,6 +1079,7 @@ def main():
         df_do_f = apply_cumulative_filter(df_do_f, report_end_date)
         df_npr_f = apply_cumulative_filter(df_npr_f, report_end_date)
         #df_pur_f = apply_cumulative_filter(df_pur_f, report_end_date)
+        df_so_final_f = apply_cumulative_filter(df_so_final_f, report_end_date)
         df_pr_final_f = apply_cumulative_filter(df_pr_final_f, report_end_date)
         df_po_final_f = apply_cumulative_filter(df_po_final_f, report_end_date)
         df_grn_final_f = apply_cumulative_filter(df_grn_final_f, report_end_date)
@@ -1070,6 +1088,7 @@ def main():
         #df_npr_final_f = apply_cumulative_filter(df_npr_final_f, report_end_date)
 
         # 🔹 Dataset baru (PR Final) pakai realisasi
+        df_so_final_real = apply_realization_filter(df_so_final, report_start_date, report_end_date)
         df_pr_f_real = apply_realization_filter(df_pr_f, report_start_date, report_end_date)
         df_pr_final_real = apply_realization_filter(df_pr_final, report_start_date, report_end_date)
         df_po_final_real = apply_realization_filter(df_po_final, report_start_date, report_end_date)
@@ -1095,17 +1114,19 @@ def main():
     df_do_f = ensure_columns(df_do_f, ["Nominal", "No. DO", "PIC Purchasing"])
     df_npr_f = ensure_columns(df_npr_f, ["Status", "Sales"])
     #df_pur_f = ensure_columns(df_pur_f, ["No. PUR", "PIC", "Status"])
-    df_pr_final_real = ensure_columns(df_pr_final_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
-    df_po_final_real = ensure_columns(df_po_final_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
-    df_grn_final_real = ensure_columns(df_grn_final_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
-    df_do_final_real = ensure_columns(df_do_final_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
-    df_si_final_real = ensure_columns(df_si_final_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
+    df_so_final_real = ensure_columns(df_so_final_real, ["detail_id", "so_detail_id", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
+    df_pr_final_real = ensure_columns(df_pr_final_real, ["pr_detail_id", "so_detail_id", "PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
+    df_po_final_real = ensure_columns(df_po_final_real, ["po_detail_id", "pr_detail_id", "PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
+    df_grn_final_real = ensure_columns(df_grn_final_real, ["po_detail_id", "grn_detail_id","PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
+    df_do_final_real = ensure_columns(df_do_final_real, ["do_detail_id", "PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
+    df_si_final_real = ensure_columns(df_si_final_real, ["do_detail_id", "si_detail_id", "PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
 
     df_pr_f = safe_to_numeric(df_pr_f, ["Nominal"])
     df_po_f = safe_to_numeric(df_po_f, ["Nominal"])
     df_grn_f = safe_to_numeric(df_grn_f, ["Nominal"])
     df_do_f = safe_to_numeric(df_do_f, ["Nominal"])
     #df_pr_final_real = safe_to_numeric(df_pr_final_real, ["price", "discount", "quantity", "tax1_percentage", "tax2_percentage"])
+    df_so_final_real= safe_to_numeric(df_so_final_real, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
     df_pr_final_real= safe_to_numeric(df_pr_final_real, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
     df_po_final_real= safe_to_numeric(df_po_final_real, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
     df_grn_final_real= safe_to_numeric(df_grn_final_real, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
@@ -1118,7 +1139,86 @@ def main():
           #.merge(df_grn_final_real, left_on='transaction_number', right_on='po_transaction_number', how='outer')
           #.merge(df_do_final_real, left_on='so_transaction_number', right_on='so_transaction_number', how='outer')
           #.merge(df_si_final_real, left_on='so_transaction_number', right_on='so_transaction_number', how='outer'))
+
+
+    #so_pr = df_so_final_real.merge(df_pr_final_real, left_on='detail_id', right_on='so_detail_id', how='outer')
+    #pr_po = so_pr.merge(df_po_final_real, left_on='pr_detail_id', right_on='pr_detail_id', how='outer')
+    #po_grn = pr_po.merge(df_grn_final_real, left_on='detail_id', right_on='po_detail_id', how='outer')
+    #grn_do = po_grn.merge(df_do_final_real, left_on='so_detail_id', right_on='so_detail_id', how='outer')
+    #final_merge = grn_do.merge(df_si_final_real, left_on='so_detail_id', right_on='so_detail_id', how='outer')
+
+    # Hitung jumlah unik dan total baris
+    #pr_unique = df_pr_final_real['pr_detail_id'].nunique()
+    #pr_total = len(df_pr_final_real)
+
+    #po_unique = df_po_final_real['po_detail_id'].nunique()
+    #po_total = len(df_po_final_real)
+
+    #grn_unique = df_grn_final_real['grn_detail_id'].nunique()
+    #grn_total = len(df_grn_final_real)   
+
+    #do_unique = df_do_final_real['do_detail_id'].nunique()
+    #do_total = len(df_do_final_real)
+
+    #st.write(df_pr_final_real['pr_detail_id'].dtype)
+    #st.write(df_po_final_real['pr_detail_id'].dtype)
+
+    # Tampilkan di dashboard
+    #st.write("PR detail_id unik:", pr_unique, " | Total baris:", pr_total)
+    #st.write("PO detail_id unik:", po_unique, " | Total baris:", po_total)
+    #st.write("GRN detail_id unik:", grn_unique, " | Total baris:", grn_total)
+    #st.write("DO detail_id unik:", do_unique, " | Total baris:", do_total)
+    df_so_final_real['detail_id'] = df_so_final_real['detail_id'].astype(str)
+    df_pr_final_real['so_detail_id'] = df_pr_final_real['so_detail_id'].astype(str)
+    df_pr_final_real['pr_detail_id'] = df_pr_final_real['pr_detail_id'].astype(str)
+    df_po_final_real['pr_detail_id'] = df_po_final_real['pr_detail_id'].astype(str)
+    df_po_final_real['po_detail_id'] = df_po_final_real['po_detail_id'].astype(str)
+    df_grn_final_real['po_detail_id'] = df_grn_final_real['po_detail_id'].astype(str)
+    df_grn_final_real['grn_detail_id'] = df_grn_final_real['grn_detail_id'].astype(str)
+    df_do_final_real['grn_detail_id'] = df_do_final_real['grn_detail_id'].astype(str)
+    df_do_final_real['do_detail_id'] = df_do_final_real['do_detail_id'].astype(str)
+    df_si_final_real['do_detail_id'] = df_si_final_real['do_detail_id'].astype(str)
+
+    #so_pr = df_so_final_real.merge(df_pr_final_real, left_on='detail_id', right_on='so_detail_id', how='outer')
+    #pr_po = so_pr.merge(df_po_final_real, left_on='pr_detail_id', right_on='pr_detail_id', how='outer')
+    #po_grn = pr_po.merge(df_grn_final_real, left_on='po_detail_id', right_on='po_detail_id', how='outer')
+    #grn_do = po_grn.merge(df_do_final_real, left_on='grn_detail_id', right_on='grn_detail_id', how='outer')
+    #final_merge = grn_do.merge(df_si_final_real, left_on='do_detail_id', right_on='do_detail_id', how='outer')
+
     
+    so_pr = df_so_final_real.merge(
+    df_pr_final_real,
+    on='so_detail_id',
+    how='outer',
+    suffixes=('_so', '_pr')
+    )
+    pr_po = so_pr.merge(
+    df_po_final_real,
+    on='pr_detail_id',
+    how='outer',
+    suffixes=('_sopr', '_po')
+    )
+    po_grn = pr_po.merge(
+    df_grn_final_real,
+    on='po_detail_id',
+    how='outer',
+    suffixes=('_prpo', '_grn')
+    )
+    grn_do = po_grn.merge(
+    df_do_final_real,
+    on='grn_detail_id',
+    how='outer',
+    suffixes=('_pogrn', '_do')
+    )
+    final_merge = grn_do.merge(
+    df_si_final_real,
+    on='do_detail_id',
+    how='outer',
+    suffixes=('_grndo', '_si')
+    )
+
+
+
     # ---------- METRICS ----------
     total_pr_unpr = safe_sum(df_pr_f, "Nominal")
     total_po_unpr = safe_sum(df_po_f, "Nominal")
