@@ -40,7 +40,7 @@ today = date.today()
 # Default: tanggal 1 bulan aktif sampai hari ini
 DEFAULT_START_DATE = date(today.year, today.month, 1)
 DEFAULT_END_DATE = today
-REQUEST_TIMEOUT = int(os.getenv("SIBIMA_API_TIMEOUT", "60"))
+REQUEST_TIMEOUT = int(os.getenv("SIBIMA_API_TIMEOUT", "120"))
 
 
 BASE_URL = {
@@ -959,7 +959,7 @@ def main():
         )
 
     with col_head2:
-        selected_doc_type = st.selectbox("Pilih Jenis Dokumen 📑", ["PR", "DO", "NPR", "PUR", "STATUS PROGRESS"])
+        selected_doc_type = st.selectbox("Pilih Jenis Dokumen 📑", ["PR", "DO", "NPR", "PUR"])
 
     with col_head3:
         search_number = st.text_input("Cari Nomor Transaksi 🔍", placeholder="No. PR / No. DO / No. NPR / No. PUR")
@@ -1216,6 +1216,8 @@ def main():
     how='outer',
     suffixes=('_grndo', '_si')
     )
+
+
 
     # ---------- METRICS ----------
     total_pr_unpr = safe_sum(df_pr_f, "Nominal")
