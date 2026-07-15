@@ -40,7 +40,7 @@ today = date.today()
 # Default: tanggal 1 bulan aktif sampai hari ini
 DEFAULT_START_DATE = date(today.year, today.month, 1)
 DEFAULT_END_DATE = today
-REQUEST_TIMEOUT = int(os.getenv("SIBIMA_API_TIMEOUT", "120"))
+REQUEST_TIMEOUT = int(os.getenv("SIBIMA_API_TIMEOUT", "60"))
 
 
 BASE_URL = {
