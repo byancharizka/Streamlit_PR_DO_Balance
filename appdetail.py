@@ -1217,29 +1217,6 @@ def main():
     suffixes=('_grndo', '_si')
     )
 
-
-    # Pastikan kolom detail_id sudah ada di hasil merge
-    # Misalnya: so_detail_id, pr_detail_id, po_detail_id, grn_detail_id, do_detail_id, si_detail_id
-
-    def get_item_status(row):
-        if pd.notna(row.get('si_detail_id')):
-            return '✅ Sudah sampai Sales Invoice'
-        elif pd.notna(row.get('do_detail_id')):
-            return '🚚 Sudah sampai Delivery Order'
-        elif pd.notna(row.get('grn_detail_id')):
-            return '📦 Sudah sampai Goods Receipt'
-        elif pd.notna(row.get('po_detail_id')):
-            return '📝 Sudah sampai Purchase Order'
-        elif pd.notna(row.get('pr_detail_id')):
-            return '📄 Masih di Purchase Request'
-        else:
-            return '⏳ Belum diproses'
-
-    # Tambahkan kolom status_progres ke DataFrame final
-    final_merge['status_progres'] = final_merge.apply(get_item_status, axis=1)
-
-
-
     # ---------- METRICS ----------
     total_pr_unpr = safe_sum(df_pr_f, "Nominal")
     total_po_unpr = safe_sum(df_po_f, "Nominal")
@@ -2118,7 +2095,6 @@ def main():
                     )
 
                     st.plotly_chart(fig, use_container_width=True)
-
 
 
     # ---------- FOOTER INFO ----------
