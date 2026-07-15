@@ -2120,41 +2120,6 @@ def main():
                     st.plotly_chart(fig, use_container_width=True)
 
 
-    # =====================================================
-    # STATUS PROGRESS
-    # =====================================================
-    if selected_doc_type == "STATUS PROGRESS":
-        with st.container(border=True):
-        # --- Tampilkan tabel di dashboard
-            st.subheader("📊 Tabel Lengkap Status Progres Per Item")
-            #st.dataframe(final_merge)
-
-            st.download_button(
-                label=f"⬇️Download {len(final_merge):,} Baris Data (Filtered).xlsx",
-                data=to_excel_bytes(final_merge, sheet_name="Data_Status_Progress"),
-                file_name=f"Data_Status_Progress_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            st.caption(f"Menampilkan {len(final_merge):,} baris data yang akan di-download.")
-
-            # Tampilkan ringkasan di dashboard
-            status_summary = final_merge['status_progres'].value_counts().reset_index()
-            status_summary.columns = ['Status Progres', 'Jumlah Item']
-
-            st.subheader("📊 Status Progres Per Item")
-            st.dataframe(status_summary)
-
-            # Visualisasi bar chart
-            fig_status = px.bar(
-                status_summary,
-                x='Status Progres',
-                y='Jumlah Item',
-                color='Status Progres',
-                title='Distribusi Status Item',
-                text='Jumlah Item'
-            )
-            fig_status.update_traces(textposition='outside')
-            st.plotly_chart(fig_status, use_container_width=True)
 
     # ---------- FOOTER INFO ----------
     with st.expander("ℹ️ Informasi Teknis Dashboard"):
