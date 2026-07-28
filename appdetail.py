@@ -370,15 +370,17 @@ def load_all_data(start_date=None, end_date=None) -> dict[str, pd.DataFrame]:
 def load_all_data_new(start_date=None, end_date=None) -> dict[str, pd.DataFrame]:
     # Mapping endpoint baru sesuai API kamu
     endpoint_map_new = {
-        "po": ("purchase-orders", {"date" : "transaction_date"})
+        "pr": ("purchase-requests",{}),
+        "po": ("purchase-orders", {"date" : "transaction_date"}),
+        "do": ("delivery-orders",{})
     }
 
     result_new = {}
-    for key, endpoint in endpoint_map_new.items():
+    for key, (endpoint, rename_map_new) in endpoint_map_new.items():
         df = get_api_data_new(endpoint, source="eas", start_date=start_date, end_date=end_date)
 
         if not df.empty:
-            df = df.rename(columns=rename_map)
+            df = df.rename(columns=rename_map_new)
             df = safe_to_datetime(df, "transaction_date")
         result_new[key] = df
 
