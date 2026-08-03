@@ -304,8 +304,8 @@ def get_api_data_old(endpoint: str, source: str = "outstanding", start_date=None
         return pd.DataFrame()
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_api_data_new(endpoint: str, source: str = "eas", start_date=None, end_date=None):
-    base_url = BASE_URL.get(source, BASE_URL["eas"])
+def get_api_data_new(endpoint: str, source: str = "erp", start_date=None, end_date=None):
+    base_url = BASE_URL.get(source, BASE_URL["erp"])
     url = f"{base_url}{endpoint}"
     params = {
         "date_start": start_date,
@@ -377,7 +377,7 @@ def load_all_data_new(start_date=None, end_date=None) -> dict[str, pd.DataFrame]
 
     result_new = {}
     for key, (endpoint, rename_map_new) in endpoint_map_new.items():
-        df = get_api_data_new(endpoint, source="eas", start_date=start_date, end_date=end_date)
+        df = get_api_data_new(endpoint, source="erp", start_date=start_date, end_date=end_date)
 
         if not df.empty:
             df = df.rename(columns=rename_map_new)
