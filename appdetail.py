@@ -44,8 +44,8 @@ REQUEST_TIMEOUT = int(os.getenv("SIBIMA_API_TIMEOUT", "120"))
 
 
 BASE_URL = {
-    "outstanding": "https://eas.sibima.id/api/dashboard/",
-    "eas": "https://eas.sibima.id/api/",
+    "outstanding": "https://erp.sibima.id/api/dashboard/",
+    "eas": "https://erp.sibima.id/api/",
     "brp": "https://brp.sibima.id/api/"
 }
 
