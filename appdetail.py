@@ -1199,9 +1199,9 @@ def main():
 
                 c1, c2 = st.columns(2)
                 with c1:
-                    metric_card("Total PR", f"Rp {total_pr:,.0f}")
+                    metric_card("Total PR", f"Rp {total_pr:,.0f}".replace(",", "."))
                 with c2:
-                    metric_card("PR Balance", f"Rp {total_pr_unpr:,.0f}")
+                    metric_card("PR Balance", f"Rp {total_pr_unpr:,.0f}".replace(",", "."))
 
                 c1, c2 = st.columns(2)
                 with c1:
