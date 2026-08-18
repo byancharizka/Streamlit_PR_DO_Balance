@@ -17,7 +17,7 @@ from requests.packages.urllib3.util.retry import Retry
 # =========================================================
 st.set_page_config(
     layout="wide",
-    page_title="SIBIMA Performance Dashboard",
+    page_title="SIBIMA Performance Dashboard - PROCUREMENT",
     initial_sidebar_state="expanded"
 )
 
@@ -44,12 +44,12 @@ REQUEST_TIMEOUT = int(os.getenv("SIBIMA_API_TIMEOUT", "120"))
 
 
 BASE_URL = {
-    "outstanding": "https://eas.sibima.id/api/dashboard/",
-    "eas": "https://eas.sibima.id/api/",
+    "outstanding": "https://erp.sibima.id/api/dashboard/",
+    "erp": "https://erp.sibima.id/api/",
     "brp": "https://brp.sibima.id/api/"
 }
 
-API_TOKEN = os.getenv("SIBIMA_API_TOKEN", "7e92e63988bb1333d28c756718c13f4b0d911aa4b7fc749ddf9b1a0c02d6")
+API_TOKEN = os.getenv("SIBIMA_API_TOKEN", "d06cd6acd4bff7a3e3b043d3a1b01190e39405b54d3187b1d00a8830dc6d")
 
 # Pastikan setiap URL diakhiri dengan "/"
 for key in BASE_URL:
@@ -304,8 +304,8 @@ def get_api_data_old(endpoint: str, source: str = "outstanding", start_date=None
         return pd.DataFrame()
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_api_data_new(endpoint: str, source: str = "eas", start_date=None, end_date=None):
-    base_url = BASE_URL.get(source, BASE_URL["eas"])
+def get_api_data_new(endpoint: str, source: str = "erp", start_date=None, end_date=None):
+    base_url = BASE_URL.get(source, BASE_URL["erp"])
     url = f"{base_url}{endpoint}"
     params = {
         "date_start": start_date,
@@ -370,15 +370,18 @@ def load_all_data(start_date=None, end_date=None) -> dict[str, pd.DataFrame]:
 def load_all_data_new(start_date=None, end_date=None) -> dict[str, pd.DataFrame]:
     # Mapping endpoint baru sesuai API kamu
     endpoint_map_new = {
-        "pr": "purchase-requests",
-        "po": "purchase-orders",
-        "do": "delivery-orders",
-        #"npr": "purchase-requests",
+        "pr": ("purchase-requests",{}),
+        "po": ("purchase-orders", {"date" : "transaction_date"}),
+        "do": ("delivery-orders",{})
     }
 
     result_new = {}
-    for key, endpoint in endpoint_map_new.items():
-        df = get_api_data_new(endpoint, source="eas", start_date=start_date, end_date=end_date)
+    for key, (endpoint, rename_map_new) in endpoint_map_new.items():
+        df = get_api_data_new(endpoint, source="erp", start_date=start_date, end_date=end_date)
+
+        if not df.empty:
+            df = df.rename(columns=rename_map_new)
+            df = safe_to_datetime(df, "transaction_date")
         result_new[key] = df
 
     return result_new
@@ -430,8 +433,8 @@ def apply_realization_filter(df: pd.DataFrame, start_date_val, end_date_val) -> 
 def apply_search_filter(
     df: pd.DataFrame,
     search_number: str = "",
-    search_status: str = "",
-    search_pic: str = ""
+    search_status: str = "Semua Status",
+    search_pic: str = "Semua PIC"
 ) -> pd.DataFrame:
     if df.empty:
         return df.copy()
@@ -439,10 +442,10 @@ def apply_search_filter(
     working = df.copy()
     working = normalize_text_columns(
         working,
-        ["Status", "PIC Procurement", "PIC Purchasing", "PIC", "No. PR", "No. DO", "No. PUR", "No. Transaksi"]
+        ["Status", "Status_so", "PIC Procurement", "PIC Purchasing", "PIC", "No. PR", "No. DO", "No. PUR", "No. Transaksi"]
     )
 
-    # Filter nomor transaksi: mencari di semua kolom string
+    # Filter nomor transaksi
     if search_number:
         pattern = search_number.strip().lower()
         string_cols = working.select_dtypes(include=["object"]).columns.tolist()
@@ -452,18 +455,19 @@ def apply_search_filter(
             ).any(axis=1)
             working = working[mask_number]
 
-    # Filter status
-    if search_status and "Status" in working.columns:
-        working = working[
-            working["Status"].str.contains(search_status.strip(), case=False, na=False)
-        ]
+    # Filter Status khusus SO saja
+    if search_status and search_status != "Semua Status":
+        if "Status_so" in working.columns:
+            working = working[
+                working["Status_so"].str.strip().str.lower() == search_status.strip().lower()
+            ]
 
-    # Filter PIC -> OR logic, bukan AND
-    if search_pic:
-        pic_cols = [col for col in ["PIC Procurement", "PIC Purchasing", "PIC"] if col in working.columns]
+    # Filter PIC Procurement via Dropdown
+    if search_pic and search_pic != "Semua PIC":
+        pic_cols = [col for col in ["PIC Procurement", "item_pic_procurement_name", "PIC Purchasing", "PIC"] if col in working.columns]
         if pic_cols:
             mask_pic = working[pic_cols].apply(
-                lambda col: col.str.contains(search_pic.strip(), case=False, na=False)
+                lambda col: col.str.strip().str.lower() == search_pic.strip().lower()
             ).any(axis=1)
             working = working[mask_pic]
 
@@ -940,7 +944,7 @@ def render_sla_trend(df: pd.DataFrame, threshold: int = 5, date_col: str = "tran
 # =========================================================
 
 def main():
-    st.title("SIBIMA Performance Dashboard")
+    st.title("SIBIMA Performance Dashboard - PROCUREMENT")
 
     # ---------- TOP FILTERS ----------
     today = date.today()
@@ -963,9 +967,6 @@ def main():
 
     with col_head4:
         search_status = st.text_input("Cari Status 🔍", placeholder="Complete / In Progress / Approved / Need Approve")
-
-    with col_head5:
-        search_pic = st.text_input("Cari PIC 🔍", placeholder="PIC Procurement / PIC Purchasing / PIC PUR")
 
     # ---------- LOAD DATA ----------
     if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) == 2:
@@ -1022,6 +1023,25 @@ def main():
     #df_npr_final = safe_to_datetime(df_npr_final, "date_inprogress")
     #df_npr_final = safe_to_datetime(df_npr_final, "date_complete")
 
+        # ---------- EXTRACT UNIQUE PIC LIST ----------
+    # Ambil list PIC Procurement unik dari df_pr_final (dan dataframe lain jika perlu)
+    pic_list = []
+    if "PIC Procurement" in df_pr_final.columns:
+        pic_list = df_pr_final["PIC Procurement"].dropna().astype(str).str.strip()
+        pic_list = [pic for pic in pic_list.unique() if pic != "" and pic.lower() != "nan"]
+        pic_list.sort()
+
+    # Tambahkan opsi 'Semua PIC' di urutan pertama
+    pic_options = ["Semua PIC"] + pic_list
+
+    # ---------- TOP FILTERS (Tahap 2: Dropdown PIC) ----------
+    with col_head5:
+        search_pic = st.selectbox(
+            "Pilih PIC Procurement 👤",
+            options=pic_options,
+            index=0
+        )
+
     # ---------- DEFAULT SAFE COPY ----------
     df_pr_f = df_pr.copy()
     df_po_f = df_po.copy()
@@ -1054,6 +1074,8 @@ def main():
 
     # ---------- SEARCH FILTER ----------
     df_pr_f = apply_search_filter(df_pr_f, search_number, search_status, search_pic)
+    df_pr_final_f = apply_search_filter(df_pr_final_f, search_number, search_status, search_pic)
+    df_pr_final_real = apply_search_filter(df_pr_final_real, search_number, search_status, search_pic)
     df_po_f = apply_search_filter(df_po_f, search_number, search_status, search_pic)
     df_grn_f = apply_search_filter(df_grn_f, search_number, search_status, search_pic)
     df_do_f = apply_search_filter(df_do_f, search_number, search_status, search_pic)
@@ -1196,9 +1218,9 @@ def main():
 
                 c1, c2 = st.columns(2)
                 with c1:
-                    metric_card("Total PR", f"Rp {total_pr:,.0f}")
+                    metric_card("Total PR", f"Rp {total_pr:,.0f}".replace(",", "."))
                 with c2:
-                    metric_card("PR Balance", f"Rp {total_pr_unpr:,.0f}")
+                    metric_card("PR Balance", f"Rp {total_pr_unpr:,.0f}".replace(",", "."))
 
                 c1, c2 = st.columns(2)
                 with c1:
@@ -1244,8 +1266,8 @@ def main():
             with st.container(border=True):
                 st.subheader("📥 Download Data PR Balance (Periode & Status)")
 
-                if not df_pr_valid.empty and "Status" in df_pr_valid.columns:
-                    all_statuses = sorted([s for s in df_pr_valid["Status"].dropna().astype(str).unique().tolist() if s.strip()])
+                if not df_pr_f.empty and "Status" in df_pr_f.columns:
+                    all_statuses = sorted([s for s in df_pr_f["Status"].dropna().astype(str).unique().tolist() if s.strip()])
                     selected_statuses = st.multiselect(
                         "Pilih Status untuk di-download:",
                         all_statuses,
@@ -1253,7 +1275,7 @@ def main():
                         key="pr_balance_status_export"
                     )
 
-                    df_download_pr_balance = df_pr_valid[df_pr_valid["Status"].isin(selected_statuses)].copy()
+                    df_download_pr_balance = df_pr_f[df_pr_f["Status"].isin(selected_statuses)].copy()
 
                     if not df_download_pr_balance.empty:
                         st.download_button(
@@ -1272,9 +1294,9 @@ def main():
             with st.container(border=True):
                 st.subheader("📥 Download Data PR Balance per PIC")
 
-                if not df_pr_valid.empty and "PIC Procurement" in df_pr_valid.columns:
+                if not df_pr_f.empty and "PIC Procurement" in df_pr_f.columns:
                     # Filter status hanya Need Approve, Approved, In Progress
-                    df_filtered_status = df_pr_valid.copy()
+                    df_filtered_status = df_pr_f.copy()
                     #[
                         #df_pr_valid["Status"].isin(["Need Approve", "Approved", "In Progress"])
                     #].copy()
