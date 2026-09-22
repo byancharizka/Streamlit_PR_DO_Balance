@@ -1,16 +1,15 @@
-import os
 import logging
+import re
 from io import BytesIO
 from datetime import datetime, date
 
 import pandas as pd
 import plotly.express as px
-import pytz
-import requests
-import streamlit as st
 import plotly.graph_objects as go
-from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.retry import Retry
+import pytz
+import streamlit as st
+from sqlalchemy import URL, create_engine, text
+from sshtunnel import SSHTunnelForwarder
 
 # =========================================================
 # 1) PAGE CONFIG - WAJIB PALING ATAS
@@ -31,42 +30,150 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =========================================================
-# 3) APP CONFIG
+# 3) APP CONFIG + DATABASE CONNECTION
 # =========================================================
 TIMEZONE = pytz.timezone("Asia/Jakarta")
-# Ambil tanggal hari ini
 today = date.today()
 
-# Default: tanggal 1 bulan aktif sampai hari ini
 DEFAULT_START_DATE = date(today.year, today.month, 1)
 DEFAULT_END_DATE = today
-REQUEST_TIMEOUT = int(os.getenv("SIBIMA_API_TIMEOUT", "120"))
+DB_CACHE_TTL = 600
+
+# Cache pembacaan database.
+# Tidak ada HTTP/API call pada versi ini.
 
 
-BASE_URL = {
-    "outstanding": "https://erp.sibima.id/api/dashboard/",
-    "erp": "https://erp.sibima.id/api/",
-    "brp": "https://brp.sibima.id/api/"
-}
+@st.cache_resource
+def get_erp_database_connection():
+    """
+    Koneksi ERP PostgreSQL melalui SSH tunnel.
 
-API_TOKEN = os.getenv("SIBIMA_API_TOKEN", "3bd1c8f44fa6ba220af7382c57c547a9673b0f6f5ada977b850d7f5215e6")
+    Secrets yang dipakai sama dengan script database SIBIMA sebelumnya:
 
-# Pastikan setiap URL diakhiri dengan "/"
-for key in BASE_URL:
-    if not BASE_URL[key].endswith("/"):
-        BASE_URL[key] += "/"
+    [ssh]
+    host = "..."
+    port = 22
+    username = "..."
+    password = "..."
 
-def create_session():
-    session = requests.Session()
-    retries = Retry(
-        total=3,
-        backoff_factor=2,
-        status_forcelist=[502, 503, 504, 429],
+    [postgres]
+    host = "..."
+    port = 5432
+    username = "..."
+    password = "..."
+    database = "..."
+    """
+    ssh = st.secrets["ssh"]
+    postgres = st.secrets["postgres"]
+
+    tunnel_kwargs = {
+        "ssh_username": ssh["username"],
+        "remote_bind_address": (
+            postgres["host"],
+            int(postgres.get("port", 5432)),
+        ),
+        "local_bind_address": ("127.0.0.1", 0),
+    }
+    if ssh.get("password"):
+        tunnel_kwargs["ssh_password"] = ssh["password"]
+    if ssh.get("private_key"):
+        tunnel_kwargs["ssh_pkey"] = ssh["private_key"]
+
+    tunnel = SSHTunnelForwarder(
+        (ssh["host"], int(ssh.get("port", 22))),
+        **tunnel_kwargs,
     )
-    adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
+    tunnel.start()
+
+    database_url = URL.create(
+        drivername="postgresql+psycopg",
+        username=postgres["username"],
+        password=postgres["password"],
+        host="127.0.0.1",
+        port=tunnel.local_bind_port,
+        database=postgres["database"],
+    )
+
+    engine = create_engine(
+        database_url,
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=5,
+        connect_args={
+            "connect_timeout": 15,
+            "application_name": "sibima_procurement_dashboard_database",
+        },
+    )
+    return engine, tunnel
+
+
+# Mapping tabel ERP. Nama tabel dan relasi mengikuti mapping DB yang sudah
+# tervalidasi pada script Weekly Monitoring.
+DB_STAGES = {
+    "so": {
+        "header_table": "public.x4_sales_order",
+        "detail_table": "public.x4_sales_order_detail",
+        "header_date": "date",
+        "header_fk_candidates": ["sales_order_id", "so_id"],
+        "detail_id_candidates": ["id", "sales_order_detail_id"],
+        "product_candidates": ["item_id", "product_id", "product_detail_id"],
+        "item_name_candidates": ["item_name", "product_name", "name"],
+    },
+    "pr": {
+        "header_table": "public.x4_purchase_requests",
+        "detail_table": "public.x4_purchase_request_details",
+        "header_date": "date",
+        "header_fk_candidates": ["purchase_request_id", "pr_id"],
+        "detail_id_candidates": ["id", "pr_detail_id", "purchase_request_detail_id"],
+        "product_candidates": ["item_id", "product_id", "product_detail_id"],
+        "ref_so_candidates": ["so_detail_id", "sales_order_detail_id"],
+    },
+    "po": {
+        "header_table": "public.x4_purchase_orders",
+        "detail_table": "public.x4_purchase_order_details",
+        "header_date": "date",
+        "header_fk_candidates": ["purchase_order_id", "po_id"],
+        "detail_id_candidates": ["id", "po_detail_id", "purchase_order_detail_id"],
+        "product_candidates": ["item_id", "product_id", "product_detail_id"],
+        "ref_pr_candidates": ["pr_detail_id", "purchase_request_detail_id"],
+    },
+    "grn": {
+        "header_table": "public.x4_goods_receipt_note",
+        "detail_table": "public.x4_goods_receipt_note_detail",
+        "header_date": "transaction_date",
+        "header_fk_candidates": ["goods_receipt_note_id", "grn_id", "goods_receipt_id"],
+        "detail_id_candidates": ["id", "grn_detail_id", "goods_receipt_note_detail_id"],
+        "product_candidates": ["item_id", "product_id", "product_detail_id"],
+        "ref_po_candidates": ["purchase_order_detail_id", "po_detail_id"],
+    },
+    "do": {
+        "header_table": "public.x4_delivery_orders",
+        "detail_table": "public.x4_delivery_order_details",
+        "header_date": "transaction_date",
+        "header_fk_candidates": ["delivery_order_id", "do_id"],
+        "detail_id_candidates": ["id", "do_detail_id", "delivery_order_detail_id"],
+        "product_candidates": ["item_id", "product_id", "product_detail_id"],
+        "ref_so_candidates": ["so_detail_id", "sales_order_detail_id"],
+        # Tetap dibaca bila kolom memang tersedia, tetapi main dashboard juga
+        # mempunyai jalur SO -> DO direct sebagai fallback.
+        "ref_grn_candidates": [
+            "grn_detail_id",
+            "goods_receipt_note_detail_id",
+            "goods_receipt_detail_id",
+            "receipt_detail_id",
+        ],
+    },
+    "si": {
+        "header_table": "public.x4_sales_invoices",
+        "detail_table": "public.x4_sales_invoice_details",
+        "header_date": "transaction_date",
+        "header_fk_candidates": ["sales_invoice_id", "invoice_id", "si_id"],
+        "detail_id_candidates": ["id", "si_detail_id", "sales_invoice_detail_id"],
+        "product_candidates": ["item_id", "product_id", "product_detail_id"],
+        "ref_do_candidates": ["do_detail_id", "delivery_order_detail_id"],
+        "item_name_candidates": ["item_name", "product_name", "name"],
+    },
+}
 
 # =========================================================
 # 4) CSS CUSTOM
@@ -271,122 +378,407 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Data") -> bytes:
 
 
 # =========================================================
-# 6) API FETCHING
+# 6) DATABASE READING - API-FREE
 # =========================================================
-@st.cache_data(ttl=300, show_spinner=False)
-def get_api_data_old(endpoint: str, source: str = "outstanding", start_date=None, end_date=None):
-    base_url = BASE_URL.get(source, BASE_URL["outstanding"])
-    url = f"{base_url}{endpoint}"
-    params = {"date_start": start_date, "date_end": end_date}
+def _split_table_name(full_name: str) -> tuple[str, str]:
+    if "." in full_name:
+        schema, table = full_name.split(".", 1)
+    else:
+        schema, table = "public", full_name
+    return schema, table
 
-    try:
-        logger.info("Fetching endpoint=%s from source=%s params=%s", endpoint, source, params)
 
-        # 🔹 Gunakan session dengan retry
-        session = create_session()
-        response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+def _quote_ident(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
 
-        response.raise_for_status()
-        payload = response.json()
 
-        if isinstance(payload, dict):
-            data_layer = payload.get("data", {})
-            if isinstance(data_layer, dict):
-                rows = data_layer.get("data", [])
-                if isinstance(rows, list):
-                    df = pd.DataFrame(rows)
-                    df = safe_to_datetime(df, "transaction_date")
-                    return df
-        return pd.DataFrame()
+@st.cache_data(ttl=DB_CACHE_TTL, show_spinner=False)
+def get_table_columns(full_name: str) -> list[str]:
+    """Ambil nama kolom aktual dari PostgreSQL agar reader toleran terhadap variasi schema."""
+    engine, _ = get_erp_database_connection()
+    schema, table = _split_table_name(full_name)
+    q = text("""
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = :schema
+          AND table_name = :table
+        ORDER BY ordinal_position
+    """)
+    with engine.connect() as conn:
+        rows = conn.execute(q, {"schema": schema, "table": table}).scalars().all()
+    return [str(v) for v in rows]
 
-    except Exception as e:
-        st.warning(f"Gagal mengambil data dari endpoint {endpoint} ({source}): {e}")
-        return pd.DataFrame()
 
-@st.cache_data(ttl=300, show_spinner=False)
-def get_api_data_new(endpoint: str, source: str = "erp", start_date=None, end_date=None):
-    base_url = BASE_URL.get(source, BASE_URL["erp"])
-    url = f"{base_url}{endpoint}"
-    params = {
-        "date_start": start_date,
-        "date_end": end_date,
-        "token": API_TOKEN
+def _first_existing(columns: list[str], candidates: list[str]) -> str | None:
+    lookup = {str(c).lower(): c for c in columns}
+    for candidate in candidates:
+        if str(candidate).lower() in lookup:
+            return lookup[str(candidate).lower()]
+    return None
+
+
+def _select_expr(alias: str, column: str | None, output_alias: str, sql_type: str | None = None) -> str:
+    """Bangun SELECT expression; bila source tidak ada tetap hasilkan kolom NULL."""
+    out = _quote_ident(output_alias)
+    if column:
+        return f'{alias}.{_quote_ident(column)} AS {out}'
+    if sql_type:
+        return f'NULL::{sql_type} AS {out}'
+    return f'NULL AS {out}'
+
+
+def _coalesce_text_expr(
+    first_alias: str, first_column: str | None,
+    second_alias: str, second_column: str | None,
+    output_alias: str,
+) -> str:
+    """COALESCE dua source text tanpa memaksa salah satu harus ada."""
+    out = _quote_ident(output_alias)
+    parts = []
+    if first_column:
+        parts.append(f'{first_alias}.{_quote_ident(first_column)}::text')
+    if second_column:
+        parts.append(f'{second_alias}.{_quote_ident(second_column)}::text')
+    if not parts:
+        return f'NULL::text AS {out}'
+    if len(parts) == 1:
+        return f'{parts[0]} AS {out}'
+    return f'COALESCE({", ".join(parts)}) AS {out}'
+
+
+@st.cache_data(ttl=DB_CACHE_TTL, show_spinner=False)
+def read_stage_from_database(stage: str, start_date=None, end_date=None) -> pd.DataFrame:
+    """
+    Membaca header + detail langsung dari PostgreSQL dan mengeluarkan bentuk
+    DataFrame yang kompatibel dengan hasil API baru lama.
+
+    Penting:
+    - item_id            = primary key detail (compat API)
+    - item_product_id    = product/item identity dari detail.item_id/product_id
+    - transaction_number = nomor dokumen header
+    - transaction_date   = tanggal dokumen header
+    """
+    if stage not in DB_STAGES:
+        raise KeyError(f"Stage database tidak dikenal: {stage}")
+
+    cfg = DB_STAGES[stage]
+    header_table = cfg["header_table"]
+    detail_table = cfg["detail_table"]
+
+    header_cols = get_table_columns(header_table)
+    detail_cols = get_table_columns(detail_table)
+    if not header_cols:
+        raise RuntimeError(f"Tabel header tidak ditemukan / tidak terbaca: {header_table}")
+    if not detail_cols:
+        raise RuntimeError(f"Tabel detail tidak ditemukan / tidak terbaca: {detail_table}")
+
+    header_id = _first_existing(header_cols, ["id"] + cfg.get("header_id_candidates", []))
+    detail_header_fk = _first_existing(detail_cols, cfg["header_fk_candidates"])
+    detail_id = _first_existing(detail_cols, cfg["detail_id_candidates"])
+    product_id = _first_existing(detail_cols, cfg["product_candidates"])
+
+    if not header_id or not detail_header_fk or not detail_id:
+        raise RuntimeError(
+            f"Mapping key {stage.upper()} belum lengkap. "
+            f"header_id={header_id}, detail_header_fk={detail_header_fk}, detail_id={detail_id}"
+        )
+
+    tx_number = _first_existing(
+        header_cols,
+        ["transaction_number", "number", "document_number"],
+    )
+    header_date = _first_existing(header_cols, [cfg["header_date"], "transaction_date", "date"])
+    status = _first_existing(
+        header_cols,
+        ["status_description", "status", "realization_status", "item_status_description"],
+    )
+    sales_pic = _first_existing(
+        header_cols,
+        ["pic_sales_name", "sales_pic_name", "sales_name", "sales_person_name", "sales_person", "pic_sales"],
+    )
+    customer = _first_existing(
+        header_cols,
+        ["customer_name", "customer", "client_name", "partner_name", "customer_id"],
+    )
+    vendor = _first_existing(
+        header_cols,
+        ["vendor_name", "supplier_name", "supplier", "vendor", "vendor_id", "supplier_id"],
+    )
+    header_pic_procurement = _first_existing(
+        header_cols,
+        ["item_pic_procurement_name", "pic_procurement_name", "pic_procurement_id", "pic_name"],
+    )
+    header_total = _first_existing(
+        header_cols,
+        ["transaction_total", "grand_total", "total_amount", "net_total", "total"],
+    )
+
+    date_approved = _first_existing(header_cols, ["date_approved", "approved_date", "approved_at"])
+    date_inprogress = _first_existing(header_cols, ["date_inprogress", "inprogress_date", "in_progress_date", "in_progress_at"])
+    date_complete = _first_existing(header_cols, ["date_complete", "complete_date", "completed_date", "completed_at"])
+
+    item_name = _first_existing(detail_cols, cfg.get("item_name_candidates", ["item_name", "product_name", "name"]))
+    item_price = _first_existing(detail_cols, ["price", "unit_price", "selling_price", "sales_price", "unit_value", "rate"])
+    item_discount = _first_existing(detail_cols, ["discount", "discount_percentage", "discount_percent", "disc"])
+    item_quantity = _first_existing(detail_cols, ["quantity", "item_quantity", "qty", "ordered_quantity", "invoice_quantity"])
+    item_tax1_pct = _first_existing(detail_cols, ["tax1_percentage", "tax_1_percentage", "tax_percentage", "vat_percentage"])
+    item_tax2_pct = _first_existing(detail_cols, ["tax2_percentage", "tax_2_percentage"])
+    item_subtotal = _first_existing(
+        detail_cols,
+        ["sub_total", "subtotal", "line_total", "item_total", "net_amount", "total_amount", "amount", "total_value"],
+    )
+    detail_pic_procurement = _first_existing(
+        detail_cols,
+        ["item_pic_procurement_name", "pic_procurement_name", "pic_procurement_id"],
+    )
+    detail_sales_pic = _first_existing(
+        detail_cols,
+        ["pic_sales_name", "sales_pic_name", "sales_name", "sales_person_name", "sales_person", "pic_sales"],
+    )
+    detail_vendor = _first_existing(
+        detail_cols,
+        ["vendor_name", "supplier_name", "supplier", "vendor", "vendor_id", "supplier_id"],
+    )
+
+    ref_so = _first_existing(detail_cols, cfg.get("ref_so_candidates", []))
+    ref_pr = _first_existing(detail_cols, cfg.get("ref_pr_candidates", []))
+    ref_po = _first_existing(detail_cols, cfg.get("ref_po_candidates", []))
+    ref_grn = _first_existing(detail_cols, cfg.get("ref_grn_candidates", []))
+    ref_do = _first_existing(detail_cols, cfg.get("ref_do_candidates", []))
+
+    # Header/item aliases sengaja meniru payload API lama agar seluruh logic dashboard
+    # setelah bagian LOAD DATA tidak perlu ditulis ulang besar-besaran.
+    select_parts = [
+        _select_expr("h", header_id, "header_id"),
+        _select_expr("h", tx_number, "transaction_number", "text"),
+        _select_expr("h", header_date, "transaction_date", "timestamp"),
+        _select_expr("h", status, "status_description", "text"),
+        _coalesce_text_expr("d", detail_sales_pic, "h", sales_pic, "pic_sales_name"),
+        _select_expr("h", customer, "customer_name", "text"),
+        _coalesce_text_expr("d", detail_vendor, "h", vendor, "vendor_name"),
+        _select_expr("h", header_total, "transaction_total", "numeric"),
+        _select_expr("h", date_approved, "date_approved", "timestamp"),
+        _select_expr("h", date_inprogress, "date_inprogress", "timestamp"),
+        _select_expr("h", date_complete, "date_complete", "timestamp"),
+        _select_expr("d", detail_id, "item_id"),
+        _select_expr("d", product_id, "item_product_id"),
+        _select_expr("d", item_name, "item_item_name", "text"),
+        _select_expr("d", item_price, "item_price", "numeric"),
+        _select_expr("d", item_discount, "item_discount", "numeric"),
+        _select_expr("d", item_quantity, "item_quantity", "numeric"),
+        _select_expr("d", item_tax1_pct, "item_tax1_percentage", "numeric"),
+        _select_expr("d", item_tax2_pct, "item_tax2_percentage", "numeric"),
+        _select_expr("d", item_subtotal, "item_sub_total", "numeric"),
+        _select_expr("d", ref_so, "item_so_detail_id"),
+        _select_expr("d", ref_pr, "item_pr_detail_id"),
+        _select_expr("d", ref_po, "item_po_detail_id"),
+        _select_expr("d", ref_grn, "item_grn_detail_id"),
+        _select_expr("d", ref_do, "item_do_detail_id"),
+    ]
+
+    # PIC Procurement: detail lebih prioritas, header menjadi fallback.
+    select_parts.append(
+        _coalesce_text_expr(
+            "d", detail_pic_procurement,
+            "h", header_pic_procurement,
+            "item_pic_procurement_name",
+        )
+    )
+
+    params = {}
+    where_parts = []
+    if header_date and end_date is not None:
+        params["next_date"] = pd.Timestamp(end_date) + pd.Timedelta(days=1)
+        where_parts.append(f'h.{_quote_ident(header_date)} < :next_date')
+    if header_date and start_date is not None:
+        params["start_date"] = pd.Timestamp(start_date)
+        where_parts.append(f'h.{_quote_ident(header_date)} >= :start_date')
+
+    where_sql = "WHERE " + " AND ".join(where_parts) if where_parts else ""
+    query = text(f"""
+        SELECT
+            {', '.join(select_parts)}
+        FROM {header_table} h
+        JOIN {detail_table} d
+          ON h.{_quote_ident(header_id)} = d.{_quote_ident(detail_header_fk)}
+        {where_sql}
+    """)
+
+    engine, _ = get_erp_database_connection()
+    with engine.connect() as conn:
+        df = pd.read_sql_query(query, conn, params=params)
+
+    df = df.loc[:, ~df.columns.duplicated()].copy()
+    df = safe_to_datetime(df, "transaction_date")
+    for col in ["date_approved", "date_inprogress", "date_complete"]:
+        df = safe_to_datetime(df, col)
+    return df
+
+
+def _api_compat_nominal(df: pd.DataFrame) -> pd.Series:
+    """Hitung nominal baris dari field detail DB dengan fallback subtotal."""
+    if df.empty:
+        return pd.Series(dtype="float64")
+
+    qty = pd.to_numeric(df.get("item_quantity", 0), errors="coerce").fillna(0)
+    price = pd.to_numeric(df.get("item_price", 0), errors="coerce").fillna(0)
+    discount = pd.to_numeric(df.get("item_discount", 0), errors="coerce").fillna(0)
+    tax1 = pd.to_numeric(df.get("item_tax1_percentage", 0), errors="coerce").fillna(0)
+    direct = pd.to_numeric(df.get("item_sub_total", 0), errors="coerce").fillna(0)
+
+    disc_per_unit = price * (discount / 100)
+    tax_per_unit = (price - disc_per_unit) * (tax1 / 100)
+    computed = qty * (price - disc_per_unit + tax_per_unit)
+
+    value = direct.copy()
+    use_computed = (computed != 0) & ((value == 0) | value.isna())
+    value.loc[use_computed] = computed.loc[use_computed]
+    return value.fillna(0)
+
+
+def _build_balance_view(stage: str, df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compatibility view pengganti endpoint *-balance.
+
+    Catatan: API lama dapat memiliki business rule server-side yang tidak terlihat
+    di script ini. Karena rule endpoint tersebut tidak tersedia di source code,
+    view ini hanya memproyeksikan data transaksi DB ke nama kolom yang digunakan UI.
+    Tidak ada HTTP/API call lagi.
+    """
+    doc_labels = {
+        "so": "No. SO",
+        "pr": "No. PR",
+        "po": "No. PO",
+        "grn": "No. GRN",
+        "do": "No. DO",
+    }
+    pic_labels = {
+        "so": "PIC Sales",
+        "pr": "PIC Procurement",
+        "po": "PIC Procurement",
+        "grn": "PIC Procurement",
+        "do": "PIC Procurement",
     }
 
-    try:
-        # 🔹 Gunakan session dengan retry
-        session = create_session()
-        response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+    if df is None or df.empty:
+        status_col = "Status DO" if stage == "do" else "Status"
+        cols = [doc_labels.get(stage, "No. Transaksi"), pic_labels.get(stage, "PIC"), status_col, "Nominal", "transaction_date"]
+        return pd.DataFrame(columns=cols)
 
-        response.raise_for_status()
-        payload = response.json()
+    out = pd.DataFrame(index=df.index)
+    out[doc_labels.get(stage, "No. Transaksi")] = df.get("transaction_number")
+    if stage == "so":
+        out[pic_labels[stage]] = df.get("pic_sales_name")
+    else:
+        out[pic_labels.get(stage, "PIC Procurement")] = df.get("item_pic_procurement_name")
 
-        rows = payload.get("data", [])
-        if isinstance(rows, list):
-            all_rows = []
-            for row in rows:
-                items = row.get("items", [])
-                if items:
-                    for item in items:
-                        flat = {**row, **{f"item_{k}": v for k, v in item.items()}}
-                        all_rows.append(flat)
-                else:
-                    all_rows.append(row)
+    status_name = "Status DO" if stage == "do" else "Status"
+    out[status_name] = df.get("status_description")
+    out["Nominal"] = _api_compat_nominal(df)
+    out["transaction_date"] = pd.to_datetime(df.get("transaction_date"), errors="coerce")
 
-            df = pd.DataFrame(all_rows)
-            df = safe_to_datetime(df, "transaction_date")
-            return df
+    # Fallback header total hanya bila seluruh detail dokumen tidak memiliki nilai.
+    # Header total diletakkan sekali saja agar tidak double count per item.
+    if "transaction_total" in df.columns:
+        doc_col = doc_labels.get(stage, "No. Transaksi")
+        header_total = pd.to_numeric(df["transaction_total"], errors="coerce").fillna(0)
+        tmp = pd.DataFrame({"doc": out[doc_col], "line": out["Nominal"], "header": header_total}, index=out.index)
+        for _, idx in tmp.groupby("doc", dropna=False).groups.items():
+            idx = list(idx)
+            if not idx:
+                continue
+            line_sum = float(tmp.loc[idx, "line"].sum())
+            hv = float(tmp.loc[idx, "header"].iloc[0]) if len(idx) else 0.0
+            if line_sum == 0 and hv != 0:
+                out.loc[idx, "Nominal"] = 0.0
+                out.loc[idx[0], "Nominal"] = hv
 
-        return pd.DataFrame()
-
-    except Exception as e:
-        st.warning(f"Gagal mengambil data dari endpoint {endpoint} ({source}): {e}")
-        return pd.DataFrame()
+    return out.reset_index(drop=True)
 
 
-def load_all_data(start_date=None, end_date=None) -> dict[str, pd.DataFrame]:
-    endpoint_map = {
-        "pr": ("pr-balance", {"Tgl. PR": "transaction_date"}),
-        "po": ("po-balance", {"Tgl. PO": "transaction_date"}),
-        "grn": ("grn-balance", {"Tgl. GRN": "transaction_date"}),
-        "do": ("do-balance", {"Tgl. DO": "transaction_date"}),
-        "npr": ("outstanding-npr", {"Tanggal": "transaction_date"}),
-        #"pur": ("outstanding-pur", {"Tanggal": "transaction_date"})
-    }
+def _build_npr_view(data_new: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """DB-native NPR proxy: item SO yang belum memiliki PR strict detail+product."""
+    so = data_new.get("so", pd.DataFrame()).copy()
+    pr = data_new.get("pr", pd.DataFrame()).copy()
+    if so.empty:
+        return pd.DataFrame(columns=["No. Transaksi", "Status", "Nominal", "transaction_date"])
+
+    def canon(v):
+        if pd.isna(v):
+            return None
+        s = str(v).strip()
+        if not s or s.lower() in {"nan", "none", "null", "<na>"}:
+            return None
+        try:
+            f = float(s)
+            if f.is_integer():
+                return str(int(f))
+        except Exception:
+            pass
+        return s
+
+    so["__detail"] = so.get("item_id", pd.Series(index=so.index, dtype="object")).map(canon)
+    so["__product"] = so.get("item_product_id", pd.Series(index=so.index, dtype="object")).map(canon)
+    if pr.empty:
+        pending = so.copy()
+    else:
+        pr_keys = set(zip(
+            pr.get("item_so_detail_id", pd.Series(index=pr.index, dtype="object")).map(canon),
+            pr.get("item_product_id", pd.Series(index=pr.index, dtype="object")).map(canon),
+        ))
+        mask = [
+            (d, p) not in pr_keys
+            for d, p in zip(so["__detail"], so["__product"])
+        ]
+        pending = so.loc[mask].copy()
+
+    return pd.DataFrame({
+        "No. Transaksi": pending.get("transaction_number"),
+        "Status": pending.get("status_description"),
+        "Nominal": _api_compat_nominal(pending),
+        "transaction_date": pd.to_datetime(pending.get("transaction_date"), errors="coerce"),
+    }).reset_index(drop=True)
+
+
+@st.cache_data(ttl=DB_CACHE_TTL, show_spinner=False)
+def load_all_data_new(start_date=None, end_date=None) -> dict[str, pd.DataFrame]:
+    """
+    Pengganti API baru: semua stage dibaca langsung dari ERP PostgreSQL.
+
+    Semantik tanggal dipertahankan seperti request API lama:
+    date_start/date_end diterapkan pada dataset transaksi yang diminta.
+    """
+    target_end = end_date if end_date is not None else date.today()
 
     result = {}
-    for key, (endpoint, rename_map) in endpoint_map.items():
-        df = get_api_data_old(endpoint, source="outstanding", start_date=start_date, end_date=end_date)
-
-        if not df.empty:
-            df = df.rename(columns=rename_map)
-            df = safe_to_datetime(df, "transaction_date")
-        result[key] = df
-
+    for stage in ["so", "pr", "po", "grn", "do", "si"]:
+        try:
+            result[stage] = read_stage_from_database(
+                stage,
+                start_date=start_date,
+                end_date=target_end,
+            )
+        except Exception as exc:
+            logger.exception("Gagal membaca stage %s dari database", stage)
+            st.warning(f"Gagal membaca {stage.upper()} dari database: {exc}")
+            result[stage] = pd.DataFrame()
     return result
 
 
+@st.cache_data(ttl=DB_CACHE_TTL, show_spinner=False)
+def load_all_data(start_date=None, end_date=None) -> dict[str, pd.DataFrame]:
+    """Pengganti endpoint balance/outstanding lama; tetap 100% database."""
+    target_end = end_date if end_date is not None else date.today()
+    source = load_all_data_new(start_date=start_date, end_date=target_end)
 
-def load_all_data_new(start_date=None, end_date=None) -> dict[str, pd.DataFrame]:
-    # Mapping endpoint baru sesuai API kamu
-    endpoint_map_new = {
-        "pr": ("purchase-requests",{}),
-        "po": ("purchase-orders", {"date" : "transaction_date"}),
-        "do": ("delivery-orders",{})
+    result = {
+        "pr": _build_balance_view("pr", source.get("pr", pd.DataFrame())),
+        "po": _build_balance_view("po", source.get("po", pd.DataFrame())),
+        "grn": _build_balance_view("grn", source.get("grn", pd.DataFrame())),
+        "do": _build_balance_view("do", source.get("do", pd.DataFrame())),
+        "npr": _build_npr_view(source),
     }
-
-    result_new = {}
-    for key, (endpoint, rename_map_new) in endpoint_map_new.items():
-        df = get_api_data_new(endpoint, source="erp", start_date=start_date, end_date=end_date)
-
-        if not df.empty:
-            df = df.rename(columns=rename_map_new)
-            df = safe_to_datetime(df, "transaction_date")
-        result_new[key] = df
-
-    return result_new
-
-
+    return result
 
 
 # =========================================================
@@ -974,7 +1366,7 @@ def main():
     else:
         start_date, end_date = default_start, today
 
-    with st.spinner("Mengambil data dashboard..."):
+    with st.spinner("Membaca data langsung dari PostgreSQL ERP..."):
         data_old = load_all_data()
         data_new = load_all_data_new(start_date=start_date, end_date=end_date)
 
@@ -1992,11 +2384,12 @@ def main():
 
         st.markdown(
             f"""
-- **Base URL:** `{BASE_URL}`
-- **Timeout Request:** `{REQUEST_TIMEOUT}` detik
+- **Data Source:** `PostgreSQL ERP`
+- **Connection:** `SSH Tunnel → SQLAlchemy → PostgreSQL`
 - **Tanggal report sampai:** `{selected_report_date}`
 - **Mode filter tanggal:** kumulatif (semua data sampai tanggal akhir)
-- **Cache API:** 600 detik
+- **Cache Database Query:** `{DB_CACHE_TTL}` detik
+- **API/HTTP Request:** `DISABLED / TIDAK DIGUNAKAN`
             """
         )
 
