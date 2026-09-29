@@ -1296,27 +1296,6 @@ def main():
     top_pic_do = get_top_pic(df_do_f, "PIC Procurement", "No. DO")
     #top_pic_pur = get_top_pic(df_pur_f, "PIC", "No. PUR")
 
-
-    # Focused snapshot for the selected END DATE. Use this export to reconcile against PostgreSQL.
-    with st.expander(f"🧪 Total PR End-Date Snapshot — {pd.Timestamp(report_end_date).strftime('%d %b %Y')}", expanded=False):
-        api_day = build_total_pr_day_snapshot(df_pr_final_real, report_end_date, "API")
-        api_day_total = float(pd.to_numeric(api_day.get("total_pr_row",0), errors="coerce").fillna(0).sum()) if not api_day.empty else 0.0
-        q1,q2,q3 = st.columns(3)
-        q1.metric("API Total PR — End Date Only", f"Rp {api_day_total:,.0f}".replace(",","."))
-        q2.metric("API PR Documents", f"{safe_unique_count(api_day, 'transaction_number'):,}")
-        q3.metric("API PR Items", f"{len(api_day):,}")
-        if not api_day.empty:
-            st.dataframe(api_day, use_container_width=True, hide_index=True)
-            st.download_button(
-                "⬇️ Download API Total PR End-Date Rows.xlsx",
-                data=to_excel_bytes(api_day, sheet_name="API_END_DATE"),
-                file_name=f"API_Total_PR_{pd.Timestamp(report_end_date).strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_api_total_pr_enddate", use_container_width=True,
-            )
-        else:
-            st.info("Tidak ada PR pada tanggal akhir filter.")
-
     # ---------- LAYOUT ----------
     col_kiri, col_tengah, col_kanan = st.columns([1, 1, 1], gap="small")
     # 🔹 Filter hanya PR yang sudah punya tanggal inprogress atau complete
