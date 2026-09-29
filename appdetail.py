@@ -12,6 +12,11 @@ import plotly.graph_objects as go
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 
+# Main dashboard data tetap berasal dari API. PostgreSQL hanya digunakan sebagai
+# fallback milestone PR karena endpoint API yang dipakai dashboard tidak selalu
+# mengembalikan date_approved/date_inprogress/date_complete secara lengkap.
+from app import get_erp_database_connection
+
 # =========================================================
 # 1) PAGE CONFIG - WAJIB PALING ATAS
 # =========================================================
@@ -239,6 +244,41 @@ def normalize_text_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame
     return df
 
 
+
+def normalize_pic_columns(
+    df: pd.DataFrame,
+    columns=("PIC Procurement", "PIC Purchasing", "PIC", "item_pic_procurement_name"),
+) -> pd.DataFrame:
+    """
+    Normalisasi nama PIC agar perbedaan huruf besar/kecil tidak membuat PIC terpisah.
+
+    Contoh:
+      "Sarah", "SARAH", "sarah" -> "SARAH"
+      " KeyAccount.Reg02@Sibima.Id " -> "KEYACCOUNT.REG02@SIBIMA.ID"
+
+    Nilai kosong tetap menjadi string kosong; fungsi assign_unassigned() tetap
+    bertanggung jawab mengubah nilai kosong / PIC tertentu menjadi "Unassigned".
+    """
+    working = df.copy() if df is not None else pd.DataFrame()
+
+    for col in columns:
+        if col in working.columns:
+            s = (
+                working[col]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+            )
+
+            null_like = s.str.lower().isin({"", "nan", "none", "null", "<na>"})
+            s = s.str.upper()
+            s.loc[null_like] = ""
+
+            working[col] = s
+
+    return working
+
+
 def safe_unique_count(df: pd.DataFrame, col: str) -> int:
     if df.empty or col not in df.columns:
         return 0
@@ -269,6 +309,96 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Data") -> bytes:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
     return output.getvalue()
 
+
+def calculate_total_pr_strict(df: pd.DataFrame) -> tuple[pd.DataFrame, float]:
+    """Canonical Total PR used by BOTH API and PostgreSQL dashboards.
+
+    Grain: one PR detail row (transaction_number + item_id).
+    Formula (same as legacy API):
+        disc_per_unit = item_price * item_discount / 100
+        tax_unit       = (item_price - disc_per_unit) * item_tax1_percentage / 100
+        net_price_unit = item_price - disc_per_unit + tax_unit
+        total_pr_row   = item_quantity * net_price_unit
+
+    Important parity rules:
+    - numeric NULL/invalid -> 0, identical on both files;
+    - duplicate PR-detail rows are collapsed before summing;
+    - no transaction_total/header-total fallback;
+    - Tax2 is intentionally excluded because the legacy API Total PR excludes it.
+    """
+    out = df.copy() if df is not None else pd.DataFrame()
+    if out.empty:
+        for c in ["disc_per_unit", "tax_unit", "net_price_unit", "total_pr_row"]:
+            out[c] = pd.Series(dtype="float64")
+        return out, 0.0
+
+    # The endpoint and DB reader can differ in dtype (1 vs 1.0 vs '1').
+    # Normalize only for de-duplication; business fields remain untouched.
+    def _canon(v):
+        if v is None or pd.isna(v):
+            return ""
+        s = str(v).strip()
+        if not s or s.lower() in {"nan", "none", "null", "<na>"}:
+            return ""
+        try:
+            f = float(s)
+            if f.is_integer():
+                return str(int(f))
+        except Exception:
+            pass
+        return s
+
+    doc = out.get("transaction_number", pd.Series("", index=out.index)).fillna("").astype(str).str.strip()
+    detail = out.get("item_id", pd.Series("", index=out.index)).map(_canon)
+    product = out.get("item_product_id", pd.Series("", index=out.index)).map(_canon)
+    name = out.get("item_item_name", pd.Series("", index=out.index)).fillna("").astype(str).str.strip().str.lower()
+    qty_key = pd.to_numeric(out.get("item_quantity", pd.Series(0, index=out.index)), errors="coerce").fillna(0)
+
+    # item_id is the strongest 1:1 key observed on API and DB. Fallback protects old rows.
+    strong = detail.ne("")
+    out["__total_pr_key"] = ""
+    out.loc[strong, "__total_pr_key"] = "PRD|" + doc.loc[strong] + "|" + detail.loc[strong]
+    weak = ~strong
+    out.loc[weak, "__total_pr_key"] = (
+        "FB|" + doc.loc[weak] + "|" + product.loc[weak] + "|" + name.loc[weak]
+        + "|" + qty_key.loc[weak].astype(str)
+    )
+
+    # Keep a single current-state row for every PR detail.
+    out = out.drop_duplicates("__total_pr_key", keep="last").copy()
+
+    for c in ["item_price", "item_discount", "item_quantity", "item_tax1_percentage"]:
+        if c not in out.columns:
+            out[c] = 0.0
+        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0)
+
+    out["disc_per_unit"] = out["item_price"] * (out["item_discount"] / 100.0)
+    out["tax_unit"] = (out["item_price"] - out["disc_per_unit"]) * (out["item_tax1_percentage"] / 100.0)
+    out["net_price_unit"] = out["item_price"] - out["disc_per_unit"] + out["tax_unit"]
+    out["total_pr_row"] = out["item_quantity"] * out["net_price_unit"]
+
+    return out, float(out["total_pr_row"].sum())
+
+
+
+def build_total_pr_day_snapshot(df: pd.DataFrame, target_date, source_label: str = "API") -> pd.DataFrame:
+    """Canonical Total PR rows for exactly one transaction date."""
+    work = df.copy() if df is not None else pd.DataFrame()
+    if work.empty or "transaction_date" not in work.columns:
+        return pd.DataFrame()
+    work["transaction_date"] = pd.to_datetime(work["transaction_date"], errors="coerce")
+    target = pd.Timestamp(target_date).date()
+    work = work.loc[work["transaction_date"].dt.date.eq(target)].copy()
+    work, _ = calculate_total_pr_strict(work)
+    if work.empty:
+        return work
+    work["Forensic Source"] = source_label
+    keep = [c for c in [
+        "Forensic Source","transaction_number","transaction_date","item_id","item_product_id",
+        "item_item_name","item_quantity","item_price","item_discount","item_tax1_percentage",
+        "disc_per_unit","tax_unit","net_price_unit","total_pr_row","Status","PIC Procurement","__total_pr_key"
+    ] if c in work.columns]
+    return work[keep].copy()
 
 # =========================================================
 # 6) API FETCHING
@@ -388,6 +518,162 @@ def load_all_data_new(start_date=None, end_date=None) -> dict[str, pd.DataFrame]
 
 
 
+# =========================================================
+# 6B) PR HISTORY MILESTONE FALLBACK
+# =========================================================
+# Mapping status dari developer:
+# 0 = Draft
+# 1 = Need Approved
+# 2 = Approved
+# 3 = In Progress
+# 4 = Completed
+# 5 = Approved1
+# 6 = Approved2
+# 7 = Close
+#
+# IMPORTANT:
+# - Dataset utama dashboard TETAP API.
+# - Tabel history hanya dipakai untuk melengkapi milestone tanggal PR yang kosong.
+# - API date yang sudah terisi tidak ditimpa.
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_pr_history_milestones() -> pd.DataFrame:
+    """Ambil milestone pertama PR dari tabel history ERP PostgreSQL.
+
+    Hasil satu baris per nomor PR:
+    - date_approved_history   = approval pertama (status 2/5/6)
+    - date_inprogress_history = pertama masuk In Progress (status 3)
+    - date_complete_history   = pertama masuk Completed (status 4)
+
+    updated_at dipakai karena sudah tervalidasi sama dengan TGL MODIFIKASI
+    pada Riwayat Transaksi ERP.
+    """
+    sql = """
+        SELECT
+            TRIM(transaction_number) AS transaction_number,
+            MIN(updated_at) FILTER (WHERE status IN (2, 5, 6)) AS date_approved_history,
+            MIN(updated_at) FILTER (WHERE status = 3) AS date_inprogress_history,
+            MIN(updated_at) FILTER (WHERE status = 4) AS date_complete_history
+        FROM public.x4_purchase_request_histories
+        WHERE transaction_number IS NOT NULL
+          AND TRIM(transaction_number) <> ''
+        GROUP BY TRIM(transaction_number)
+    """
+
+    try:
+        engine, _ = get_erp_database_connection()
+        with engine.connect() as conn:
+            hist = pd.read_sql_query(__import__("sqlalchemy").text(sql), conn)
+    except Exception as exc:
+        logger.warning("Gagal membaca PR history milestone: %s", exc)
+        return pd.DataFrame(columns=[
+            "transaction_number",
+            "date_approved_history",
+            "date_inprogress_history",
+            "date_complete_history",
+        ])
+
+    if hist.empty:
+        return hist
+
+    hist["__pr_number_key"] = (
+        hist["transaction_number"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    for col in [
+        "date_approved_history",
+        "date_inprogress_history",
+        "date_complete_history",
+    ]:
+        hist[col] = pd.to_datetime(hist[col], errors="coerce")
+        try:
+            hist[col] = hist[col].dt.tz_localize(None)
+        except Exception:
+            pass
+
+    return hist.drop_duplicates("__pr_number_key", keep="first")
+
+
+def enrich_pr_milestone_dates_from_history(
+    df: pd.DataFrame,
+    doc_candidates=("transaction_number", "No. PR"),
+) -> pd.DataFrame:
+    """Isi milestone PR yang kosong dari history, tanpa mengubah sumber API utama."""
+    working = df.copy() if df is not None else pd.DataFrame()
+    if working.empty:
+        return working
+
+    doc_col = next((c for c in doc_candidates if c in working.columns), None)
+    if not doc_col:
+        return working
+
+    # Pastikan kolom milestone selalu tersedia.
+    for c in ["date_approved", "date_inprogress", "date_complete"]:
+        if c not in working.columns:
+            working[c] = pd.NaT
+        working[c] = pd.to_datetime(working[c], errors="coerce")
+        try:
+            working[c] = working[c].dt.tz_localize(None)
+        except Exception:
+            pass
+
+    # Simpan alias transaction_number agar helper chart PR Balance tetap konsisten.
+    if "transaction_number" not in working.columns:
+        working["transaction_number"] = working[doc_col]
+
+    working["__pr_number_key"] = (
+        working[doc_col]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    hist = load_pr_history_milestones()
+    if hist is None or hist.empty:
+        for target in ["date_approved", "date_inprogress", "date_complete"]:
+            if f"{target}_source" not in working.columns:
+                working[f"{target}_source"] = "API" if working[target].notna().any() else ""
+        return working.drop(columns=["__pr_number_key"], errors="ignore")
+
+    merge_cols = [
+        "__pr_number_key",
+        "date_approved_history",
+        "date_inprogress_history",
+        "date_complete_history",
+    ]
+    working = working.merge(hist[merge_cols], how="left", on="__pr_number_key")
+
+    mapping = {
+        "date_approved": "date_approved_history",
+        "date_inprogress": "date_inprogress_history",
+        "date_complete": "date_complete_history",
+    }
+
+    for target, hist_col in mapping.items():
+        # Tandai API jika field memang sudah tersedia dari API.
+        source_col = f"{target}_source"
+        if source_col not in working.columns:
+            working[source_col] = ""
+        api_mask = working[target].notna()
+        working.loc[api_mask & working[source_col].eq(""), source_col] = "API"
+
+        # Hanya fallback ke history jika API kosong.
+        fallback = working[target].isna() & working[hist_col].notna()
+        working.loc[fallback, target] = working.loc[fallback, hist_col]
+        working.loc[fallback, source_col] = "PR_HISTORY.updated_at"
+
+    return working.drop(columns=[
+        "__pr_number_key",
+        "date_approved_history",
+        "date_inprogress_history",
+        "date_complete_history",
+    ], errors="ignore")
+
 
 # =========================================================
 # 7) FILTERS & TRANSFORM
@@ -476,9 +762,37 @@ def apply_search_filter(
 
 def assign_unassigned(df: pd.DataFrame, col: str) -> pd.DataFrame:
     working = df.copy()
+
     if col in working.columns:
-        working[col] = working[col].fillna("Unassigned").astype(str).str.strip()
-        working.loc[working[col] == "", col] = "Unassigned"
+        working[col] = (
+            working[col]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+        null_like = working[col].str.lower().isin({"", "nan", "none", "null", "<na>"})
+        working.loc[~null_like, col] = working.loc[~null_like, col].str.upper()
+        working.loc[null_like, col] = "Unassigned"
+
+        if col == "PIC Procurement":
+            unassigned_names = {
+                "LUBNA",
+                "MIRZA",
+                "TRIAS",
+                "ADIN",
+                "ALFAN",
+                "KEYACCOUNT.REG02@SIBIMA.ID",
+            }
+
+            mask = (
+                working[col]
+                .str.upper()
+                .isin(unassigned_names)
+            )
+
+            working.loc[mask, col] = "Unassigned"
+
     return working
 
 
@@ -707,52 +1021,114 @@ def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, doc_col: s
 
 
 def calculate_aging(df: pd.DataFrame, date_col: str, prefer: str = "approved") -> pd.DataFrame:
-    """
-    Hitung aging dengan prioritas tanggal sesuai preferensi.
-    prefer bisa: "approved", "inprogress", "complete"
-    Default: "approved"
-    """
-    if df.empty or date_col not in df.columns:
-        return df.copy()
+    """Hitung aging menggunakan milestone PR/DO yang sudah diperkaya.
 
-    working = df.copy()
+    Untuk prefer="approved":
+    1. date_approved - transaction_date
+    2. khusus status In Progress bila date_approved kosong:
+       date_inprogress - transaction_date
+    3. jika milestone tetap tidak tersedia: today - transaction_date
+
+    Kolom Aging Source ditambahkan untuk memudahkan audit.
+    """
+    working = df.copy() if df is not None else pd.DataFrame()
+
+    if "Aging" not in working.columns:
+        working["Aging"] = pd.Series(pd.NA, index=working.index, dtype="Int64")
+    if "Aging Source" not in working.columns:
+        working["Aging Source"] = pd.Series("", index=working.index, dtype="object")
+
+    if working.empty or date_col not in working.columns:
+        return working
+
     working = safe_to_datetime(working, date_col)
-    working = safe_to_datetime(working, "date_inprogress")
-    working = safe_to_datetime(working, "date_complete")
-    working = safe_to_datetime(working, "date_approved")
+    for c in ["date_approved", "date_inprogress", "date_complete"]:
+        if c not in working.columns:
+            working[c] = pd.NaT
+        working = safe_to_datetime(working, c)
 
+    base_date = pd.to_datetime(working[date_col], errors="coerce")
     today = pd.Timestamp.today().normalize()
 
-    # Default aging = today - transaction_date
-    working["Aging"] = (today - working[date_col]).dt.days
+    # Default terakhir: umur sampai hari ini.
+    working["Aging"] = (today - base_date).dt.days.astype("Int64")
+    working.loc[base_date.notna(), "Aging Source"] = "TODAY"
 
-    # Terapkan prioritas sesuai prefer
-    if prefer == "approved":
-        mask = working["date_approved"].notna()
-        working.loc[mask, "Aging"] = (
-            working.loc[mask, "date_approved"] - working.loc[mask, date_col]
-        ).dt.days
+    pref = str(prefer).strip().lower()
 
-    elif prefer == "inprogress":
-        mask = working["date_inprogress"].notna()
-        working.loc[mask, "Aging"] = (
-            working.loc[mask, "date_inprogress"] - working.loc[mask, date_col]
-        ).dt.days
+    if pref == "approved":
+        approved = pd.to_datetime(working["date_approved"], errors="coerce")
+        mask_approved = approved.notna() & base_date.notna()
+        working.loc[mask_approved, "Aging"] = (
+            approved.loc[mask_approved] - base_date.loc[mask_approved]
+        ).dt.days.astype("Int64")
+        working.loc[mask_approved, "Aging Source"] = "DATE_APPROVED"
 
-    elif prefer == "complete":
-        mask = working["date_complete"].notna()
+        # Fallback khusus yang diminta:
+        # status In Progress tetapi tidak punya date_approved -> date_inprogress.
+        status = (
+            working.get("Status", pd.Series("", index=working.index))
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+        )
+        inprogress = pd.to_datetime(working["date_inprogress"], errors="coerce")
+        mask_inprogress_fallback = (
+            approved.isna()
+            & status.eq("in progress")
+            & inprogress.notna()
+            & base_date.notna()
+        )
+        working.loc[mask_inprogress_fallback, "Aging"] = (
+            inprogress.loc[mask_inprogress_fallback]
+            - base_date.loc[mask_inprogress_fallback]
+        ).dt.days.astype("Int64")
+        working.loc[mask_inprogress_fallback, "Aging Source"] = "DATE_INPROGRESS_FALLBACK"
+
+    elif pref == "inprogress":
+        milestone = pd.to_datetime(working["date_inprogress"], errors="coerce")
+        mask = milestone.notna() & base_date.notna()
         working.loc[mask, "Aging"] = (
-            working.loc[mask, "date_complete"] - working.loc[mask, date_col]
-        ).dt.days
+            milestone.loc[mask] - base_date.loc[mask]
+        ).dt.days.astype("Int64")
+        working.loc[mask, "Aging Source"] = "DATE_INPROGRESS"
+
+    elif pref == "complete":
+        milestone = pd.to_datetime(working["date_complete"], errors="coerce")
+        mask = milestone.notna() & base_date.notna()
+        working.loc[mask, "Aging"] = (
+            milestone.loc[mask] - base_date.loc[mask]
+        ).dt.days.astype("Int64")
+        working.loc[mask, "Aging Source"] = "DATE_COMPLETE"
+
+    # Hindari tanggal milestone anomali yang menghasilkan aging negatif.
+    invalid = pd.to_numeric(working["Aging"], errors="coerce").lt(0)
+    working.loc[invalid, "Aging"] = pd.NA
+    working.loc[invalid, "Aging Source"] = "INVALID_NEGATIVE"
 
     return working
 
 
 def categorize_aging(df: pd.DataFrame) -> pd.DataFrame:
-    bins = [-1, 30, 60, 90, float("inf")]   # 🔹 ubah dari 0 → -1
+    """Tambahkan kategori aging tanpa gagal saat dataframe/kolom Aging kosong."""
+    working = df.copy() if df is not None else pd.DataFrame()
+
+    if "Aging" not in working.columns:
+        working["Aging"] = pd.Series(pd.NA, index=working.index, dtype="Int64")
+
+    aging_numeric = pd.to_numeric(working["Aging"], errors="coerce")
+
+    bins = [-1, 30, 60, 90, float("inf")]
     labels = ["0-30 hari", "31-60 hari", "61-90 hari", ">90 hari"]
-    df["Aging Category"] = pd.cut(df["Aging"], bins=bins, labels=labels, right=True)
-    return df
+
+    working["Aging Category"] = pd.cut(
+        aging_numeric,
+        bins=bins,
+        labels=labels,
+        right=True,
+    )
+    return working
 
 
 def render_aging_bar(df: pd.DataFrame, doc_col: str, chart_key: str = "aging_bar"):
@@ -990,6 +1366,20 @@ def main():
     df_do_final = data_new["do"]
     #df_npr_final = data_new["npr"]
 
+    # =====================================================
+    # PR HISTORY ENRICHMENT
+    # =====================================================
+    # Data transaksi dan PR Balance tetap berasal dari API.
+    # History PostgreSQL hanya melengkapi milestone tanggal yang kosong.
+    df_pr = enrich_pr_milestone_dates_from_history(
+        df_pr,
+        doc_candidates=("No. PR", "transaction_number"),
+    )
+    df_pr_final = enrich_pr_milestone_dates_from_history(
+        df_pr_final,
+        doc_candidates=("transaction_number", "No. PR"),
+    )
+
     # Pastikan kolom PIC dan Status sesuai
     #PR
     df_pr_final = df_pr_final.rename(columns={
@@ -1006,12 +1396,29 @@ def main():
         "Status DO": "Status"
     })
 
+    # =====================================================
+    # NORMALISASI PIC - CASE INSENSITIVE
+    # =====================================================
+    # Nama PIC yang hanya berbeda LOWER/UPPER dianggap orang yang sama.
+    # Semua PIC dikonversi ke canonical uppercase sebelum dropdown/filter/groupby.
+    df_pr = normalize_pic_columns(df_pr)
+    df_pr_final = normalize_pic_columns(df_pr_final)
+    df_do = normalize_pic_columns(df_do)
+    df_do_final = normalize_pic_columns(df_do_final)
+
+
     # Pastikan kolom tanggal sudah dalam format datetime
     #PR
     df_pr_final = safe_to_datetime(df_pr_final, "transaction_date")
     df_pr_final = safe_to_datetime(df_pr_final, "date_approved")
     df_pr_final = safe_to_datetime(df_pr_final, "date_inprogress")
     df_pr_final = safe_to_datetime(df_pr_final, "date_complete")
+
+    # PR Balance API juga menggunakan milestone hasil history enrichment.
+    df_pr = safe_to_datetime(df_pr, "transaction_date")
+    df_pr = safe_to_datetime(df_pr, "date_approved")
+    df_pr = safe_to_datetime(df_pr, "date_inprogress")
+    df_pr = safe_to_datetime(df_pr, "date_complete")
     #DO
     df_do_final = safe_to_datetime(df_do_final, "transaction_date")
     df_do_final = safe_to_datetime(df_do_final, "date_approved")
@@ -1113,11 +1520,8 @@ def main():
     df_do_final_real = normalize_text_columns(df_do_final_real, ["item_PIC_Procurement"])
 
 
-    df_pr_final_real["disc_per_unit"] = df_pr_final_real["item_price"] * (df_pr_final_real["item_discount"] / 100)
-    df_pr_final_real["tax_unit"] = (df_pr_final_real["item_price"] - df_pr_final_real["disc_per_unit"]) * (df_pr_final_real["item_tax1_percentage"] / 100)
-    df_pr_final_real["net_price_unit"] = df_pr_final_real["item_price"] - df_pr_final_real["disc_per_unit"] + df_pr_final_real["tax_unit"]
-    df_pr_final_real["total_pr_row"] = df_pr_final_real["item_quantity"] * df_pr_final_real["net_price_unit"]
-    total_pr = df_pr_final_real["total_pr_row"].sum()
+    # TOTAL PR STRICT PARITY: one canonical formula + one PR-detail grain.
+    df_pr_final_real, total_pr = calculate_total_pr_strict(df_pr_final_real)
 
     df_do_final_real["disc_per_unit"] = df_do_final_real["item_price"] * (df_do_final_real["item_discount"] / 100)
     df_do_final_real["tax_unit"] = (df_do_final_real["item_price"] - df_do_final_real["disc_per_unit"]) * (df_do_final_real["item_tax1_percentage"] / 100)
@@ -1157,6 +1561,55 @@ def main():
     top_pic_do = get_top_pic(df_do_f, "PIC Procurement", "No. DO")
     #top_pic_pur = get_top_pic(df_pur_f, "PIC", "No. PUR")
 
+
+    # Focused snapshot for the selected END DATE. Use this export to reconcile against PostgreSQL.
+    #with st.expander(f"🧪 Total PR End-Date Snapshot — {pd.Timestamp(report_end_date).strftime('%d %b %Y')}", expanded=False):
+        #api_day = build_total_pr_day_snapshot(df_pr_final_real, report_end_date, "API")
+        #api_day_total = float(pd.to_numeric(api_day.get("total_pr_row",0), errors="coerce").fillna(0).sum()) if not api_day.empty else 0.0
+        #q1,q2,q3 = st.columns(3)
+        #q1.metric("API Total PR — End Date Only", f"Rp {api_day_total:,.0f}".replace(",","."))
+        #q2.metric("API PR Documents", f"{safe_unique_count(api_day, 'transaction_number'):,}")
+        #q3.metric("API PR Items", f"{len(api_day):,}")
+        #if not api_day.empty:
+            #st.dataframe(api_day, use_container_width=True, hide_index=True)
+            #st.download_button(
+                #"⬇️ Download API Total PR End-Date Rows.xlsx",
+                #data=to_excel_bytes(api_day, sheet_name="API_END_DATE"),
+                #file_name=f"API_Total_PR_{pd.Timestamp(report_end_date).strftime('%Y%m%d')}.xlsx",
+                #mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                #key="download_api_total_pr_enddate", use_container_width=True,
+            #)
+        #else:
+            #st.info("Tidak ada PR pada tanggal akhir filter.")
+
+    # ---------- PR HISTORY DATE DIAGNOSTIC ----------
+    #with st.expander("🧪 Diagnostic PR History Dates", expanded=False):
+        #tx = df_pr_final_real.copy()
+        #bal = df_pr_f.copy()
+
+        #def _history_date_summary(frame, label):
+            #if frame is None or frame.empty:
+                #return {"Dataset": label, "Rows": 0, "Approved Date": 0, "In Progress Date": 0, "Complete Date": 0, "Approved from History": 0}
+            #approved_src = frame.get("date_approved_source", pd.Series("", index=frame.index)).fillna("").astype(str)
+            #return {
+                #"Dataset": label,
+                #"Rows": len(frame),
+                #"Approved Date": int(pd.to_datetime(frame.get("date_approved"), errors="coerce").notna().sum()),
+                #"In Progress Date": int(pd.to_datetime(frame.get("date_inprogress"), errors="coerce").notna().sum()),
+                #"Complete Date": int(pd.to_datetime(frame.get("date_complete"), errors="coerce").notna().sum()),
+                #"Approved from History": int(approved_src.eq("PR_HISTORY.updated_at").sum()),
+            #}
+
+        #st.dataframe(
+            #pd.DataFrame([
+                #history_date_summary(tx, "PR Transaction API"),
+                #history_date_summary(bal, "PR Balance API"),
+            #]),
+            #use_container_width=True,
+            #hide_index=True,
+        #)
+        #st.caption("Dataset utama tetap API; history hanya melengkapi milestone tanggal PR yang kosong.")
+
     # ---------- LAYOUT ----------
     col_kiri, col_tengah, col_kanan = st.columns([1, 1, 1], gap="small")
     # 🔹 Filter hanya PR yang sudah punya tanggal inprogress atau complete
@@ -1171,9 +1624,10 @@ def main():
     df_pr_final_valid = apply_search_filter(df_pr_final_valid, search_number, search_status, search_pic)
 
     #Aging PR Balance
-    # Filter PR Balance hanya untuk status aktif (exclude Complete & Draft)
-    df_pr_valid = df_pr_final_f[
-    ~df_pr_final_f["Status"].isin(["Complete", "Draft"])
+    # Gunakan dataset PR Balance dari endpoint API pr-balance, bukan seluruh PR transaksi.
+    # Exclude status yang sudah selesai/draft dari outstanding aging.
+    df_pr_valid = df_pr_f[
+        ~df_pr_f["Status"].isin(["Complete", "Completed", "Draft"])
     ].copy()
     df_pr_valid = apply_search_filter(df_pr_valid, search_number, search_status, search_pic)
 
