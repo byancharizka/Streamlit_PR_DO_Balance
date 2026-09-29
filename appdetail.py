@@ -12,11 +12,6 @@ import plotly.graph_objects as go
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 
-# Main dashboard data tetap berasal dari API. PostgreSQL hanya digunakan sebagai
-# fallback milestone PR karena endpoint API yang dipakai dashboard tidak selalu
-# mengembalikan date_approved/date_inprogress/date_complete secara lengkap.
-from app import get_erp_database_connection
-
 # =========================================================
 # 1) PAGE CONFIG - WAJIB PALING ATAS
 # =========================================================
@@ -242,41 +237,6 @@ def normalize_text_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
     return df
-
-
-
-def normalize_pic_columns(
-    df: pd.DataFrame,
-    columns=("PIC Procurement", "PIC Purchasing", "PIC", "item_pic_procurement_name"),
-) -> pd.DataFrame:
-    """
-    Normalisasi nama PIC agar perbedaan huruf besar/kecil tidak membuat PIC terpisah.
-
-    Contoh:
-      "Sarah", "SARAH", "sarah" -> "SARAH"
-      " KeyAccount.Reg02@Sibima.Id " -> "KEYACCOUNT.REG02@SIBIMA.ID"
-
-    Nilai kosong tetap menjadi string kosong; fungsi assign_unassigned() tetap
-    bertanggung jawab mengubah nilai kosong / PIC tertentu menjadi "Unassigned".
-    """
-    working = df.copy() if df is not None else pd.DataFrame()
-
-    for col in columns:
-        if col in working.columns:
-            s = (
-                working[col]
-                .fillna("")
-                .astype(str)
-                .str.strip()
-            )
-
-            null_like = s.str.lower().isin({"", "nan", "none", "null", "<na>"})
-            s = s.str.upper()
-            s.loc[null_like] = ""
-
-            working[col] = s
-
-    return working
 
 
 def safe_unique_count(df: pd.DataFrame, col: str) -> int:
@@ -517,162 +477,6 @@ def load_all_data_new(start_date=None, end_date=None) -> dict[str, pd.DataFrame]
     return result_new
 
 
-
-# =========================================================
-# 6B) PR HISTORY MILESTONE FALLBACK
-# =========================================================
-# Mapping status dari developer:
-# 0 = Draft
-# 1 = Need Approved
-# 2 = Approved
-# 3 = In Progress
-# 4 = Completed
-# 5 = Approved1
-# 6 = Approved2
-# 7 = Close
-#
-# IMPORTANT:
-# - Dataset utama dashboard TETAP API.
-# - Tabel history hanya dipakai untuk melengkapi milestone tanggal PR yang kosong.
-# - API date yang sudah terisi tidak ditimpa.
-
-@st.cache_data(ttl=300, show_spinner=False)
-def load_pr_history_milestones() -> pd.DataFrame:
-    """Ambil milestone pertama PR dari tabel history ERP PostgreSQL.
-
-    Hasil satu baris per nomor PR:
-    - date_approved_history   = approval pertama (status 2/5/6)
-    - date_inprogress_history = pertama masuk In Progress (status 3)
-    - date_complete_history   = pertama masuk Completed (status 4)
-
-    updated_at dipakai karena sudah tervalidasi sama dengan TGL MODIFIKASI
-    pada Riwayat Transaksi ERP.
-    """
-    sql = """
-        SELECT
-            TRIM(transaction_number) AS transaction_number,
-            MIN(updated_at) FILTER (WHERE status IN (2, 5, 6)) AS date_approved_history,
-            MIN(updated_at) FILTER (WHERE status = 3) AS date_inprogress_history,
-            MIN(updated_at) FILTER (WHERE status = 4) AS date_complete_history
-        FROM public.x4_purchase_request_histories
-        WHERE transaction_number IS NOT NULL
-          AND TRIM(transaction_number) <> ''
-        GROUP BY TRIM(transaction_number)
-    """
-
-    try:
-        engine, _ = get_erp_database_connection()
-        with engine.connect() as conn:
-            hist = pd.read_sql_query(__import__("sqlalchemy").text(sql), conn)
-    except Exception as exc:
-        logger.warning("Gagal membaca PR history milestone: %s", exc)
-        return pd.DataFrame(columns=[
-            "transaction_number",
-            "date_approved_history",
-            "date_inprogress_history",
-            "date_complete_history",
-        ])
-
-    if hist.empty:
-        return hist
-
-    hist["__pr_number_key"] = (
-        hist["transaction_number"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .str.upper()
-    )
-
-    for col in [
-        "date_approved_history",
-        "date_inprogress_history",
-        "date_complete_history",
-    ]:
-        hist[col] = pd.to_datetime(hist[col], errors="coerce")
-        try:
-            hist[col] = hist[col].dt.tz_localize(None)
-        except Exception:
-            pass
-
-    return hist.drop_duplicates("__pr_number_key", keep="first")
-
-
-def enrich_pr_milestone_dates_from_history(
-    df: pd.DataFrame,
-    doc_candidates=("transaction_number", "No. PR"),
-) -> pd.DataFrame:
-    """Isi milestone PR yang kosong dari history, tanpa mengubah sumber API utama."""
-    working = df.copy() if df is not None else pd.DataFrame()
-    if working.empty:
-        return working
-
-    doc_col = next((c for c in doc_candidates if c in working.columns), None)
-    if not doc_col:
-        return working
-
-    # Pastikan kolom milestone selalu tersedia.
-    for c in ["date_approved", "date_inprogress", "date_complete"]:
-        if c not in working.columns:
-            working[c] = pd.NaT
-        working[c] = pd.to_datetime(working[c], errors="coerce")
-        try:
-            working[c] = working[c].dt.tz_localize(None)
-        except Exception:
-            pass
-
-    # Simpan alias transaction_number agar helper chart PR Balance tetap konsisten.
-    if "transaction_number" not in working.columns:
-        working["transaction_number"] = working[doc_col]
-
-    working["__pr_number_key"] = (
-        working[doc_col]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .str.upper()
-    )
-
-    hist = load_pr_history_milestones()
-    if hist is None or hist.empty:
-        for target in ["date_approved", "date_inprogress", "date_complete"]:
-            if f"{target}_source" not in working.columns:
-                working[f"{target}_source"] = "API" if working[target].notna().any() else ""
-        return working.drop(columns=["__pr_number_key"], errors="ignore")
-
-    merge_cols = [
-        "__pr_number_key",
-        "date_approved_history",
-        "date_inprogress_history",
-        "date_complete_history",
-    ]
-    working = working.merge(hist[merge_cols], how="left", on="__pr_number_key")
-
-    mapping = {
-        "date_approved": "date_approved_history",
-        "date_inprogress": "date_inprogress_history",
-        "date_complete": "date_complete_history",
-    }
-
-    for target, hist_col in mapping.items():
-        # Tandai API jika field memang sudah tersedia dari API.
-        source_col = f"{target}_source"
-        if source_col not in working.columns:
-            working[source_col] = ""
-        api_mask = working[target].notna()
-        working.loc[api_mask & working[source_col].eq(""), source_col] = "API"
-
-        # Hanya fallback ke history jika API kosong.
-        fallback = working[target].isna() & working[hist_col].notna()
-        working.loc[fallback, target] = working.loc[fallback, hist_col]
-        working.loc[fallback, source_col] = "PR_HISTORY.updated_at"
-
-    return working.drop(columns=[
-        "__pr_number_key",
-        "date_approved_history",
-        "date_inprogress_history",
-        "date_complete_history",
-    ], errors="ignore")
 
 
 # =========================================================
@@ -1021,91 +825,53 @@ def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, doc_col: s
 
 
 def calculate_aging(df: pd.DataFrame, date_col: str, prefer: str = "approved") -> pd.DataFrame:
-    """Hitung aging menggunakan milestone PR/DO yang sudah diperkaya.
+    """
+    Hitung aging dengan aman.
 
-    Untuk prefer="approved":
-    1. date_approved - transaction_date
-    2. khusus status In Progress bila date_approved kosong:
-       date_inprogress - transaction_date
-    3. jika milestone tetap tidak tersedia: today - transaction_date
-
-    Kolom Aging Source ditambahkan untuk memudahkan audit.
+    - Selalu mengembalikan kolom ``Aging`` meskipun dataframe kosong atau
+      ``date_col`` tidak tersedia.
+    - Prioritas tanggal dapat menggunakan approved / inprogress / complete.
+    - Jika tanggal prioritas tidak tersedia, aging tetap menggunakan
+      hari ini - transaction_date.
     """
     working = df.copy() if df is not None else pd.DataFrame()
 
+    # Penting: caller berikutnya memanggil categorize_aging(), jadi kolom ini
+    # harus selalu tersedia agar tidak terjadi KeyError: 'Aging'.
     if "Aging" not in working.columns:
         working["Aging"] = pd.Series(pd.NA, index=working.index, dtype="Int64")
-    if "Aging Source" not in working.columns:
-        working["Aging Source"] = pd.Series("", index=working.index, dtype="object")
 
     if working.empty or date_col not in working.columns:
         return working
 
     working = safe_to_datetime(working, date_col)
+
+    # safe_to_datetime aman jika kolom tidak ada, namun kita tetap membuat
+    # placeholder supaya blok preferensi di bawah selalu aman.
     for c in ["date_approved", "date_inprogress", "date_complete"]:
         if c not in working.columns:
             working[c] = pd.NaT
         working = safe_to_datetime(working, c)
 
-    base_date = pd.to_datetime(working[date_col], errors="coerce")
     today = pd.Timestamp.today().normalize()
 
-    # Default terakhir: umur sampai hari ini.
+    base_date = pd.to_datetime(working[date_col], errors="coerce")
     working["Aging"] = (today - base_date).dt.days.astype("Int64")
-    working.loc[base_date.notna(), "Aging Source"] = "TODAY"
 
-    pref = str(prefer).strip().lower()
+    prefer_map = {
+        "approved": "date_approved",
+        "inprogress": "date_inprogress",
+        "complete": "date_complete",
+    }
+    prefer_col = prefer_map.get(str(prefer).strip().lower())
 
-    if pref == "approved":
-        approved = pd.to_datetime(working["date_approved"], errors="coerce")
-        mask_approved = approved.notna() & base_date.notna()
-        working.loc[mask_approved, "Aging"] = (
-            approved.loc[mask_approved] - base_date.loc[mask_approved]
-        ).dt.days.astype("Int64")
-        working.loc[mask_approved, "Aging Source"] = "DATE_APPROVED"
-
-        # Fallback khusus yang diminta:
-        # status In Progress tetapi tidak punya date_approved -> date_inprogress.
-        status = (
-            working.get("Status", pd.Series("", index=working.index))
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .str.lower()
-        )
-        inprogress = pd.to_datetime(working["date_inprogress"], errors="coerce")
-        mask_inprogress_fallback = (
-            approved.isna()
-            & status.eq("in progress")
-            & inprogress.notna()
-            & base_date.notna()
-        )
-        working.loc[mask_inprogress_fallback, "Aging"] = (
-            inprogress.loc[mask_inprogress_fallback]
-            - base_date.loc[mask_inprogress_fallback]
-        ).dt.days.astype("Int64")
-        working.loc[mask_inprogress_fallback, "Aging Source"] = "DATE_INPROGRESS_FALLBACK"
-
-    elif pref == "inprogress":
-        milestone = pd.to_datetime(working["date_inprogress"], errors="coerce")
-        mask = milestone.notna() & base_date.notna()
-        working.loc[mask, "Aging"] = (
-            milestone.loc[mask] - base_date.loc[mask]
-        ).dt.days.astype("Int64")
-        working.loc[mask, "Aging Source"] = "DATE_INPROGRESS"
-
-    elif pref == "complete":
-        milestone = pd.to_datetime(working["date_complete"], errors="coerce")
-        mask = milestone.notna() & base_date.notna()
-        working.loc[mask, "Aging"] = (
-            milestone.loc[mask] - base_date.loc[mask]
-        ).dt.days.astype("Int64")
-        working.loc[mask, "Aging Source"] = "DATE_COMPLETE"
-
-    # Hindari tanggal milestone anomali yang menghasilkan aging negatif.
-    invalid = pd.to_numeric(working["Aging"], errors="coerce").lt(0)
-    working.loc[invalid, "Aging"] = pd.NA
-    working.loc[invalid, "Aging Source"] = "INVALID_NEGATIVE"
+    if prefer_col and prefer_col in working.columns:
+        prefer_date = pd.to_datetime(working[prefer_col], errors="coerce")
+        mask = prefer_date.notna() & base_date.notna()
+        if mask.any():
+            working.loc[mask, "Aging"] = (
+                prefer_date.loc[mask] - base_date.loc[mask]
+            ).dt.days.astype("Int64")
 
     return working
 
@@ -1366,20 +1132,6 @@ def main():
     df_do_final = data_new["do"]
     #df_npr_final = data_new["npr"]
 
-    # =====================================================
-    # PR HISTORY ENRICHMENT
-    # =====================================================
-    # Data transaksi dan PR Balance tetap berasal dari API.
-    # History PostgreSQL hanya melengkapi milestone tanggal yang kosong.
-    df_pr = enrich_pr_milestone_dates_from_history(
-        df_pr,
-        doc_candidates=("No. PR", "transaction_number"),
-    )
-    df_pr_final = enrich_pr_milestone_dates_from_history(
-        df_pr_final,
-        doc_candidates=("transaction_number", "No. PR"),
-    )
-
     # Pastikan kolom PIC dan Status sesuai
     #PR
     df_pr_final = df_pr_final.rename(columns={
@@ -1396,29 +1148,12 @@ def main():
         "Status DO": "Status"
     })
 
-    # =====================================================
-    # NORMALISASI PIC - CASE INSENSITIVE
-    # =====================================================
-    # Nama PIC yang hanya berbeda LOWER/UPPER dianggap orang yang sama.
-    # Semua PIC dikonversi ke canonical uppercase sebelum dropdown/filter/groupby.
-    df_pr = normalize_pic_columns(df_pr)
-    df_pr_final = normalize_pic_columns(df_pr_final)
-    df_do = normalize_pic_columns(df_do)
-    df_do_final = normalize_pic_columns(df_do_final)
-
-
     # Pastikan kolom tanggal sudah dalam format datetime
     #PR
     df_pr_final = safe_to_datetime(df_pr_final, "transaction_date")
     df_pr_final = safe_to_datetime(df_pr_final, "date_approved")
     df_pr_final = safe_to_datetime(df_pr_final, "date_inprogress")
     df_pr_final = safe_to_datetime(df_pr_final, "date_complete")
-
-    # PR Balance API juga menggunakan milestone hasil history enrichment.
-    df_pr = safe_to_datetime(df_pr, "transaction_date")
-    df_pr = safe_to_datetime(df_pr, "date_approved")
-    df_pr = safe_to_datetime(df_pr, "date_inprogress")
-    df_pr = safe_to_datetime(df_pr, "date_complete")
     #DO
     df_do_final = safe_to_datetime(df_do_final, "transaction_date")
     df_do_final = safe_to_datetime(df_do_final, "date_approved")
@@ -1563,52 +1298,24 @@ def main():
 
 
     # Focused snapshot for the selected END DATE. Use this export to reconcile against PostgreSQL.
-    #with st.expander(f"🧪 Total PR End-Date Snapshot — {pd.Timestamp(report_end_date).strftime('%d %b %Y')}", expanded=False):
-        #api_day = build_total_pr_day_snapshot(df_pr_final_real, report_end_date, "API")
-        #api_day_total = float(pd.to_numeric(api_day.get("total_pr_row",0), errors="coerce").fillna(0).sum()) if not api_day.empty else 0.0
-        #q1,q2,q3 = st.columns(3)
-        #q1.metric("API Total PR — End Date Only", f"Rp {api_day_total:,.0f}".replace(",","."))
-        #q2.metric("API PR Documents", f"{safe_unique_count(api_day, 'transaction_number'):,}")
-        #q3.metric("API PR Items", f"{len(api_day):,}")
-        #if not api_day.empty:
-            #st.dataframe(api_day, use_container_width=True, hide_index=True)
-            #st.download_button(
-                #"⬇️ Download API Total PR End-Date Rows.xlsx",
-                #data=to_excel_bytes(api_day, sheet_name="API_END_DATE"),
-                #file_name=f"API_Total_PR_{pd.Timestamp(report_end_date).strftime('%Y%m%d')}.xlsx",
-                #mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                #key="download_api_total_pr_enddate", use_container_width=True,
-            #)
-        #else:
-            #st.info("Tidak ada PR pada tanggal akhir filter.")
-
-    # ---------- PR HISTORY DATE DIAGNOSTIC ----------
-    #with st.expander("🧪 Diagnostic PR History Dates", expanded=False):
-        #tx = df_pr_final_real.copy()
-        #bal = df_pr_f.copy()
-
-        #def _history_date_summary(frame, label):
-            #if frame is None or frame.empty:
-                #return {"Dataset": label, "Rows": 0, "Approved Date": 0, "In Progress Date": 0, "Complete Date": 0, "Approved from History": 0}
-            #approved_src = frame.get("date_approved_source", pd.Series("", index=frame.index)).fillna("").astype(str)
-            #return {
-                #"Dataset": label,
-                #"Rows": len(frame),
-                #"Approved Date": int(pd.to_datetime(frame.get("date_approved"), errors="coerce").notna().sum()),
-                #"In Progress Date": int(pd.to_datetime(frame.get("date_inprogress"), errors="coerce").notna().sum()),
-                #"Complete Date": int(pd.to_datetime(frame.get("date_complete"), errors="coerce").notna().sum()),
-                #"Approved from History": int(approved_src.eq("PR_HISTORY.updated_at").sum()),
-            #}
-
-        #st.dataframe(
-            #pd.DataFrame([
-                #history_date_summary(tx, "PR Transaction API"),
-                #history_date_summary(bal, "PR Balance API"),
-            #]),
-            #use_container_width=True,
-            #hide_index=True,
-        #)
-        #st.caption("Dataset utama tetap API; history hanya melengkapi milestone tanggal PR yang kosong.")
+    with st.expander(f"🧪 Total PR End-Date Snapshot — {pd.Timestamp(report_end_date).strftime('%d %b %Y')}", expanded=False):
+        api_day = build_total_pr_day_snapshot(df_pr_final_real, report_end_date, "API")
+        api_day_total = float(pd.to_numeric(api_day.get("total_pr_row",0), errors="coerce").fillna(0).sum()) if not api_day.empty else 0.0
+        q1,q2,q3 = st.columns(3)
+        q1.metric("API Total PR — End Date Only", f"Rp {api_day_total:,.0f}".replace(",","."))
+        q2.metric("API PR Documents", f"{safe_unique_count(api_day, 'transaction_number'):,}")
+        q3.metric("API PR Items", f"{len(api_day):,}")
+        if not api_day.empty:
+            st.dataframe(api_day, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Download API Total PR End-Date Rows.xlsx",
+                data=to_excel_bytes(api_day, sheet_name="API_END_DATE"),
+                file_name=f"API_Total_PR_{pd.Timestamp(report_end_date).strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_api_total_pr_enddate", use_container_width=True,
+            )
+        else:
+            st.info("Tidak ada PR pada tanggal akhir filter.")
 
     # ---------- LAYOUT ----------
     col_kiri, col_tengah, col_kanan = st.columns([1, 1, 1], gap="small")
@@ -1624,10 +1331,9 @@ def main():
     df_pr_final_valid = apply_search_filter(df_pr_final_valid, search_number, search_status, search_pic)
 
     #Aging PR Balance
-    # Gunakan dataset PR Balance dari endpoint API pr-balance, bukan seluruh PR transaksi.
-    # Exclude status yang sudah selesai/draft dari outstanding aging.
-    df_pr_valid = df_pr_f[
-        ~df_pr_f["Status"].isin(["Complete", "Completed", "Draft"])
+    # Filter PR Balance hanya untuk status aktif (exclude Complete & Draft)
+    df_pr_valid = df_pr_final_f[
+    ~df_pr_final_f["Status"].isin(["Complete", "Draft"])
     ].copy()
     df_pr_valid = apply_search_filter(df_pr_valid, search_number, search_status, search_pic)
 
