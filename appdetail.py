@@ -482,6 +482,60 @@ def load_all_data_new(start_date=None, end_date=None) -> dict[str, pd.DataFrame]
 # =========================================================
 # 7) FILTERS & TRANSFORM
 # =========================================================
+
+def exclude_pr_numbers(df: pd.DataFrame, transaction_col: str) -> pd.DataFrame:
+    """
+    Exclude nomor PR yang tidak boleh masuk dashboard production:
+    - prefix SIBIMA.PR.
+    - prefix SIBPRGA
+    - exact value #N/A
+
+    Case-insensitive. Fungsi ini murni bekerja pada dataframe hasil API.
+    """
+    if df is None or df.empty or transaction_col not in df.columns:
+        return df.copy() if df is not None else pd.DataFrame()
+
+    working = df.copy()
+    number = (
+        working[transaction_col]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    excluded_prefixes = ("SIBIMA.PR.", "SIBPRGA")
+    excluded_exact = {"#N/A"}
+
+    mask_excluded = (
+        number.str.startswith(excluded_prefixes, na=False)
+        | number.isin(excluded_exact)
+    )
+
+    return working.loc[~mask_excluded].copy()
+
+
+def exclude_close_from_pr_balance(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    PR berstatus Close bukan outstanding PR sehingga tidak masuk PR Balance.
+
+    Sumber status tetap dari payload endpoint API pr-balance.
+    Tidak ada query PostgreSQL / DB pada fungsi ini.
+    """
+    if df is None or df.empty or "Status" not in df.columns:
+        return df.copy() if df is not None else pd.DataFrame()
+
+    working = df.copy()
+    status = (
+        working["Status"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.casefold()
+    )
+    return working.loc[~status.eq("close")].copy()
+
+
 def apply_cumulative_filter(df: pd.DataFrame, end_date_val) -> pd.DataFrame:
     """
     Ambil SEMUA data dari awal hingga end_date.
@@ -898,7 +952,7 @@ def categorize_aging(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def render_aging_bar(df: pd.DataFrame, doc_col: str, chart_key: str = "aging_bar"):
-    if df.empty or "Aging Category" not in df.columns:
+    if df.empty or "Aging Category" not in df.columns or doc_col not in df.columns:
         st.info("Data aging tidak tersedia.")
         return
 
@@ -1087,6 +1141,7 @@ def render_sla_trend(df: pd.DataFrame, threshold: int = 5, date_col: str = "tran
 
 def main():
     st.title("SIBIMA Performance Dashboard - PROCUREMENT")
+    st.caption("Data source: ERP API / Dashboard API only — tanpa PostgreSQL. PR internal excluded; Close excluded dari PR Balance.")
 
     # ---------- TOP FILTERS ----------
     today = date.today()
@@ -1122,6 +1177,16 @@ def main():
 
     # ---------- ASSIGN DATAFRAME ----------
     df_pr = data_old["pr"]
+
+    # =====================================================
+    # API-ONLY PR BALANCE CLEANING
+    # =====================================================
+    # pr-balance endpoint memakai kolom "No. PR".
+    # Exclude format internal/non-production dan current Status Close
+    # sebelum seluruh metric/chart/download PR Balance dihitung.
+    df_pr = exclude_pr_numbers(df_pr, "No. PR")
+    df_pr = exclude_close_from_pr_balance(df_pr)
+
     df_po = data_old["po"]
     df_grn = data_old["grn"]
     df_do = data_old["do"]
@@ -1129,6 +1194,14 @@ def main():
     #df_pur = data_old["pur"]
 
     df_pr_final = data_new["pr"]
+
+    # =====================================================
+    # API-ONLY TOTAL PR CLEANING
+    # =====================================================
+    # purchase-requests endpoint memakai "transaction_number".
+    # Close TETAP masuk Total PR; yang di-exclude hanya nomor PR internal/non-production.
+    df_pr_final = exclude_pr_numbers(df_pr_final, "transaction_number")
+
     df_do_final = data_new["do"]
     #df_npr_final = data_new["npr"]
 
@@ -1311,8 +1384,8 @@ def main():
 
     #Aging PR Balance
     # Filter PR Balance hanya untuk status aktif (exclude Complete & Draft)
-    df_pr_valid = df_pr_final_f[
-    ~df_pr_final_f["Status"].isin(["Complete", "Draft"])
+    df_pr_valid = df_pr_f[
+    ~df_pr_f["Status"].isin(["Complete", "Draft", "Close"])
     ].copy()
     df_pr_valid = apply_search_filter(df_pr_valid, search_number, search_status, search_pic)
 
@@ -1497,9 +1570,9 @@ def main():
 
             with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging PR Balance")
-                render_aging_bar(df_pr_valid, "transaction_number", chart_key="aging_pr_outstanding")
+                render_aging_bar(df_pr_valid, "No. PR", chart_key="aging_pr_outstanding")
 
-                pic_aging_summary = summarize_pic_aging(df_pr_valid, "PIC Procurement", "transaction_number")
+                pic_aging_summary = summarize_pic_aging(df_pr_valid, "PIC Procurement", "No. PR")
                 pic_aging_summary_final = summarize_pic_aging(df_pr_final_valid, "PIC Procurement", "transaction_number")
 
             with st.container(border=True):
