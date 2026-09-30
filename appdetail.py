@@ -238,6 +238,42 @@ def normalize_text_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame
             df[col] = df[col].fillna("").astype(str).str.strip()
     return df
 
+def normalize_pic_columns(
+    df: pd.DataFrame,
+    columns=("PIC Procurement", "PIC Purchasing", "PIC", "item_pic_procurement_name"),
+) -> pd.DataFrame:
+    """
+    Normalisasi nama PIC agar variasi penulisan dianggap sebagai PIC yang sama.
+
+    Canonical rules:
+    - seluruh nama PIC menjadi uppercase;
+    - "FAQIH RAMADHAN" digabung menjadi "FAQIH".
+    """
+    working = df.copy() if df is not None else pd.DataFrame()
+
+    aliases = {
+        "FAQIH RAMADHAN": "FAQIH",
+    }
+
+    for col in columns:
+        if col in working.columns:
+            s = (
+                working[col]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.upper()
+            )
+
+            null_like = s.str.lower().isin({"", "nan", "none", "null", "<na>"})
+            s = s.replace(aliases)
+            s.loc[null_like] = ""
+
+            working[col] = s
+
+    return working
+
+
 
 def safe_unique_count(df: pd.DataFrame, col: str) -> int:
     if df.empty or col not in df.columns:
@@ -631,6 +667,9 @@ def assign_unassigned(df: pd.DataFrame, col: str) -> pd.DataFrame:
 
         null_like = working[col].str.lower().isin({"", "nan", "none", "null", "<na>"})
         working.loc[~null_like, col] = working.loc[~null_like, col].str.upper()
+
+        # Canonical alias: FAQIH RAMADHAN digabung ke FAQIH.
+        working.loc[working[col].eq("FAQIH RAMADHAN"), col] = "FAQIH"
         working.loc[null_like, col] = "Unassigned"
 
         if col == "PIC Procurement":
@@ -1220,6 +1259,16 @@ def main():
     df_do = df_do.rename(columns={
         "Status DO": "Status"
     })
+
+    # =====================================================
+    # NORMALISASI PIC - CASE INSENSITIVE + ALIAS
+    # =====================================================
+    # FAQIH dan FAQIH RAMADHAN digabung menjadi canonical PIC "FAQIH".
+    # Dijalankan sebelum dropdown/filter/groupby agar seluruh metric dan export konsisten.
+    df_pr = normalize_pic_columns(df_pr)
+    df_pr_final = normalize_pic_columns(df_pr_final)
+    df_do = normalize_pic_columns(df_do)
+    df_do_final = normalize_pic_columns(df_do_final)
 
     # Pastikan kolom tanggal sudah dalam format datetime
     #PR
