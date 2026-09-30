@@ -1209,6 +1209,129 @@ def render_pic_aging_bar(summary_df: pd.DataFrame):
 
     st.plotly_chart(fig, use_container_width=True)
 
+
+def render_pr_balance_aging_per_pic(df: pd.DataFrame):
+    """
+    Stacked bar PR Balance per PIC berdasarkan kategori aging.
+
+    Tujuan:
+    - menunjukkan workload outstanding per PIC;
+    - sekaligus menunjukkan umur backlog;
+    - lebih informatif dibanding rata-rata aging saja.
+    """
+    if (
+        df is None
+        or df.empty
+        or "PIC Procurement" not in df.columns
+        or "Aging Category" not in df.columns
+        or "No. PR" not in df.columns
+    ):
+        st.info("Data PR Balance Aging per PIC tidak tersedia.")
+        return
+
+    working = assign_unassigned(df, "PIC Procurement")
+
+    # Hanya PR Balance aktif/outstanding.
+    working = working[
+        ~working["Status"].fillna("").astype(str).str.strip().isin(
+            ["Complete", "Draft", "Close"]
+        )
+    ].copy()
+
+    if working.empty:
+        st.info("Tidak ada PR Balance aktif untuk dianalisis.")
+        return
+
+    summary = (
+        working.groupby(
+            ["PIC Procurement", "Aging Category"],
+            observed=False,
+            dropna=False,
+        )["No. PR"]
+        .nunique()
+        .reset_index(name="Jumlah PR")
+    )
+
+    # Buang bucket kosong.
+    summary = summary[summary["Jumlah PR"] > 0].copy()
+
+    if summary.empty:
+        st.info("Data PR Balance Aging per PIC tidak tersedia.")
+        return
+
+    # Urutkan PIC dari backlog paling banyak.
+    pic_order = (
+        summary.groupby("PIC Procurement", as_index=False)["Jumlah PR"]
+        .sum()
+        .sort_values("Jumlah PR", ascending=False)["PIC Procurement"]
+        .tolist()
+    )
+
+    aging_order = [
+        "0-30 hari",
+        "31-60 hari",
+        "61-90 hari",
+        ">90 hari",
+    ]
+
+    aging_colors = {
+        "0-30 hari": "#2F80ED",
+        "31-60 hari": "#7ABBEE",
+        "61-90 hari": "#FCA27F",
+        ">90 hari": "#EB5757",
+    }
+
+    fig = px.bar(
+        summary,
+        x="PIC Procurement",
+        y="Jumlah PR",
+        color="Aging Category",
+        text="Jumlah PR",
+        color_discrete_map=aging_colors,
+        category_orders={
+            "PIC Procurement": pic_order,
+            "Aging Category": aging_order,
+        },
+        title="PR Balance Aging per PIC Procurement",
+    )
+
+    # Jumlah tiap bucket di dalam bar.
+    fig.update_traces(
+        textposition="inside",
+        textfont=dict(size=10, color="white"),
+    )
+
+    # Tambahkan total PR Balance di atas tiap PIC.
+    totals = (
+        summary.groupby("PIC Procurement", as_index=False)["Jumlah PR"]
+        .sum()
+    )
+
+    for _, row in totals.iterrows():
+        fig.add_annotation(
+            x=row["PIC Procurement"],
+            y=row["Jumlah PR"],
+            text=f"{int(row['Jumlah PR'])}",
+            showarrow=False,
+            font=dict(size=12, color="black"),
+            yshift=10,
+        )
+
+    fig.update_layout(
+        barmode="stack",
+        uniformtext_mode="hide",
+        yaxis_title="Jumlah PR Balance",
+        xaxis_title="PIC Procurement",
+        legend_title_text="Aging",
+        margin=dict(l=40, r=40, t=60, b=100),
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key="pr_balance_aging_per_pic",
+    )
+
 def render_sla_gauge(df: pd.DataFrame, threshold: int = 5, title: str = "SLA Compliance"):
     if df.empty or "Aging" not in df.columns:
         st.info("Data aging tidak tersedia untuk SLA.")
@@ -1753,9 +1876,9 @@ def main():
                 st.subheader("⏳ Distribusi Aging PR")
                 render_aging_bar(df_pr_final_valid, "transaction_number", chart_key="aging_pr")
 
-            with st.container(border=True):
-                st.subheader("⏳ Distribusi Aging PR Balance")
-                render_aging_bar(df_pr_valid, "No. PR", chart_key="aging_pr_outstanding")
+            #with st.container(border=True):
+                #st.subheader("⏳ Distribusi Aging PR Balance")
+                #render_aging_bar(df_pr_valid, "No. PR", chart_key="aging_pr_outstanding")
 
                 pic_aging_summary = summarize_pic_aging(df_pr_valid, "PIC Procurement", "No. PR")
                 pic_aging_summary_final = summarize_pic_aging(df_pr_final_valid, "PIC Procurement", "transaction_number")
@@ -1766,9 +1889,12 @@ def main():
                 render_pic_aging_bar(pic_aging_summary_final)
 
             with st.container(border=True):
-                st.subheader("👥 Rata-rata Proses PR Balance")
-                #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
-                render_pic_aging_bar(pic_aging_summary)
+                st.subheader("📊 PR Balance Aging per PIC Procurement")
+                st.caption(
+                    "Menampilkan jumlah PR Balance aktif per PIC dan distribusi umurnya "
+                    "(0-30, 31-60, 61-90, >90 hari). Total backlog ditampilkan di atas setiap PIC."
+                )
+                render_pr_balance_aging_per_pic(df_pr_valid)
 
             # Download per Category PR Aging
             with st.container(border=True):
@@ -1841,9 +1967,9 @@ def main():
                 st.subheader("📏 SLA Compliance PR")
                 render_sla_gauge(df_pr_final_valid, threshold=2, title="SLA Compliance PR")
 
-            with st.container(border=True):
-                st.subheader("📏 SLA Compliance PR Balance")
-                render_sla_gauge(df_pr_valid, threshold=2, title="SLA Compliance PR Balance")
+            #with st.container(border=True):
+                #st.subheader("📏 SLA Compliance PR Balance")
+                #render_sla_gauge(df_pr_valid, threshold=2, title="SLA Compliance PR Balance")
 
             pic_sla_summary = summarize_pic_sla(df_pr_final_valid, "PIC Procurement", "transaction_number", threshold=2)
 
