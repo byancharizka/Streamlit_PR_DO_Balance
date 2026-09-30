@@ -515,6 +515,140 @@ def load_all_data_new(start_date=None, end_date=None) -> dict[str, pd.DataFrame]
 
 
 
+
+NPR_STATUS_MAP = {
+    0: "Request",
+    1: "Process",
+    2: "Complete",
+}
+
+NPR_VALID_STATUSES = tuple(NPR_STATUS_MAP.values())
+
+def _normalize_npr_text_status(value):
+    if value is None or pd.isna(value):
+        return ""
+    s = str(value).strip()
+    if not s:
+        return ""
+    # Numeric status from x4_product_requests / API full NPR
+    try:
+        n = int(float(s))
+        if n in NPR_STATUS_MAP:
+            return NPR_STATUS_MAP[n]
+    except Exception:
+        pass
+
+    key = " ".join(s.casefold().split())
+    text_map = {
+        "request": "Request",
+        "requested": "Request",
+        "process": "Process",
+        "processed": "Process",
+        "proses": "Process",
+        "in process": "Process",
+        "complete": "Complete",
+        "completed": "Complete",
+        "selesai": "Complete",
+    }
+    return text_map.get(key, s)
+
+def _npr_empty_frame():
+    return pd.DataFrame(columns=[
+        "No. Transaksi", "Nama NPR", "Sales", "Status",
+        "Tanggal Deadline", "Catatan", "User Input", "transaction_date"
+    ])
+
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_full_npr_from_api(start_date=None, end_date=None) -> pd.DataFrame:
+    """
+    Full NPR from ERP API. outstanding-npr is intentionally not used.
+
+    Candidate endpoint order is tried safely because the exact full-NPR route
+    can differ by deployment. Payload is accepted only when it contains
+    SIBNPR transactions and statuses mapped to Request/Process/Complete.
+    """
+    candidates = [
+        "product-requests",
+        "new-product-requests",
+        "new-product-request",
+        "product-request",
+        "nprs",
+        "npr",
+    ]
+
+    for endpoint in candidates:
+        try:
+            raw = get_api_data_new(
+                endpoint,
+                source="erp",
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except Exception:
+            continue
+
+        if raw is None or raw.empty:
+            continue
+
+        cols = {str(c).casefold(): c for c in raw.columns}
+
+        def col(*names):
+            for n in names:
+                c = cols.get(str(n).casefold())
+                if c is not None:
+                    return c
+            return None
+
+        no_col = col("transaction_number", "no_npr", "npr_number", "number", "code")
+        status_col = col("status_description", "status_name", "status")
+        if not no_col or not status_col:
+            continue
+
+        out = pd.DataFrame(index=raw.index)
+        out["No. Transaksi"] = raw[no_col].fillna("").astype(str).str.strip()
+        out["Nama NPR"] = raw[col("name", "nama_npr", "npr_name", "title", "description")].fillna("").astype(str).str.strip() if col("name", "nama_npr", "npr_name", "title", "description") else ""
+
+        pic_col = col("pic_name", "pic", "penanggung_jawab", "responsible_name", "assignee_name")
+        if pic_col:
+            out["Sales"] = raw[pic_col].fillna("").astype(str).str.strip()
+        else:
+            pic_id_col = col("pic_id")
+            out["Sales"] = raw[pic_id_col].fillna("").astype(str).str.strip() if pic_id_col else ""
+
+        out["Status"] = raw[status_col].map(_normalize_npr_text_status)
+
+        deadline_col = col("due_date", "deadline", "deadline_date", "tanggal_deadline")
+        out["Tanggal Deadline"] = pd.to_datetime(raw[deadline_col], errors="coerce") if deadline_col else pd.NaT
+
+        notes_col = col("notes", "note", "catatan", "remarks", "remark")
+        out["Catatan"] = raw[notes_col].fillna("").astype(str).str.strip() if notes_col else ""
+
+        creator_col = col("created_by_name", "user_input", "creator_name", "created_by", "user_name")
+        out["User Input"] = raw[creator_col].fillna("").astype(str).str.strip() if creator_col else ""
+
+        date_col = col("created_at", "transaction_date", "date", "request_date")
+        out["transaction_date"] = pd.to_datetime(raw[date_col], errors="coerce") if date_col else pd.NaT
+
+        out = out[
+            out["No. Transaksi"].str.upper().str.startswith("SIBNPR", na=False)
+            & out["Status"].isin(NPR_VALID_STATUSES)
+        ].copy()
+
+        if out.empty:
+            continue
+
+        out = (
+            out.sort_values("transaction_date", na_position="last")
+            .drop_duplicates("No. Transaksi", keep="last")
+            .reset_index(drop=True)
+        )
+        return out
+
+    return _npr_empty_frame()
+
+
 # =========================================================
 # 7) FILTERS & TRANSFORM
 # =========================================================
@@ -1229,7 +1363,8 @@ def main():
     df_po = data_old["po"]
     df_grn = data_old["grn"]
     df_do = data_old["do"]
-    df_npr = data_old["npr"]
+    # Full NPR module from ERP API; outstanding-npr is not used.
+    df_npr = load_full_npr_from_api(start_date=start_date, end_date=end_date)
     #df_pur = data_old["pur"]
 
     df_pr_final = data_new["pr"]
@@ -1344,6 +1479,7 @@ def main():
     df_grn_f = apply_search_filter(df_grn_f, search_number, search_status, search_pic)
     df_do_f = apply_search_filter(df_do_f, search_number, search_status, search_pic)
     df_npr_f = apply_search_filter(df_npr_f, search_number, search_status, search_pic)
+    df_npr_f = df_npr_f[df_npr_f["Status"].isin(NPR_VALID_STATUSES)].copy()
     #df_pur_f = apply_search_filter(df_pur_f, search_number, search_status, search_pic)
     #df_pr_final_real = apply_search_filter(df_pr_final_real, search_number, search_status, search_pic)
 
@@ -2156,7 +2292,7 @@ def main():
                     # Warna status sama seperti PR
                     STATUS_COLORS = {
                         "Complete": "#00CC96",
-                        "Pro": "#F2C94C",
+                        "Process": "#F2C94C",
                         "Approved": "#F2994A",
                         "Need Approve": "#EB5757",
                         "Request": "#56CCF2"  # tambahan untuk NPR
