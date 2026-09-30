@@ -1703,13 +1703,13 @@ def main():
         with col_kanan:
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance PR")
-                render_sla_gauge(df_pr_final_valid, threshold=5, title="SLA Compliance PR")
+                render_sla_gauge(df_pr_final_valid, threshold=2, title="SLA Compliance PR")
 
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance PR Balance")
-                render_sla_gauge(df_pr_valid, threshold=5, title="SLA Compliance PR Balance")
+                render_sla_gauge(df_pr_valid, threshold=2, title="SLA Compliance PR Balance")
 
-            pic_sla_summary = summarize_pic_sla(df_pr_final_valid, "PIC Procurement", "transaction_number", threshold=5)
+            pic_sla_summary = summarize_pic_sla(df_pr_final_valid, "PIC Procurement", "transaction_number", threshold=2)
 
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance per PIC Procurement")
@@ -1718,7 +1718,7 @@ def main():
 
             with st.container(border=True):
                 st.subheader("📈 Trend SLA")
-                render_sla_trend(df_pr_final_valid, threshold=5, date_col="transaction_date")
+                render_sla_trend(df_pr_final_valid, threshold=2, date_col="transaction_date")
 
 
             # Download PR by period & status
@@ -1998,13 +1998,13 @@ def main():
         with col_kanan:
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance DO")
-                render_sla_gauge(df_do_final_valid, threshold=5, title="SLA Compliance DO")
+                render_sla_gauge(df_do_final_valid, 2, title="SLA Compliance DO")
 
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance DO Balance")
-                render_sla_gauge(df_do_valid, threshold=5, title="SLA Compliance DO Balance")
+                render_sla_gauge(df_do_valid, threshold=2, title="SLA Compliance DO Balance")
 
-            pic_sla_summary_do = summarize_pic_sla(df_do_final_valid, "PIC Procurement", "transaction_number", threshold=5)
+            pic_sla_summary_do = summarize_pic_sla(df_do_final_valid, "PIC Procurement", "transaction_number", threshold=2)
 
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance per PIC Procurement")
@@ -2013,7 +2013,7 @@ def main():
 
             with st.container(border=True):
                 st.subheader("📈 Trend SLA")
-                render_sla_trend(df_do_final_valid, threshold=5, date_col="transaction_date")
+                render_sla_trend(df_do_final_valid, threshold=2, date_col="transaction_date")
 
 
             # Download DO by period & status
