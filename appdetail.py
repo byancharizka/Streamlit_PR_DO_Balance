@@ -2,6 +2,7 @@ import os
 import logging
 from io import BytesIO
 from datetime import datetime, date
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import plotly.express as px
@@ -430,43 +431,91 @@ def get_api_data_old(endpoint: str, source: str = "outstanding", start_date=None
         return pd.DataFrame()
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_api_data_new(endpoint: str, source: str = "erp", start_date=None, end_date=None):
+def get_api_data_new(
+    endpoint: str,
+    source: str = "erp",
+    start_date=None,
+    end_date=None,
+    silent: bool = False,
+):
     base_url = BASE_URL.get(source, BASE_URL["erp"])
     url = f"{base_url}{endpoint}"
+
     params = {
         "date_start": start_date,
         "date_end": end_date,
-        "token": API_TOKEN
+        "token": API_TOKEN,
     }
 
     try:
-        # 🔹 Gunakan session dengan retry
         session = create_session()
-        response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        response = session.get(
+            url,
+            params=params,
+            timeout=REQUEST_TIMEOUT,
+        )
 
         response.raise_for_status()
         payload = response.json()
 
         rows = payload.get("data", [])
+
         if isinstance(rows, list):
             all_rows = []
+
             for row in rows:
                 items = row.get("items", [])
+
                 if items:
                     for item in items:
-                        flat = {**row, **{f"item_{k}": v for k, v in item.items()}}
+                        flat = {
+                            **row,
+                            **{
+                                f"item_{k}": v
+                                for k, v in item.items()
+                            },
+                        }
                         all_rows.append(flat)
                 else:
                     all_rows.append(row)
 
             df = pd.DataFrame(all_rows)
             df = safe_to_datetime(df, "transaction_date")
+
             return df
 
         return pd.DataFrame()
 
+    except requests.exceptions.HTTPError as e:
+        # Tidak tampilkan ke dashboard jika silent=True
+        logger.warning(
+            "HTTP error endpoint=%s source=%s status=%s",
+            endpoint,
+            source,
+            getattr(e.response, "status_code", "-"),
+        )
+
+        if not silent:
+            st.warning(
+                f"Gagal mengambil data dari endpoint "
+                f"{endpoint} ({source})."
+            )
+
+        return pd.DataFrame()
+
     except Exception as e:
-        st.warning(f"Gagal mengambil data dari endpoint {endpoint} ({source}): {e}")
+        logger.exception(
+            "Gagal mengambil endpoint=%s source=%s",
+            endpoint,
+            source,
+        )
+
+        if not silent:
+            st.warning(
+                f"Gagal mengambil data dari endpoint "
+                f"{endpoint} ({source})."
+            )
+
         return pd.DataFrame()
 
 
@@ -491,6 +540,959 @@ def load_all_data(start_date=None, end_date=None) -> dict[str, pd.DataFrame]:
 
     return result
 
+
+
+
+
+# =========================================================
+# 6B) HISTORICAL / AS-OF PR BALANCE — API CANONICAL
+# =========================================================
+PR_BALANCE_START_DATE = date(2026, 1, 1)
+
+
+def _api_first_series(df: pd.DataFrame, candidates, default="") -> pd.Series:
+    """Ambil candidate column pertama yang tersedia sebagai Series sepanjang index."""
+    for col in candidates:
+        if col in df.columns:
+            return df[col]
+    return pd.Series(default, index=df.index)
+
+
+def _api_clean_key(series: pd.Series) -> pd.Series:
+    return (
+        series.fillna("")
+        .astype(str)
+        .str.replace(r"\.0$", "", regex=True)
+        .str.strip()
+    )
+
+
+def _api_numeric(df: pd.DataFrame, candidates, default=0.0) -> pd.Series:
+    return pd.to_numeric(
+        _api_first_series(df, candidates, default),
+        errors="coerce",
+    ).fillna(default)
+
+
+def _normalize_pr_status_for_balance(value):
+    if value is None or pd.isna(value):
+        return ""
+    raw = str(value).strip()
+    if not raw:
+        return ""
+    try:
+        code = int(float(raw))
+        return {
+            0: "Draft",
+            1: "Need Approve",
+            2: "Approved",
+            3: "In Progress",
+            4: "Complete",
+            5: "Close",
+            7: "Approve 1",
+            8: "Approve 2",
+            9: "Approve 3",
+        }.get(code, raw)
+    except Exception:
+        pass
+
+    key = " ".join(raw.casefold().split())
+    return {
+        "draft": "Draft",
+        "need approve": "Need Approve",
+        "need approved": "Need Approve",
+        "approved": "Approved",
+        "approve": "Approved",
+        "in progress": "In Progress",
+        "complete": "Complete",
+        "completed": "Complete",
+        "close": "Close",
+        "closed": "Close",
+        "approve 1": "Approve 1",
+        "approve 2": "Approve 2",
+        "approve 3": "Approve 3",
+    }.get(key, raw)
+
+
+def _status_code_from_label(label: str):
+    return {
+        "Draft": 0,
+        "Need Approve": 1,
+        "Approved": 2,
+        "In Progress": 3,
+        "Complete": 4,
+        "Close": 5,
+        "Approve 1": 7,
+        "Approve 2": 8,
+        "Approve 3": 9,
+    }.get(str(label or "").strip())
+
+
+def _extract_nested_pr_status_asof(df: pd.DataFrame, cutoff) -> pd.DataFrame:
+    """
+    Coba baca history status yang ikut dibawa oleh endpoint purchase-requests.
+
+    Beberapa deployment API mengembalikan history sebagai nested list pada header.
+    Jika tersedia, ini menjadi sumber terbaik untuk status as-of. Jika tidak tersedia,
+    caller akan fallback ke milestone date_approved/date_inprogress/date_complete.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["__pr_number", "Status As Of", "Status Code As Of", "Status As Of Timestamp"])
+
+    history_cols = [c for c in [
+        "histories", "history", "status_histories", "transaction_histories",
+        "purchase_request_histories", "request_histories",
+    ] if c in df.columns]
+    if not history_cols:
+        return pd.DataFrame(columns=["__pr_number", "Status As Of", "Status Code As Of", "Status As Of Timestamp"])
+
+    cutoff_ts = pd.Timestamp(cutoff).normalize() + pd.Timedelta(days=1)
+    rows = []
+    docs = df.drop_duplicates("transaction_number", keep="last") if "transaction_number" in df.columns else df
+    for _, r in docs.iterrows():
+        pr_no = str(r.get("transaction_number") or "").strip()
+        if not pr_no:
+            continue
+        for hc in history_cols:
+            entries = r.get(hc)
+            if not isinstance(entries, list):
+                continue
+            for h in entries:
+                if not isinstance(h, dict):
+                    continue
+                status_val = h.get("status", h.get("status_id", h.get("status_code", h.get("status_description"))))
+                status_label = _normalize_pr_status_for_balance(status_val)
+                if not status_label:
+                    status_label = _normalize_pr_status_for_balance(h.get("status_name", ""))
+                ts = pd.to_datetime(
+                    h.get("updated_at", h.get("created_at", h.get("date", h.get("timestamp")))),
+                    errors="coerce",
+                )
+                if pd.isna(ts) or ts >= cutoff_ts:
+                    continue
+                rows.append({
+                    "__pr_number": pr_no,
+                    "Status As Of": status_label,
+                    "Status Code As Of": _status_code_from_label(status_label),
+                    "Status As Of Timestamp": ts,
+                })
+
+    if not rows:
+        return pd.DataFrame(columns=["__pr_number", "Status As Of", "Status Code As Of", "Status As Of Timestamp"])
+
+    out = pd.DataFrame(rows).sort_values(["__pr_number", "Status As Of Timestamp"])
+    return out.drop_duplicates("__pr_number", keep="last").reset_index(drop=True)
+
+
+def _infer_pr_status_asof_from_milestones(df: pd.DataFrame, cutoff) -> pd.DataFrame:
+    """
+    Fallback status as-of ketika endpoint tidak expose nested history.
+
+    Urutan milestone mengikuti mapping ERP:
+      Approved=2 -> In Progress=3 -> Complete=4.
+    Untuk dokumen yang belum mencapai Approved pada cutoff, status fallback menjadi
+    Need Approve kecuali current status memang Draft.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["__pr_number", "Status As Of", "Status Code As Of", "Status As Of Timestamp"])
+
+    docs = df.copy()
+    docs["__pr_number"] = _api_clean_key(_api_first_series(docs, ["transaction_number"], ""))
+    docs = docs[docs["__pr_number"].ne("")].drop_duplicates("__pr_number", keep="last")
+    cutoff_ts = pd.Timestamp(cutoff).normalize() + pd.Timedelta(days=1)
+
+    current = _api_first_series(docs, ["status", "status_description", "Status"], "").map(_normalize_pr_status_for_balance)
+    approved = pd.to_datetime(_api_first_series(docs, ["date_approved", "approved_at", "approved_date"], pd.NaT), errors="coerce")
+    inprogress = pd.to_datetime(_api_first_series(docs, ["date_inprogress", "date_in_progress", "inprogress_at", "in_progress_at"], pd.NaT), errors="coerce")
+    complete = pd.to_datetime(_api_first_series(docs, ["date_complete", "date_completed", "completed_at", "complete_at"], pd.NaT), errors="coerce")
+
+    status = pd.Series("Need Approve", index=docs.index, dtype="object")
+    status_at = pd.to_datetime(_api_first_series(docs, ["transaction_date", "date", "created_at"], pd.NaT), errors="coerce")
+
+    draft_mask = current.eq("Draft") & approved.isna() & inprogress.isna() & complete.isna()
+    status.loc[draft_mask] = "Draft"
+
+    m = approved.notna() & approved.lt(cutoff_ts)
+    status.loc[m] = "Approved"
+    status_at.loc[m] = approved.loc[m]
+
+    m = inprogress.notna() & inprogress.lt(cutoff_ts)
+    status.loc[m] = "In Progress"
+    status_at.loc[m] = inprogress.loc[m]
+
+    m = complete.notna() & complete.lt(cutoff_ts)
+    status.loc[m] = "Complete"
+    status_at.loc[m] = complete.loc[m]
+
+    out = pd.DataFrame({
+        "__pr_number": docs["__pr_number"],
+        "Status As Of": status,
+        "Status Code As Of": status.map(_status_code_from_label),
+        "Status As Of Timestamp": status_at,
+    })
+    return out.reset_index(drop=True)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_pr_history_cached(pr_no: str) -> dict:
+    """Fetch FULL history satu PR dan cache 1 jam.
+
+    Penting: cache TIDAK bergantung pada cutoff. History PR yang sama dapat dipakai ulang
+    ketika user berpindah filter Jan -> Feb -> Mar -> Oct tanpa request HTTP ulang.
+    """
+    pr_no = str(pr_no or "").strip()
+    if not pr_no:
+        return {
+            "__pr_number": "",
+            "Fetch State": "EMPTY_PR_NUMBER",
+            "history": [],
+        }
+
+    base_url = f"{BASE_URL['erp']}purchase-requests/history"
+    params = {"transaction_number": pr_no}
+    if API_TOKEN:
+        params["token"] = API_TOKEN
+
+    try:
+        session = create_session()
+        response = session.get(base_url, params=params, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        payload = response.json()
+        data = payload.get("data", {}) if isinstance(payload, dict) else {}
+        history = data.get("history", []) if isinstance(data, dict) else []
+        if not isinstance(history, list):
+            history = []
+
+        # Simpan hanya field yang diperlukan agar cache ringan dan stabil.
+        parsed = []
+        for h in history:
+            if not isinstance(h, dict):
+                continue
+            status_label = _normalize_pr_status_for_balance(
+                h.get("status", h.get("status_description", h.get("status_name", "")))
+            )
+            ts = pd.to_datetime(
+                h.get("updated_at", h.get("created_at", h.get("date", h.get("timestamp")))),
+                errors="coerce",
+            )
+            if pd.isna(ts):
+                continue
+            parsed.append({
+                "status": status_label,
+                "timestamp": ts,
+            })
+
+        return {
+            "__pr_number": pr_no,
+            "Fetch State": "OK",
+            "history": parsed,
+        }
+    except Exception as exc:
+        logger.warning("Gagal mengambil PR history %s: %s", pr_no, exc)
+        return {
+            "__pr_number": pr_no,
+            "Fetch State": "ENDPOINT_ERROR",
+            "history": [],
+        }
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_pr_history_status_map_api(transaction_numbers: tuple, cutoff) -> pd.DataFrame:
+    """Bangun status historical per cutoff dari history PR yang dicache per dokumen.
+
+    Optimasi performa:
+    - history setiap PR dicache 1 jam oleh _fetch_pr_history_cached();
+    - cutoff berbeda tidak memaksa download history yang sama;
+    - first-load menggunakan maksimal 8 worker agar cepat tanpa membanjiri ERP API.
+    """
+    if not transaction_numbers:
+        return pd.DataFrame(columns=[
+            "__pr_number", "Status As Of", "Status Code As Of",
+            "Status As Of Timestamp", "Status As Of Source",
+            "History Endpoint State", "First History Timestamp",
+        ])
+
+    # Pastikan unique supaya satu PR tidak pernah dipanggil lebih dari sekali dalam satu run.
+    transaction_numbers = tuple(sorted({
+        str(v).strip() for v in transaction_numbers if str(v).strip()
+    }))
+    cutoff_ts = pd.Timestamp(cutoff).normalize() + pd.Timedelta(days=1)
+
+    def resolve_one(pr_no: str):
+        fetched = _fetch_pr_history_cached(pr_no)
+        fetch_state = fetched.get("Fetch State", "ENDPOINT_ERROR")
+        history = fetched.get("history", [])
+        if not isinstance(history, list):
+            history = []
+
+        if fetch_state != "OK":
+            return {
+                "__pr_number": pr_no,
+                "Status As Of": pd.NA,
+                "Status Code As Of": pd.NA,
+                "Status As Of Timestamp": pd.NaT,
+                "Status As Of Source": "HISTORY_ENDPOINT_ERROR",
+                "History Endpoint State": "ENDPOINT_ERROR",
+                "First History Timestamp": pd.NaT,
+            }
+
+        parsed_history = []
+        candidates = []
+        for h in history:
+            if not isinstance(h, dict):
+                continue
+            status_label = _normalize_pr_status_for_balance(h.get("status", ""))
+            ts = pd.to_datetime(h.get("timestamp"), errors="coerce")
+            if pd.isna(ts):
+                continue
+            parsed_history.append(ts)
+            if status_label and ts < cutoff_ts:
+                candidates.append((ts, status_label))
+
+        if candidates:
+            ts, status_label = max(candidates, key=lambda x: x[0])
+            return {
+                "__pr_number": pr_no,
+                "Status As Of": status_label,
+                "Status Code As Of": _status_code_from_label(status_label),
+                "Status As Of Timestamp": ts,
+                "Status As Of Source": "PURCHASE_REQUEST_HISTORY_ENDPOINT",
+                "History Endpoint State": "HISTORY_BEFORE_CUTOFF",
+                "First History Timestamp": min(parsed_history) if parsed_history else pd.NaT,
+            }
+
+        if parsed_history:
+            return {
+                "__pr_number": pr_no,
+                "Status As Of": pd.NA,
+                "Status Code As Of": pd.NA,
+                "Status As Of Timestamp": pd.NaT,
+                "Status As Of Source": "PURCHASE_REQUEST_HISTORY_ENDPOINT",
+                "History Endpoint State": "HISTORY_AFTER_CUTOFF_ONLY",
+                "First History Timestamp": min(parsed_history),
+            }
+
+        return {
+            "__pr_number": pr_no,
+            "Status As Of": pd.NA,
+            "Status Code As Of": pd.NA,
+            "Status As Of Timestamp": pd.NaT,
+            "Status As Of Source": "PURCHASE_REQUEST_HISTORY_ENDPOINT",
+            "History Endpoint State": "NO_HISTORY_RETURNED",
+            "First History Timestamp": pd.NaT,
+        }
+
+    rows = []
+    max_workers = min(8, max(1, len(transaction_numbers)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(resolve_one, pr_no): pr_no for pr_no in transaction_numbers}
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+            except Exception as exc:
+                pr_no = futures[future]
+                logger.warning("Gagal resolve cached PR history %s: %s", pr_no, exc)
+                result = {
+                    "__pr_number": pr_no,
+                    "Status As Of": pd.NA,
+                    "Status Code As Of": pd.NA,
+                    "Status As Of Timestamp": pd.NaT,
+                    "Status As Of Source": "HISTORY_ENDPOINT_ERROR",
+                    "History Endpoint State": "ENDPOINT_ERROR",
+                    "First History Timestamp": pd.NaT,
+                }
+            rows.append(result)
+
+    if not rows:
+        return pd.DataFrame(columns=[
+            "__pr_number", "Status As Of", "Status Code As Of",
+            "Status As Of Timestamp", "Status As Of Source",
+            "History Endpoint State", "First History Timestamp",
+        ])
+
+    return (
+        pd.DataFrame(rows)
+        .drop_duplicates("__pr_number", keep="last")
+        .reset_index(drop=True)
+    )
+
+
+def _build_pr_status_asof_api(pr_df: pd.DataFrame, cutoff) -> pd.DataFrame:
+    """Resolve status PR pada cutoff.
+
+    Rule parity:
+    - cutoff hari ini: current status /purchase-requests authoritative;
+    - cutoff historis: endpoint /purchase-requests/history authoritative;
+    - nested history lalu milestone hanya fallback bila endpoint history tidak memberi row.
+    """
+    if pr_df is None or pr_df.empty:
+        return pd.DataFrame(columns=[
+            "__pr_number", "Status As Of", "Status Code As Of",
+            "Status As Of Timestamp", "Status As Of Source",
+        ])
+
+    cutoff_date = pd.Timestamp(cutoff).date()
+
+    docs = pr_df.copy()
+    docs["__pr_number"] = _api_clean_key(_api_first_series(docs, ["transaction_number"], ""))
+    docs = docs[docs["__pr_number"].ne("")].drop_duplicates("__pr_number", keep="last")
+
+    # 1) Current cutoff: pakai current header status dari purchase-requests.
+    if cutoff_date >= date.today():
+        current_status = _api_first_series(
+            docs, ["status", "status_description", "Status"], ""
+        ).map(_normalize_pr_status_for_balance)
+        current_at = pd.to_datetime(
+            _api_first_series(docs, ["updated_at", "modified_at", "created_at", "transaction_date"], pd.NaT),
+            errors="coerce",
+        )
+        return pd.DataFrame({
+            "__pr_number": docs["__pr_number"],
+            "Status As Of": current_status,
+            "Status Code As Of": current_status.map(_status_code_from_label),
+            "Status As Of Timestamp": current_at,
+            "Status As Of Source": "CURRENT_STATUS_AT_CURRENT_CUTOFF",
+        }).reset_index(drop=True)
+
+    # 2) Historical cutoff: endpoint history menjadi source-of-truth.
+    pr_numbers = tuple(sorted(docs["__pr_number"].dropna().astype(str).unique().tolist()))
+    history_endpoint = _load_pr_history_status_map_api(pr_numbers, cutoff_date)
+
+    # 3) Fallbacks hanya untuk PR yang history endpoint-nya kosong/gagal.
+    nested = _extract_nested_pr_status_asof(pr_df, cutoff_date)
+    inferred = _infer_pr_status_asof_from_milestones(pr_df, cutoff_date)
+
+    base = docs[["__pr_number"]].copy()
+    base = base.merge(history_endpoint, how="left", on="__pr_number")
+
+    if nested is not None and not nested.empty:
+        n = nested.rename(columns={
+            "Status As Of": "__nested_status",
+            "Status Code As Of": "__nested_code",
+            "Status As Of Timestamp": "__nested_ts",
+        })
+        base = base.merge(n[[c for c in ["__pr_number", "__nested_status", "__nested_code", "__nested_ts"] if c in n.columns]], how="left", on="__pr_number")
+    else:
+        base["__nested_status"] = pd.NA
+        base["__nested_code"] = pd.NA
+        base["__nested_ts"] = pd.NaT
+
+    if inferred is not None and not inferred.empty:
+        f = inferred.rename(columns={
+            "Status As Of": "__fallback_status",
+            "Status Code As Of": "__fallback_code",
+            "Status As Of Timestamp": "__fallback_ts",
+        })
+        base = base.merge(f[[c for c in ["__pr_number", "__fallback_status", "__fallback_code", "__fallback_ts"] if c in f.columns]], how="left", on="__pr_number")
+    else:
+        base["__fallback_status"] = pd.NA
+        base["__fallback_code"] = pd.NA
+        base["__fallback_ts"] = pd.NaT
+
+    endpoint_missing = base["Status As Of"].isna() | base["Status As Of"].fillna("").astype(str).str.strip().eq("")
+
+    # Bila endpoint history berhasil dan menunjukkan seluruh history baru terjadi SETELAH cutoff,
+    # jangan pernah fallback ke milestone/current-state. PR tersebut belum eksis pada snapshot.
+    history_state = base.get("History Endpoint State", pd.Series("", index=base.index)).fillna("").astype(str)
+    proven_not_existing = history_state.eq("HISTORY_AFTER_CUTOFF_ONLY")
+
+    nested_present = base["__nested_status"].notna() & base["__nested_status"].astype(str).str.strip().ne("")
+    use_nested = endpoint_missing & ~proven_not_existing & nested_present
+    base.loc[use_nested, "Status As Of"] = base.loc[use_nested, "__nested_status"]
+    base.loc[use_nested, "Status Code As Of"] = base.loc[use_nested, "__nested_code"]
+    base.loc[use_nested, "Status As Of Timestamp"] = base.loc[use_nested, "__nested_ts"]
+    base.loc[use_nested, "Status As Of Source"] = "NESTED_HISTORY_FALLBACK"
+
+    still_missing = base["Status As Of"].isna() | base["Status As Of"].fillna("").astype(str).str.strip().eq("")
+    fallback_present = base["__fallback_status"].notna() & base["__fallback_status"].astype(str).str.strip().ne("")
+    use_fallback = still_missing & ~proven_not_existing & fallback_present
+    base.loc[use_fallback, "Status As Of"] = base.loc[use_fallback, "__fallback_status"]
+    base.loc[use_fallback, "Status Code As Of"] = base.loc[use_fallback, "__fallback_code"]
+    base.loc[use_fallback, "Status As Of Timestamp"] = base.loc[use_fallback, "__fallback_ts"]
+    base.loc[use_fallback, "Status As Of Source"] = "MILESTONE_FALLBACK"
+
+    # Tandai secara eksplisit PR yang terbukti belum eksis pada cutoff.
+    base.loc[proven_not_existing, "Status As Of Source"] = "HISTORY_PROVES_NOT_EXISTING_AT_CUTOFF"
+
+    return base[[c for c in [
+        "__pr_number", "Status As Of", "Status Code As Of",
+        "Status As Of Timestamp", "Status As Of Source",
+        "History Endpoint State", "First History Timestamp",
+    ] if c in base.columns]].copy()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_purchase_orders_until_api(end_date_val) -> pd.DataFrame:
+    """PO detail kumulatif 1-Jan-2026 s/d cutoff untuk mengurangi PR Balance."""
+    return get_api_data_new(
+        "purchase-orders",
+        source="erp",
+        start_date=PR_BALANCE_START_DATE,
+        end_date=end_date_val,
+    )
+
+
+def _build_po_qty_by_pr_detail_api(po_df: pd.DataFrame, cutoff) -> pd.DataFrame:
+    if po_df is None or po_df.empty:
+        return pd.DataFrame(columns=["__pr_detail_key", "PO Qty Linked", "PO Documents", "PO Statuses"])
+
+    po = po_df.copy()
+    pr_ref = _api_clean_key(_api_first_series(po, [
+        "item_pr_detail_id", "item_purchase_request_detail_id", "item_purchase_request_details_id",
+        "item_request_detail_id", "item_source_pr_detail_id", "pr_detail_id",
+        "purchase_request_detail_id",
+    ], ""))
+    po["__pr_detail_key"] = pr_ref
+    po = po[po["__pr_detail_key"].ne("")].copy()
+    if po.empty:
+        return pd.DataFrame(columns=["__pr_detail_key", "PO Qty Linked", "PO Documents", "PO Statuses"])
+
+    po_date = pd.to_datetime(_api_first_series(po, ["transaction_date", "date", "created_at"], pd.NaT), errors="coerce")
+    cutoff_ts = pd.Timestamp(cutoff).normalize() + pd.Timedelta(days=1)
+    po = po.loc[po_date.notna() & po_date.lt(cutoff_ts)].copy()
+
+    status_raw = _api_first_series(po, ["status", "status_description", "Status"], "")
+    def po_status_code(v):
+        if v is None or pd.isna(v):
+            return None
+        try:
+            return int(float(str(v).strip()))
+        except Exception:
+            key = " ".join(str(v).casefold().split())
+            # mapping sesuai backend PostgreSQL yang dipakai file parity
+            name_map = {
+                "menunggu persetujuan po": 1,
+                "pembuatan bpv / barang dalam pengiriman": 2,
+                "sebagian barang tersedia": 3,
+                "barang siap lengkap": 4,
+                "approved": 2,
+                "in progress": 3,
+                "complete": 4,
+                "completed": 4,
+                "need approve": 1,
+            }
+            return name_map.get(key)
+    po["__po_status_code"] = status_raw.map(po_status_code)
+    po = po[po["__po_status_code"].isin([1, 2, 3, 4])].copy()
+    if po.empty:
+        return pd.DataFrame(columns=["__pr_detail_key", "PO Qty Linked", "PO Documents", "PO Statuses"])
+
+    po["__po_qty"] = _api_numeric(po, ["item_quantity", "quantity", "item_qty"], 0.0).clip(lower=0)
+    po["__po_number"] = _api_clean_key(_api_first_series(po, ["transaction_number", "po_transaction_number", "number"], ""))
+    po["__po_status_text"] = _api_first_series(po, ["status_description", "Status", "status"], "").fillna("").astype(str)
+
+    # deduplicate one current API row per PO detail before sum
+    po_detail_key = _api_clean_key(_api_first_series(po, ["item_id", "po_detail_id", "item_po_detail_id"], ""))
+    po["__po_detail_key"] = po_detail_key
+    has_key = po["__po_detail_key"].ne("")
+    keyed = po.loc[has_key].drop_duplicates("__po_detail_key", keep="last")
+    unkeyed = po.loc[~has_key]
+    po = pd.concat([keyed, unkeyed], ignore_index=True, sort=False)
+
+    agg = po.groupby("__pr_detail_key", dropna=False).agg(
+        **{
+            "PO Qty Linked": ("__po_qty", "sum"),
+            "PO Documents": ("__po_number", lambda x: " | ".join(dict.fromkeys(v for v in x if v))),
+            "PO Statuses": ("__po_status_text", lambda x: " | ".join(dict.fromkeys(str(v).strip() for v in x if str(v).strip()))),
+        }
+    ).reset_index()
+    return agg
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_sales_orders_api_for_pricing(end_date_val) -> pd.DataFrame:
+    """Ambil SO detail untuk lookup harga PR Balance.
+
+    Correctness lebih penting daripada current-status SO. Pricing SO hanya dipakai sebagai
+    lookup berdasarkan relasi PR -> SO, sehingga SO lama tetap harus tersedia.
+    """
+    frames = []
+
+    # Primary: horizon lebar. PR 2026 dapat berasal dari SO tahun sebelumnya.
+    for start_candidate in [date(2024, 1, 1), None]:
+        try:
+            df = get_api_data_new(
+                "sales-orders",
+                source="erp",
+                start_date=start_candidate,
+                end_date=end_date_val if start_candidate is not None else None,
+            )
+        except Exception:
+            df = pd.DataFrame()
+
+        if df is not None and not df.empty:
+            frames.append(df)
+            # Bila broad dated fetch berhasil, tidak perlu all-time fallback.
+            if start_candidate is not None:
+                break
+
+    if not frames:
+        return pd.DataFrame()
+
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
+def _normalize_match_text(series: pd.Series) -> pd.Series:
+    return (
+        series.fillna("")
+        .astype(str)
+        .str.strip()
+        .str.casefold()
+        .str.replace(r"\s+", " ", regex=True)
+    )
+
+
+def _build_sales_order_pricing_maps_api(so_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """Siapkan beberapa key lookup agar API tidak bergantung pada satu bentuk ID saja.
+
+    Urutan kekuatan key:
+      1) SO detail ID
+      2) SO number + product identifier
+      3) SO number + normalized item name (hanya bila unik)
+    """
+    if so_df is None or so_df.empty:
+        return {"detail": pd.DataFrame(), "so_product": pd.DataFrame(), "so_name": pd.DataFrame()}
+
+    so = so_df.copy()
+    so["__so_detail_key"] = _api_clean_key(_api_first_series(so, [
+        "item_id", "so_detail_id", "item_so_detail_id", "item_sales_order_detail_id"
+    ], ""))
+    so["__so_number_key"] = _api_clean_key(_api_first_series(so, [
+        "transaction_number", "so_transaction_number", "number"
+    ], ""))
+    so["__so_product_key"] = _api_clean_key(_api_first_series(so, [
+        "item_product_id", "item_product_code", "product_id", "product_code"
+    ], ""))
+    so["__so_name_key"] = _normalize_match_text(_api_first_series(so, [
+        "item_item_name", "item_name", "name", "product_name"
+    ], ""))
+
+    so["__so_price"] = _api_numeric(so, [
+        "item_price", "price", "item_sell_price", "item_selling_price", "selling_price"
+    ], float("nan"))
+    so["__so_discount"] = _api_numeric(so, [
+        "item_discount", "discount", "discount_percentage"
+    ], 0.0)
+    so["__so_tax1_percentage"] = _api_numeric(so, [
+        "item_tax1_percentage", "item_tax1_val", "tax1_percentage", "tax1_val", "tax1_value"
+    ], 0.0)
+    so["__so_tax2_percentage"] = _api_numeric(so, [
+        "item_tax2_percentage", "item_tax2_val", "tax2_percentage", "tax2_val", "tax2_value"
+    ], 0.0)
+
+    cols = ["__so_price", "__so_discount", "__so_tax1_percentage", "__so_tax2_percentage"]
+    valid = so[so["__so_price"].notna()].copy()
+
+    detail = valid[valid["__so_detail_key"].ne("")][["__so_detail_key"] + cols].drop_duplicates(
+        "__so_detail_key", keep="last"
+    )
+
+    sp = valid[valid["__so_number_key"].ne("") & valid["__so_product_key"].ne("")].copy()
+    if not sp.empty:
+        sp["__cnt"] = sp.groupby(["__so_number_key", "__so_product_key"])["__so_price"].transform("size")
+        sp = sp[sp["__cnt"].eq(1)][["__so_number_key", "__so_product_key"] + cols].drop_duplicates(
+            ["__so_number_key", "__so_product_key"], keep="last"
+        )
+        sp = sp.rename(columns={"__so_product_key": "__pr_product_key"})
+
+    sn = valid[valid["__so_number_key"].ne("") & valid["__so_name_key"].ne("")].copy()
+    if not sn.empty:
+        sn["__cnt"] = sn.groupby(["__so_number_key", "__so_name_key"])["__so_price"].transform("size")
+        sn = sn[sn["__cnt"].eq(1)][["__so_number_key", "__so_name_key"] + cols].drop_duplicates(
+            ["__so_number_key", "__so_name_key"], keep="last"
+        )
+
+    return {"detail": detail, "so_product": sp, "so_name": sn}
+
+
+def _attach_so_pricing_api(work: pd.DataFrame, pr_df: pd.DataFrame, end_date_val) -> pd.DataFrame:
+    """Resolve authoritative SO pricing tanpa pernah fallback ke harga PR.
+
+    Fungsi ini sengaja memakai beberapa key karena payload API antar endpoint dapat memakai
+    internal ID, external product code, atau tidak expose SO detail ID pada sebagian row.
+    """
+    out = work.copy()
+    idx = out.index
+
+    # Canonical lookup keys on PR rows.
+    out["__so_detail_key"] = _api_clean_key(_api_first_series(out, [
+        "__so_detail_key", "item_so_detail_id", "so_detail_id", "item_sales_order_detail_id"
+    ], ""))
+    out["__so_number_key"] = _api_clean_key(_api_first_series(out, [
+        "No. SO", "item_so_transaction_number", "so_transaction_number", "item_sales_order_number"
+    ], ""))
+    out["__pr_product_key"] = _api_clean_key(_api_first_series(out, [
+        "item_product_id", "item_product_code", "product_id", "product_code"
+    ], ""))
+    out["__pr_name_key"] = _normalize_match_text(_api_first_series(out, [
+        "item_item_name", "item_name", "Nama Barang"
+    ], ""))
+
+    # Direct SO fields carried by purchase-requests are strongest when present.
+    out["__so_price"] = _api_numeric(out, [
+        "item_so_price", "item_so_detail_price", "item_sales_order_price",
+        "item_sales_order_detail_price", "item_sell_price", "item_selling_price", "so_price"
+    ], float("nan"))
+    out["__so_discount"] = _api_numeric(out, [
+        "item_so_discount", "item_so_detail_discount", "item_sales_order_discount", "so_discount"
+    ], float("nan"))
+    out["__so_tax1_percentage"] = _api_numeric(out, [
+        "item_so_tax1_percentage", "item_so_tax1_val", "item_sales_order_tax1_percentage", "so_tax1_percentage"
+    ], float("nan"))
+    out["__so_tax2_percentage"] = _api_numeric(out, [
+        "item_so_tax2_percentage", "item_so_tax2_val", "item_sales_order_tax2_percentage", "so_tax2_percentage"
+    ], float("nan"))
+    out["SO Price Match Method"] = pd.Series("", index=out.index, dtype="object")
+    direct_mask = out["__so_price"].notna()
+    out.loc[direct_mask, "SO Price Match Method"] = "PURCHASE_REQUEST_DIRECT_SO_FIELD"
+
+    so = _load_sales_orders_api_for_pricing(end_date_val)
+    maps = _build_sales_order_pricing_maps_api(so)
+    price_cols = ["__so_price", "__so_discount", "__so_tax1_percentage", "__so_tax2_percentage"]
+
+    def fill_from_map(frame: pd.DataFrame, keys: list[str], method: str):
+        nonlocal out
+        if frame is None or frame.empty:
+            return
+        unresolved = out["__so_price"].isna()
+        if not unresolved.any():
+            return
+        left = out.loc[unresolved, keys].copy()
+        left["__orig_index"] = left.index
+        merged = left.merge(frame, how="left", on=keys, suffixes=("", "__lookup"))
+        merged = merged.set_index("__orig_index")
+        lookup_price = pd.to_numeric(merged.get("__so_price"), errors="coerce")
+        hit = lookup_price.notna()
+        if not hit.any():
+            return
+        hit_idx = lookup_price.index[hit]
+        for c in price_cols:
+            vals = pd.to_numeric(merged.loc[hit_idx, c], errors="coerce") if c in merged.columns else pd.Series(index=hit_idx, dtype="float64")
+            out.loc[hit_idx, c] = vals
+        out.loc[hit_idx, "SO Price Match Method"] = method
+
+    fill_from_map(maps.get("detail"), ["__so_detail_key"], "SO_DETAIL_ID")
+    fill_from_map(maps.get("so_product"), ["__so_number_key", "__pr_product_key"], "SO_NUMBER_PRODUCT")
+
+    # Rename product key for the right-side map before fallback merge.
+    sn = maps.get("so_name")
+    if sn is not None and not sn.empty:
+        sn = sn.rename(columns={"__so_name_key": "__pr_name_key"})
+    fill_from_map(sn, ["__so_number_key", "__pr_name_key"], "SO_NUMBER_ITEM_NAME")
+
+    out["SO Price Found"] = pd.to_numeric(out["__so_price"], errors="coerce").notna()
+    out.loc[~out["SO Price Found"], "SO Price Match Method"] = "UNRESOLVED"
+    return out
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_pr_balance_historical_api(end_date_val) -> pd.DataFrame:
+    """
+    Historical / AS-OF PR Balance berbasis ERP API.
+
+    Disamakan dengan file PostgreSQL:
+      - grain PR detail dari /api/purchase-requests;
+      - PR sejak 1-Jan-2026 sampai end_date;
+      - status PR = status pada cutoff (nested history bila tersedia, fallback milestone);
+      - PO qty = cumulative PO detail sampai cutoff, status 1/2/3/4;
+      - closed qty current hanya berlaku bila detail update <= cutoff;
+      - outstanding = PR qty - PO qty as-of - closed qty as-of;
+      - hanya outstanding > 0 dan PR terhubung SO;
+      - nominal = outstanding x net selling price SO (price-discount+Tax1+Tax2);
+      - TIDAK menggunakan /dashboard/pr-balance sebagai angka final.
+    """
+    cutoff = pd.Timestamp(end_date_val).date()
+    cutoff_next = pd.Timestamp(cutoff).normalize() + pd.Timedelta(days=1)
+
+    pr = get_api_data_new(
+        "purchase-requests",
+        source="erp",
+        start_date=PR_BALANCE_START_DATE,
+        end_date=cutoff,
+    )
+    if pr is None or pr.empty:
+        return pd.DataFrame(columns=[
+            "No. PR", "transaction_number", "transaction_date", "Status", "PIC Procurement",
+            "No. SO", "PR Qty", "PO Qty", "Qty Closed", "Balance Qty", "Balance Type", "Nominal"
+        ])
+
+    work = pr.copy()
+    work["transaction_number"] = _api_clean_key(_api_first_series(work, ["transaction_number"], ""))
+    work["transaction_date"] = pd.to_datetime(_api_first_series(work, ["transaction_date", "date", "created_at"], pd.NaT), errors="coerce")
+    work = work[
+        work["transaction_number"].ne("")
+        & work["transaction_date"].notna()
+        & work["transaction_date"].ge(pd.Timestamp(PR_BALANCE_START_DATE))
+        & work["transaction_date"].lt(cutoff_next)
+    ].copy()
+
+    # one row per PR detail
+    work["__pr_detail_key"] = _api_clean_key(_api_first_series(work, ["item_id", "item_pr_detail_id", "pr_detail_id"], ""))
+    fallback = (
+        work["transaction_number"] + "|"
+        + _api_clean_key(_api_first_series(work, ["item_product_id", "item_product_code"], "")) + "|"
+        + _api_clean_key(_api_first_series(work, ["item_item_name", "item_name"], "")).str.lower() + "|"
+        + _api_numeric(work, ["item_quantity", "quantity"], 0.0).astype(str)
+    )
+    work["__row_key"] = work["__pr_detail_key"].where(work["__pr_detail_key"].ne(""), fallback)
+    work = work.drop_duplicates("__row_key", keep="last").copy()
+
+    # Status historical as-of cutoff.
+    status_map = _build_pr_status_asof_api(pr, cutoff)
+    work["__pr_number"] = work["transaction_number"]
+    work = work.merge(status_map, how="left", on="__pr_number")
+    current_status = _api_first_series(work, ["status", "status_description", "Status"], "").map(_normalize_pr_status_for_balance)
+    work["Status"] = work.get("Status As Of", pd.Series("", index=work.index)).fillna("")
+    work.loc[work["Status"].eq(""), "Status"] = current_status.loc[work["Status"].eq("")]
+
+    # Parity rule dengan PostgreSQL: untuk cutoff hari ini, current header/API status
+    # adalah authoritative. Ini memastikan Complete/Close/Draft benar-benar keluar.
+    if cutoff >= date.today():
+        work["Status"] = current_status
+        work["Status As Of"] = current_status
+        work["Status Code As Of"] = current_status.map(_status_code_from_label)
+        work["Status As Of Source"] = "CURRENT_STATUS_AT_CURRENT_CUTOFF"
+    else:
+        # Historical existence guard.
+        # transaction_date dapat dibackdate. Jangan masukkan PR ke snapshot lama bila bukti workflow
+        # pertama (history endpoint atau milestone aktual) baru terjadi setelah cutoff.
+        cutoff_ts = pd.Timestamp(cutoff).normalize() + pd.Timedelta(days=1)
+        first_hist = pd.to_datetime(work.get("First History Timestamp", pd.Series(pd.NaT, index=work.index)), errors="coerce")
+
+        workflow_candidates = []
+        for candidate in [
+            "created_at", "date_draft", "date_need_approve", "need_approve_at", "date_need_approved",
+            "date_approved", "approved_at", "approved_date",
+            "date_inprogress", "date_in_progress", "inprogress_at", "in_progress_at",
+            "date_complete", "date_completed", "completed_at", "complete_at",
+        ]:
+            if candidate in work.columns:
+                workflow_candidates.append(pd.to_datetime(work[candidate], errors="coerce"))
+
+        first_workflow = first_hist.copy()
+        if workflow_candidates:
+            workflow_frame = pd.concat(workflow_candidates, axis=1)
+            milestone_first = workflow_frame.min(axis=1)
+            first_workflow = pd.concat([first_hist.rename("history"), milestone_first.rename("milestone")], axis=1).min(axis=1)
+
+        work["First Workflow Timestamp"] = first_workflow
+        history_state = work.get("History Endpoint State", pd.Series("", index=work.index)).fillna("").astype(str)
+        proven_after = history_state.eq("HISTORY_AFTER_CUTOFF_ONLY") | (
+            first_workflow.notna() & first_workflow.ge(cutoff_ts)
+        )
+        work["Historical Existence Check"] = "EXISTS_BY_CUTOFF"
+        work.loc[proven_after, "Historical Existence Check"] = "NOT_YET_EXISTING_AT_CUTOFF"
+        work = work.loc[~proven_after].copy()
+
+    work = work[work["Status"].isin(["Need Approve", "Approved", "In Progress"])].copy()
+
+    # Parity dengan PostgreSQL INNER JOIN x4_sales_order_detail:
+    # PR Balance WAJIB memiliki SO Detail ID yang valid; nomor SO saja tidak cukup.
+    work["__so_detail_key"] = _api_clean_key(_api_first_series(work, [
+        "item_so_detail_id", "so_detail_id", "item_sales_order_detail_id"
+    ], ""))
+    work["No. SO"] = _api_clean_key(_api_first_series(work, [
+        "item_so_transaction_number", "so_transaction_number", "item_sales_order_number"
+    ], ""))
+    work = work.loc[work["__so_detail_key"].ne("")].copy()
+
+    # Cumulative PO until cutoff; do NOT use current item_po_quantity as historical truth.
+    po = _load_purchase_orders_until_api(cutoff)
+    po_map = _build_po_qty_by_pr_detail_api(po, cutoff)
+    if not po_map.empty:
+        work = work.merge(po_map, how="left", on="__pr_detail_key")
+    else:
+        work["PO Qty Linked"] = 0.0
+        work["PO Documents"] = ""
+        work["PO Statuses"] = ""
+
+    work["PO Qty Linked"] = pd.to_numeric(work.get("PO Qty Linked", 0), errors="coerce").fillna(0.0).clip(lower=0)
+
+    pr_qty = _api_numeric(work, ["item_quantity", "quantity"], 0.0).clip(lower=0)
+
+    # Historical closed qty fallback = same idea as repaired PostgreSQL file.
+    closed_current = _api_numeric(work, [
+        "item_closed_quantity", "item_closed_qty", "item_close_quantity", "item_qty_closed",
+        "closed_quantity", "close_quantity",
+    ], 0.0).clip(lower=0)
+    detail_updated = pd.to_datetime(_api_first_series(work, [
+        "item_updated_at", "item_modified_at", "item_last_updated_at", "item_created_at"
+    ], pd.NaT), errors="coerce")
+
+    has_detail_timestamp = detail_updated.notna()
+    closed_asof = pd.Series(0.0, index=work.index)
+    closed_asof.loc[has_detail_timestamp & detail_updated.lt(cutoff_next)] = closed_current.loc[
+        has_detail_timestamp & detail_updated.lt(cutoff_next)
+    ]
+    # Untuk cutoff hari ini/masa kini, bila API tidak expose detail timestamp, current value aman dipakai.
+    if cutoff >= date.today():
+        closed_asof.loc[~has_detail_timestamp] = closed_current.loc[~has_detail_timestamp]
+
+    balance_qty = (pr_qty - work["PO Qty Linked"] - closed_asof).clip(lower=0)
+    outstanding = pr_qty.gt(0) & balance_qty.gt(0)
+    work = work.loc[outstanding].copy()
+    pr_qty = pr_qty.loc[work.index]
+    closed_asof = closed_asof.loc[work.index]
+    balance_qty = balance_qty.loc[work.index]
+
+    # SO pricing authoritative; no fallback ke harga PR. Resolve dengan beberapa key API.
+    work = _attach_so_pricing_api(work, pr, cutoff)
+
+    price = pd.to_numeric(work.get("__so_price"), errors="coerce")
+    discount = pd.to_numeric(work.get("__so_discount", 0), errors="coerce").fillna(0.0)
+    tax1 = pd.to_numeric(work.get("__so_tax1_percentage", 0), errors="coerce").fillna(0.0)
+    tax2 = pd.to_numeric(work.get("__so_tax2_percentage", 0), errors="coerce").fillna(0.0)
+
+    price_found = price.notna()
+    # Tetap 0 untuk kalkulasi unresolved agar app tidak crash, tetapi row ditandai jelas
+    # dan diagnostic di UI memperingatkan bahwa nominal belum parity.
+    price = price.fillna(0.0)
+    base = price * (1 - discount / 100.0)
+    net_unit = base + (base * tax1 / 100.0) + (base * tax2 / 100.0)
+    nominal = balance_qty * net_unit
+
+    work["No. PR"] = work["transaction_number"]
+    work["Tgl. PR"] = work["transaction_date"]
+    work["PR Qty"] = pr_qty
+    work["Qty Permintaan (PR)"] = pr_qty
+    work["PO Qty"] = work["PO Qty Linked"]
+    work["Effective PO Qty"] = work["PO Qty Linked"]
+    work["Qty Sudah PO"] = work["PO Qty Linked"]
+    work["Qty Closed"] = closed_asof
+    work["Balance Qty"] = balance_qty
+    work["Qty Outstanding"] = balance_qty
+    work["Balance Type"] = "NO PO"
+    work.loc[work["PO Qty Linked"].gt(0), "Balance Type"] = "PARTIAL PO"
+    work["Unit Price"] = price
+    work["Harga Jual"] = price
+    work["Net Unit Price"] = net_unit
+    work["Nominal"] = nominal
+    work["SO Price Found"] = price_found
+    work["Price Source"] = work.get("SO Price Match Method", pd.Series("UNRESOLVED", index=work.index))
+    work["SO Base Price"] = price
+    work["SO Discount %"] = discount
+    work["SO Tax1 %"] = tax1
+    work["SO Tax2 %"] = tax2
+    work["PR Balance Start Date"] = pd.Timestamp(PR_BALANCE_START_DATE)
+    work["PR Balance End Date"] = pd.Timestamp(cutoff)
+    work["PR Balance Snapshot Date"] = pd.Timestamp(cutoff)
+    work["PR Balance Source"] = "API purchase-requests + PR history endpoint + purchase-orders + sales-orders AS-OF"
+
+    work["PIC Procurement"] = _api_first_series(work, [
+        "item_pic_procurement_name", "pic_procurement_name", "PIC Procurement"
+    ], "").fillna("").astype(str).str.strip()
+    work["Nama Barang"] = _api_first_series(work, ["item_item_name", "item_name", "Nama Barang"], "")
+    work["ID Produk"] = _api_first_series(work, ["item_product_id", "item_product_code", "ID Produk"], "")
+    work["Product ID"] = work["ID Produk"]
+    work["Item Name"] = work["Nama Barang"]
+    work["SO Number"] = work["No. SO"]
+    work["No. PO"] = work.get("PO Documents", pd.Series("", index=work.index)).fillna("")
+    work["PO Quantity Source"] = "PURCHASE_ORDERS_API_AS_OF"
+    work["Closed Quantity Source"] = "PR_DETAIL_CURRENT_IF_UPDATED_BEFORE_CUTOFF"
+
+    # Current status kept only for forensic comparison, never for historical membership.
+    work["Current Status"] = current_status.reindex(work.index)
+
+    return work.drop(columns=["__row_key", "__pr_number"], errors="ignore").reset_index(drop=True)
 
 
 def load_all_data_new(start_date=None, end_date=None) -> dict[str, pd.DataFrame]:
@@ -585,6 +1587,7 @@ def load_full_npr_from_api(start_date=None, end_date=None) -> pd.DataFrame:
                 source="erp",
                 start_date=start_date,
                 end_date=end_date,
+                silent=True,
             )
         except Exception:
             continue
@@ -1437,7 +2440,7 @@ def render_sla_trend(df: pd.DataFrame, threshold: int = 5, date_col: str = "tran
 
 def main():
     st.title("SIBIMA Performance Dashboard - PROCUREMENT")
-    st.caption("Data source: ERP API / Dashboard API only — tanpa PostgreSQL. PR internal excluded; Close excluded dari PR Balance.")
+    st.caption("Data source: ERP API only — tanpa PostgreSQL. PR Balance direkonstruksi historical/as-of dari purchase-requests + purchase-orders + sales-orders; PR internal excluded.")
 
     # ---------- TOP FILTERS ----------
     today = date.today()
@@ -1468,7 +2471,11 @@ def main():
         start_date, end_date = default_start, today
 
     with st.spinner("Mengambil data dashboard..."):
+        # Outstanding lain tetap memakai dashboard API existing.
         data_old = load_all_data()
+        # PR Balance TIDAK lagi memakai /dashboard/pr-balance sebagai angka final.
+        # Ia direkonstruksi historical/as-of dari ERP API agar parity dengan PostgreSQL.
+        data_old["pr"] = load_pr_balance_historical_api(end_date)
         data_new = load_all_data_new(start_date=start_date, end_date=end_date)
 
     # ---------- ASSIGN DATAFRAME ----------
@@ -1481,7 +2488,8 @@ def main():
     # Exclude format internal/non-production dan current Status Close
     # sebelum seluruh metric/chart/download PR Balance dihitung.
     df_pr = exclude_pr_numbers(df_pr, "No. PR")
-    df_pr = exclude_close_from_pr_balance(df_pr)
+    # Jangan exclude berdasarkan CURRENT Status Close. Membership PR Balance sudah
+    # ditentukan oleh Status As-Of cutoff di load_pr_balance_historical_api().
 
     df_po = data_old["po"]
     df_grn = data_old["grn"]
@@ -1676,6 +2684,76 @@ def main():
     top_pic_pr = get_top_pic(df_pr_f, "PIC Procurement", "No. PR")
     top_pic_do = get_top_pic(df_do_f, "PIC Procurement", "No. DO")
     #top_pic_pur = get_top_pic(df_pur_f, "PIC", "No. PUR")
+
+    # =========================================================
+    # PR BALANCE API PARITY DIAGNOSTIC
+    # =========================================================
+    with st.expander("🧪 Diagnostic PR Balance API Historical", expanded=False):
+        if df_pr_f.empty:
+            st.info("PR Balance kosong pada cutoff ini.")
+        else:
+            so_found = df_pr_f.get("SO Price Found", pd.Series(False, index=df_pr_f.index)).fillna(False).astype(bool)
+            resolved_rows = int(so_found.sum())
+            unresolved_rows = int((~so_found).sum())
+            resolved_nominal = float(pd.to_numeric(df_pr_f.loc[so_found, "Nominal"], errors="coerce").fillna(0).sum()) if resolved_rows else 0.0
+            unresolved_balance_qty = float(pd.to_numeric(df_pr_f.loc[~so_found, "Balance Qty"], errors="coerce").fillna(0).sum()) if unresolved_rows else 0.0
+
+            q1, q2, q3, q4 = st.columns(4)
+            q1.metric("PR Balance Items", f"{len(df_pr_f):,}")
+            q2.metric("SO Price Resolved", f"{resolved_rows:,}")
+            q3.metric("SO Price Unresolved", f"{unresolved_rows:,}")
+            q4.metric("Resolved Nominal", f"Rp {resolved_nominal:,.0f}".replace(",", "."))
+
+            if unresolved_rows > 0:
+                st.error(
+                    f"Ada {unresolved_rows:,} item PR Balance yang belum berhasil menemukan harga SO. "
+                    "Nominal card belum dapat dianggap parity dengan PostgreSQL sampai angka ini = 0."
+                )
+                unresolved = df_pr_f.loc[~so_found].copy()
+                cols = [c for c in [
+                    "No. PR", "Tgl. PR", "No. SO", "__so_detail_key", "ID Produk", "Nama Barang",
+                    "PR Qty", "PO Qty", "Qty Closed", "Balance Qty", "Status",
+                    "SO Price Match Method", "Current Status", "Status As Of", "Status As Of Source"
+                ] if c in unresolved.columns]
+                st.caption(f"Total Balance Qty pada item unresolved: {unresolved_balance_qty:,.2f}")
+                st.dataframe(unresolved[cols].head(500), use_container_width=True, hide_index=True)
+
+            if "SO Price Match Method" in df_pr_f.columns:
+                match_summary = (
+                    df_pr_f.groupby("SO Price Match Method", dropna=False)
+                    .agg(
+                        Items=("No. PR", "size"),
+                        PR_Documents=("No. PR", "nunique"),
+                        Nominal=("Nominal", "sum"),
+                    )
+                    .reset_index()
+                    .sort_values("Items", ascending=False)
+                )
+                st.markdown("**SO pricing resolution method**")
+                st.dataframe(match_summary, use_container_width=True, hide_index=True)
+
+            membership_diag = pd.DataFrame([{
+                "Report End": report_end_date,
+                "PR Balance Documents": safe_unique_count(df_pr_f, "No. PR"),
+                "PR Balance Items": len(df_pr_f),
+                "PR Balance Nominal": float(total_pr_unpr),
+                "SO Price Resolved Items": resolved_rows,
+                "SO Price Unresolved Items": unresolved_rows,
+                "NO PO Items": int((df_pr_f.get("Balance Type", pd.Series(index=df_pr_f.index, dtype="object")) == "NO PO").sum()),
+                "PARTIAL PO Items": int((df_pr_f.get("Balance Type", pd.Series(index=df_pr_f.index, dtype="object")) == "PARTIAL PO").sum()),
+            }])
+            st.download_button(
+                "⬇️ Download Diagnostic PR Balance API.xlsx",
+                data=(lambda: (
+                    (lambda out: (
+                        (lambda writer: None)(None), out
+                    ))(BytesIO())
+                ))() if False else to_excel_bytes(df_pr_f, sheet_name="PR_BALANCE_ROWS"),
+                file_name=f"Diagnostic_PR_Balance_API_{pd.Timestamp(report_end_date).strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_pr_balance_api_diag",
+                use_container_width=True,
+            )
 
     # ---------- LAYOUT ----------
     col_kiri, col_tengah, col_kanan = st.columns([1, 1, 1], gap="small")
