@@ -1347,6 +1347,335 @@ def _normalize_match_text(series: pd.Series) -> pd.Series:
     )
 
 
+def _exclude_pr_balance_non_item_rows_api(df: pd.DataFrame) -> pd.DataFrame:
+    """Exclude baris yang secara bisnis tidak boleh masuk PR Balance.
+
+    Rule eksplisit yang disepakati:
+    - JASA / BIAYA PENGIRIMAN tidak termasuk PR Balance;
+    - baris lain tetap harus lolos rule linkage SO Detail pada builder utama.
+
+    Pencocokan dibuat toleran terhadap spasi dan tanda slash agar variasi penulisan
+    tidak menyebabkan baris jasa pengiriman lolos tanpa sengaja.
+    """
+    if df is None or df.empty:
+        return df.copy() if df is not None else pd.DataFrame()
+
+    out = df.copy()
+    name = _api_first_series(out, ["item_item_name", "item_name", "Nama Barang"], "")
+    norm = (
+        name.fillna("")
+        .astype(str)
+        .str.upper()
+        .str.replace(r"[^A-Z0-9]+", " ", regex=True)
+        .str.replace(r"\s+", " ", regex=True)
+        .str.strip()
+    )
+    excluded = norm.str.contains(r"\bJASA\s+BIAYA\s+PENGIRIMAN\b", regex=True, na=False)
+    return out.loc[~excluded].copy()
+
+
+def _flatten_sales_order_payload_api(payload) -> pd.DataFrame:
+    """Flatten response satu / beberapa Sales Order menjadi grain SO detail.
+
+    Dibuat toleran terhadap beberapa bentuk payload ERP:
+    - data=list
+    - data={data:[...]}
+    - data={items:[...]}
+    - data={details:[...]}
+    - data={sales_order_details:[...]}
+    - nested payload satu level lebih dalam.
+    """
+    if payload is None:
+        return pd.DataFrame()
+
+    def _extract_orders(obj):
+        if isinstance(obj, list):
+            return obj
+
+        if not isinstance(obj, dict):
+            return []
+
+        data = obj.get("data", obj)
+
+        if isinstance(data, list):
+            return data
+
+        if isinstance(data, dict):
+            if isinstance(data.get("data"), list):
+                return data.get("data", [])
+
+            direct_detail_keys = (
+                "items", "details", "sales_order_details",
+                "salesOrderDetails", "order_details",
+            )
+            if any(k in data for k in direct_detail_keys):
+                return [data]
+
+            for k in ("sales_order", "salesOrder", "order", "result"):
+                nested = data.get(k)
+                if isinstance(nested, dict):
+                    return [nested]
+                if isinstance(nested, list):
+                    return nested
+
+            return [data]
+
+        return []
+
+    orders = _extract_orders(payload)
+    rows = []
+
+    for order in orders:
+        if not isinstance(order, dict):
+            continue
+
+        items = None
+        for detail_key in (
+            "items",
+            "details",
+            "sales_order_details",
+            "salesOrderDetails",
+            "order_details",
+        ):
+            candidate = order.get(detail_key)
+            if candidate is not None:
+                items = candidate
+                break
+
+        if isinstance(items, dict):
+            for k in ("data", "items", "details"):
+                if isinstance(items.get(k), list):
+                    items = items.get(k)
+                    break
+
+        if isinstance(items, list) and items:
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                flat = {**order, **{f"item_{k}": v for k, v in item.items()}}
+                for k in (
+                    "items", "details", "sales_order_details",
+                    "salesOrderDetails", "order_details",
+                ):
+                    flat.pop(k, None)
+                rows.append(flat)
+        else:
+            clean = order.copy()
+            for k in (
+                "items", "details", "sales_order_details",
+                "salesOrderDetails", "order_details",
+            ):
+                clean.pop(k, None)
+            rows.append(clean)
+
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_sales_order_by_id_api(so_id) -> pd.DataFrame:
+    """Fetch satu SO secara langsung berdasarkan header ID.
+
+    Ini penting untuk historical PR Balance: PR Februari dapat membawa referensi
+    SO yang tidak ikut dated bulk fetch sampai cutoff Februari. Pricing tetap harus
+    mengikuti SO Detail yang direferensikan PR tersebut.
+    """
+    key = _api_clean_key(pd.Series([so_id])).iloc[0]
+    if not key:
+        return pd.DataFrame()
+
+    url = f"{BASE_URL['erp']}sales-orders/{key}"
+    params = {"token": API_TOKEN} if API_TOKEN else {}
+    try:
+        session = create_session()
+        response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        return _flatten_sales_order_payload_api(response.json())
+    except Exception as exc:
+        logger.info("Direct SO fetch gagal untuk id=%s: %s", key, exc)
+        return pd.DataFrame()
+
+
+
+def _frame_has_so_detail_api(df: pd.DataFrame, target_detail_id) -> bool:
+    """True bila dataframe SO benar-benar memuat SO Detail ID yang diminta."""
+    if df is None or df.empty:
+        return False
+
+    target = _api_clean_key(pd.Series([target_detail_id])).iloc[0]
+    if not target:
+        return False
+
+    detail = _api_clean_key(_api_first_series(
+        df,
+        ["item_id", "so_detail_id", "item_so_detail_id", "item_sales_order_detail_id"],
+        "",
+    ))
+    return bool(detail.eq(target).any())
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_sales_order_targeted_api(so_id="", so_number="", so_detail_id="") -> pd.DataFrame:
+    """Targeted SO fetch untuk pricing historical tanpa date cutoff."""
+    so_id_key = _api_clean_key(pd.Series([so_id])).iloc[0]
+    so_no_key = str(so_number or "").strip()
+    detail_key = _api_clean_key(pd.Series([so_detail_id])).iloc[0]
+
+    session = create_session()
+    base = f"{BASE_URL['erp']}sales-orders"
+    attempts = []
+
+    if so_id_key:
+        attempts.append((f"{base}/{so_id_key}", {}))
+
+    if so_no_key:
+        attempts.extend([
+            (base, {"transaction_number": so_no_key}),
+            (base, {"number": so_no_key}),
+            (base, {"search": so_no_key}),
+        ])
+
+    if detail_key:
+        attempts.extend([
+            (base, {"so_detail_id": detail_key}),
+            (base, {"detail_id": detail_key}),
+        ])
+
+    for url, extra_params in attempts:
+        params = dict(extra_params)
+        if API_TOKEN:
+            params["token"] = API_TOKEN
+
+        try:
+            response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            frame = _flatten_sales_order_payload_api(response.json())
+
+            if _frame_has_so_detail_api(frame, detail_key):
+                return frame
+
+        except Exception as exc:
+            logger.info(
+                "Targeted SO fetch gagal url=%s params=%s target_detail=%s: %s",
+                url,
+                extra_params,
+                detail_key,
+                exc,
+            )
+
+    return pd.DataFrame()
+
+
+def _load_targeted_sales_orders_for_unresolved_api(rows: pd.DataFrame) -> pd.DataFrame:
+    """Fetch targeted SO hanya untuk kombinasi SO/detail yang masih unresolved."""
+    if rows is None or rows.empty:
+        return pd.DataFrame()
+
+    tmp = rows.copy()
+    tmp["__target_so_id"] = _api_clean_key(_api_first_series(
+        tmp, ["item_so_id", "so_id", "sales_order_id", "item_sales_order_id"], ""
+    ))
+    tmp["__target_so_number"] = _api_clean_key(_api_first_series(
+        tmp, ["No. SO", "item_so_transaction_number", "so_transaction_number", "item_sales_order_number"], ""
+    ))
+    tmp["__target_so_detail"] = _api_clean_key(_api_first_series(
+        tmp, ["__so_detail_key", "item_so_detail_id", "so_detail_id", "item_sales_order_detail_id"], ""
+    ))
+
+    targets = (
+        tmp[["__target_so_id", "__target_so_number", "__target_so_detail"]]
+        .drop_duplicates()
+    )
+    targets = targets[targets["__target_so_detail"].ne("")]
+
+    if targets.empty:
+        return pd.DataFrame()
+
+    frames = []
+    max_workers = min(8, max(1, len(targets)))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {}
+        for _, row in targets.iterrows():
+            future = executor.submit(
+                _fetch_sales_order_targeted_api,
+                row["__target_so_id"],
+                row["__target_so_number"],
+                row["__target_so_detail"],
+            )
+            futures[future] = (
+                row["__target_so_id"],
+                row["__target_so_number"],
+                row["__target_so_detail"],
+            )
+
+        for future in as_completed(futures):
+            try:
+                frame = future.result()
+            except Exception as exc:
+                logger.info("Targeted unresolved SO fetch error target=%s: %s", futures[future], exc)
+                continue
+
+            if frame is not None and not frame.empty:
+                frames.append(frame)
+
+    if not frames:
+        return pd.DataFrame()
+
+    out = pd.concat(frames, ignore_index=True, sort=False)
+    detail = _api_clean_key(_api_first_series(
+        out,
+        ["item_id", "so_detail_id", "item_so_detail_id", "item_sales_order_detail_id"],
+        "",
+    ))
+    out["__target_detail_dedupe"] = detail
+
+    keyed = out[out["__target_detail_dedupe"].ne("")].drop_duplicates(
+        "__target_detail_dedupe", keep="last"
+    )
+    unkeyed = out[out["__target_detail_dedupe"].eq("")]
+
+    return pd.concat([keyed, unkeyed], ignore_index=True, sort=False).drop(
+        columns=["__target_detail_dedupe"], errors="ignore"
+    )
+
+
+def _load_referenced_sales_orders_api(rows: pd.DataFrame) -> pd.DataFrame:
+    """Fetch hanya SO header yang direferensikan row unresolved, paralel + cached."""
+    if rows is None or rows.empty:
+        return pd.DataFrame()
+
+    ids = _api_clean_key(_api_first_series(rows, [
+        "item_so_id", "so_id", "sales_order_id", "item_sales_order_id"
+    ], ""))
+    ids = sorted({v for v in ids.tolist() if v})
+    if not ids:
+        return pd.DataFrame()
+
+    frames = []
+    max_workers = min(8, len(ids))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_fetch_sales_order_by_id_api, so_id): so_id for so_id in ids}
+        for future in as_completed(futures):
+            try:
+                frame = future.result()
+            except Exception as exc:
+                logger.info("Referenced SO fetch error id=%s: %s", futures[future], exc)
+                continue
+            if frame is not None and not frame.empty:
+                frames.append(frame)
+
+    return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_sales_orders_api_all_time_fallback() -> pd.DataFrame:
+    """Last-resort pricing fallback bila endpoint detail-by-ID tidak tersedia."""
+    return get_api_data_new(
+        "sales-orders", source="erp", start_date=None, end_date=None,
+        silent=True, per_page=200, max_pages=500,
+    )
+
+
 def _build_sales_order_pricing_maps_api(so_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     """Siapkan beberapa key lookup agar API tidak bergantung pada satu bentuk ID saja.
 
@@ -1423,6 +1752,9 @@ def _attach_so_pricing_api(work: pd.DataFrame, pr_df: pd.DataFrame, end_date_val
     out["__so_detail_key"] = _api_clean_key(_api_first_series(out, [
         "__so_detail_key", "item_so_detail_id", "so_detail_id", "item_sales_order_detail_id"
     ], ""))
+    out["__so_id_key"] = _api_clean_key(_api_first_series(out, [
+        "item_so_id", "so_id", "sales_order_id", "item_sales_order_id"
+    ], ""))
     out["__so_number_key"] = _api_clean_key(_api_first_series(out, [
         "No. SO", "item_so_transaction_number", "so_transaction_number", "item_sales_order_number"
     ], ""))
@@ -1485,9 +1817,119 @@ def _attach_so_pricing_api(work: pd.DataFrame, pr_df: pd.DataFrame, end_date_val
         sn = sn.rename(columns={"__so_name_key": "__pr_name_key"})
     fill_from_map(sn, ["__so_number_key", "__pr_name_key"], "SO_NUMBER_ITEM_NAME")
 
+    # Direct fetch hanya untuk memperkuat pricing row yang SUDAH lolos
+    # historical SO existence guard. Future SO relationship tidak boleh
+    # dipakai untuk membentuk historical membership.
+    unresolved = out["__so_price"].isna()
+    if unresolved.any():
+        referenced_so = _load_referenced_sales_orders_api(out.loc[unresolved].copy())
+        if referenced_so is not None and not referenced_so.empty:
+            direct_maps = _build_sales_order_pricing_maps_api(referenced_so)
+            fill_from_map(direct_maps.get("detail"), ["__so_detail_key"], "SO_DETAIL_ID_DIRECT_FETCH")
+            fill_from_map(direct_maps.get("so_product"), ["__so_number_key", "__pr_product_key"], "SO_NUMBER_PRODUCT_DIRECT_FETCH")
+            direct_name = direct_maps.get("so_name")
+            if direct_name is not None and not direct_name.empty:
+                direct_name = direct_name.rename(columns={"__so_name_key": "__pr_name_key"})
+            fill_from_map(direct_name, ["__so_number_key", "__pr_name_key"], "SO_NUMBER_ITEM_NAME_DIRECT_FETCH")
+
+    # Targeted unresolved fetch hanya sebagai pricing recovery untuk row yang
+    # sudah terbukti SO Detail-nya eksis pada cutoff. Ini tidak boleh menambah
+    # future-SO row kembali ke historical membership.
+    unresolved = out["__so_price"].isna()
+    if unresolved.any():
+        targeted_so = _load_targeted_sales_orders_for_unresolved_api(
+            out.loc[unresolved].copy()
+        )
+        if targeted_so is not None and not targeted_so.empty:
+            targeted_maps = _build_sales_order_pricing_maps_api(targeted_so)
+
+            fill_from_map(
+                targeted_maps.get("detail"),
+                ["__so_detail_key"],
+                "SO_DETAIL_ID_TARGETED_NO_CUTOFF",
+            )
+            fill_from_map(
+                targeted_maps.get("so_product"),
+                ["__so_number_key", "__pr_product_key"],
+                "SO_NUMBER_PRODUCT_TARGETED_NO_CUTOFF",
+            )
+
+            targeted_name = targeted_maps.get("so_name")
+            if targeted_name is not None and not targeted_name.empty:
+                targeted_name = targeted_name.rename(
+                    columns={"__so_name_key": "__pr_name_key"}
+                )
+
+            fill_from_map(
+                targeted_name,
+                ["__so_number_key", "__pr_name_key"],
+                "SO_NUMBER_ITEM_NAME_TARGETED_NO_CUTOFF",
+            )
+
+    # Last resort hanya bila masih unresolved. Tidak dijalankan pada normal path.
+    unresolved = out["__so_price"].isna()
+    if unresolved.any():
+        all_time_so = _load_sales_orders_api_all_time_fallback()
+        if all_time_so is not None and not all_time_so.empty:
+            all_maps = _build_sales_order_pricing_maps_api(all_time_so)
+            fill_from_map(all_maps.get("detail"), ["__so_detail_key"], "SO_DETAIL_ID_ALL_TIME_FALLBACK")
+            fill_from_map(all_maps.get("so_product"), ["__so_number_key", "__pr_product_key"], "SO_NUMBER_PRODUCT_ALL_TIME_FALLBACK")
+            all_name = all_maps.get("so_name")
+            if all_name is not None and not all_name.empty:
+                all_name = all_name.rename(columns={"__so_name_key": "__pr_name_key"})
+            fill_from_map(all_name, ["__so_number_key", "__pr_name_key"], "SO_NUMBER_ITEM_NAME_ALL_TIME_FALLBACK")
+
     out["SO Price Found"] = pd.to_numeric(out["__so_price"], errors="coerce").notna()
     out.loc[~out["SO Price Found"], "SO Price Match Method"] = "UNRESOLVED"
     return out
+
+
+def _filter_pr_rows_by_so_asof_api(work: pd.DataFrame, cutoff) -> pd.DataFrame:
+    """
+    Historical relation guard PR Detail -> SO Detail.
+
+    Business rule:
+    - Pada historical cutoff, PR detail hanya dianggap "terhubung ke SO"
+      bila SO Detail yang direferensikan sudah eksis pada/before cutoff.
+    - Current relation ke SO yang baru dibuat setelah cutoff tidak boleh
+      berlaku mundur ke snapshot lama.
+    - Pricing tetap berasal dari SO Detail yang sama setelah row lolos guard.
+
+    Contoh:
+      PR April sekarang menunjuk ke SO Mei.
+      Snapshot 30-Apr -> relation SO tersebut belum eksis -> row keluar.
+    """
+    if work is None or work.empty:
+        return work.copy() if work is not None else pd.DataFrame()
+
+    out = work.copy()
+
+    if "__so_detail_key" not in out.columns:
+        out["__so_detail_key"] = _api_clean_key(_api_first_series(
+            out,
+            ["item_so_detail_id", "so_detail_id", "item_sales_order_detail_id"],
+            "",
+        ))
+
+    # Source-of-truth existence: sales-orders yang memang sudah ada <= cutoff.
+    so_asof = _load_sales_orders_api_for_pricing(cutoff)
+    if so_asof is None or so_asof.empty:
+        out["Historical SO Exists By Cutoff"] = False
+        out["Historical SO Cutoff"] = pd.Timestamp(cutoff)
+        return out.iloc[0:0].copy()
+
+    so_keys = _api_clean_key(_api_first_series(
+        so_asof,
+        ["item_id", "so_detail_id", "item_so_detail_id", "item_sales_order_detail_id"],
+        "",
+    ))
+    valid_so_details = set(v for v in so_keys.tolist() if v)
+
+    out["Historical SO Exists By Cutoff"] = out["__so_detail_key"].isin(valid_so_details)
+    out["Historical SO Cutoff"] = pd.Timestamp(cutoff)
+
+    return out.loc[out["Historical SO Exists By Cutoff"]].copy()
+
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_pr_balance_historical_api(
@@ -1564,6 +2006,20 @@ def load_pr_balance_historical_api(
         "item_so_transaction_number", "so_transaction_number", "item_sales_order_number"
     ], ""))
     work = work.loc[work["__so_detail_key"].ne("")].copy()
+
+    # Historical SO relation AS-OF:
+    # current PR detail dapat menunjuk ke SO yang baru terbentuk setelah cutoff.
+    # Row seperti itu belum dianggap terhubung SO pada snapshot historis.
+    work = _filter_pr_rows_by_so_asof_api(work, cutoff)
+    if work.empty:
+        return pd.DataFrame(columns=[
+            "No. PR", "transaction_number", "transaction_date", "Status", "PIC Procurement",
+            "No. SO", "PR Qty", "PO Qty", "Qty Closed", "Balance Qty", "Balance Type", "Nominal"
+        ])
+
+    # Business exclusion: JASA / BIAYA PENGIRIMAN tidak termasuk PR Balance
+    # walaupun mempunyai referensi SO Detail.
+    work = _exclude_pr_balance_non_item_rows_api(work)
 
     # Status historical/current AS-OF cutoff. Hanya dokumen candidate yang dipanggil ke history.
     candidate_pr_numbers = tuple(sorted(work["transaction_number"].dropna().astype(str).unique().tolist()))
@@ -1691,7 +2147,7 @@ def load_pr_balance_historical_api(
     work["PR Balance Start Date"] = pd.Timestamp(PR_BALANCE_START_DATE)
     work["PR Balance End Date"] = pd.Timestamp(cutoff)
     work["PR Balance Snapshot Date"] = pd.Timestamp(cutoff)
-    work["PR Balance Source"] = "API purchase-requests + PR history endpoint + purchase-orders + sales-orders AS-OF"
+    work["PR Balance Source"] = "API PR/Status/PO + historical SO relationship AS-OF + SO pricing"
 
     work["PIC Procurement"] = _api_first_series(work, [
         "item_pic_procurement_name", "pic_procurement_name", "PIC Procurement"
