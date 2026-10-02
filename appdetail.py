@@ -1000,16 +1000,24 @@ def _load_pr_history_status_map_api(transaction_numbers: tuple, cutoff) -> pd.Da
     )
 
 
-def _build_pr_status_asof_api(pr_df: pd.DataFrame, cutoff) -> pd.DataFrame:
+def _build_pr_status_asof_api(
+    pr_df: pd.DataFrame,
+    cutoff,
+    transaction_numbers=None,
+) -> pd.DataFrame:
     """Resolve status PR exactly AS-OF the selected cutoff.
 
-    Business rule:
-    - Historical cutoff: latest history status whose timestamp is <= cutoff is authoritative.
-      A Complete/Close that happens later must NOT be applied backwards.
-    - Current/today cutoff: current state must win. Because the purchase-requests payload can
-      expose a stale status_description, combine current payload, latest history, and milestones.
-      Terminal evidence (Complete/Close) overrides a stale Approved/In Progress description.
-    - Nested history and milestone dates are fallbacks when the history endpoint is incomplete.
+    Performance-safe parity rules:
+    - Hanya PR candidate yang memang masih relevan untuk PR Balance yang dipanggil ke
+      endpoint history. Caller dapat mengirim ``transaction_numbers`` agar PR tanpa SO,
+      PR internal, dan row yang pasti tidak akan masuk balance tidak menambah request.
+    - Historical cutoff: latest history status <= cutoff tetap authoritative.
+    - Current/today cutoff: current payload dipakai sebagai baseline. History hanya
+      dipanggil untuk dokumen non-terminal yang masih perlu verifikasi stale status.
+      Complete/Close current tidak perlu request history karena keduanya pasti keluar.
+    - Complete milestone tetap dapat mengalahkan status_description yang stale.
+
+    Business logic status TIDAK berubah; yang berubah hanya jumlah request HTTP.
     """
     if pr_df is None or pr_df.empty:
         return pd.DataFrame(columns=[
@@ -1019,19 +1027,22 @@ def _build_pr_status_asof_api(pr_df: pd.DataFrame, cutoff) -> pd.DataFrame:
         ])
 
     cutoff_date = pd.Timestamp(cutoff).date()
-    cutoff_ts = pd.Timestamp(cutoff_date).normalize() + pd.Timedelta(days=1)
     is_current_cutoff = cutoff_date >= date.today()
 
     docs = pr_df.copy()
     docs["__pr_number"] = _api_clean_key(_api_first_series(docs, ["transaction_number"], ""))
     docs = docs[docs["__pr_number"].ne("")].drop_duplicates("__pr_number", keep="last")
 
-    # Always request history, including for today's cutoff. This is essential when the
-    # purchase-requests status_description is stale while the workflow has already completed.
-    pr_numbers = tuple(sorted(docs["__pr_number"].dropna().astype(str).unique().tolist()))
-    history_endpoint = _load_pr_history_status_map_api(pr_numbers, cutoff_date)
-    nested = _extract_nested_pr_status_asof(pr_df, cutoff_date)
-    inferred = _infer_pr_status_asof_from_milestones(pr_df, cutoff_date)
+    if transaction_numbers is not None:
+        wanted = {str(v).strip() for v in transaction_numbers if str(v).strip()}
+        docs = docs[docs["__pr_number"].isin(wanted)].copy()
+
+    if docs.empty:
+        return pd.DataFrame(columns=[
+            "__pr_number", "Status As Of", "Status Code As Of",
+            "Status As Of Timestamp", "Status As Of Source",
+            "History Endpoint State", "First History Timestamp",
+        ])
 
     current_status = _api_first_series(
         docs, ["status", "status_description", "Status"], ""
@@ -1046,6 +1057,35 @@ def _build_pr_status_asof_api(pr_df: pd.DataFrame, cutoff) -> pd.DataFrame:
         "__current_code": current_status.map(_status_code_from_label),
         "__current_ts": current_at,
     })
+
+    # Milestone/nested data adalah local payload processing (murah, tanpa HTTP tambahan).
+    nested = _extract_nested_pr_status_asof(docs, cutoff_date)
+    inferred = _infer_pr_status_asof_from_milestones(docs, cutoff_date)
+
+    # History endpoint adalah bagian paling mahal. Untuk current cutoff, current Complete/Close
+    # sudah pasti keluar dari PR Balance sehingga tidak perlu diverifikasi lagi. Selain itu,
+    # bila date_complete sudah ada, milestone sendiri sudah cukup membuktikan Complete.
+    history_docs = docs.copy()
+    if is_current_cutoff:
+        complete_milestone = pd.to_datetime(
+            _api_first_series(history_docs, ["date_complete", "date_completed", "completed_at", "complete_at"], pd.NaT),
+            errors="coerce",
+        ).notna()
+        current_for_history = _api_first_series(
+            history_docs, ["status", "status_description", "Status"], ""
+        ).map(_normalize_pr_status_for_balance)
+        need_history = ~current_for_history.isin(["Complete", "Close"]) & ~complete_milestone
+        history_docs = history_docs.loc[need_history].copy()
+
+    history_numbers = tuple(sorted(history_docs["__pr_number"].dropna().astype(str).unique().tolist()))
+    if history_numbers:
+        history_endpoint = _load_pr_history_status_map_api(history_numbers, cutoff_date)
+    else:
+        history_endpoint = pd.DataFrame(columns=[
+            "__pr_number", "Status As Of", "Status Code As Of",
+            "Status As Of Timestamp", "Status As Of Source",
+            "History Endpoint State", "First History Timestamp",
+        ])
 
     base = docs[["__pr_number"]].copy()
     base = base.merge(history_endpoint, how="left", on="__pr_number")
@@ -1187,7 +1227,7 @@ def _build_pr_status_asof_api(pr_df: pd.DataFrame, cutoff) -> pd.DataFrame:
     ] if c in base.columns]].copy()
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def _load_purchase_orders_until_api(end_date_val) -> pd.DataFrame:
     """PO detail kumulatif 1-Jan-2026 s/d cutoff untuk mengurangi PR Balance."""
     return get_api_data_new(
@@ -1265,7 +1305,7 @@ def _build_po_qty_by_pr_detail_api(po_df: pd.DataFrame, cutoff) -> pd.DataFrame:
     return agg
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def _load_sales_orders_api_for_pricing(end_date_val) -> pd.DataFrame:
     """Ambil seluruh SO detail untuk lookup harga PR Balance.
 
@@ -1450,7 +1490,11 @@ def _attach_so_pricing_api(work: pd.DataFrame, pr_df: pd.DataFrame, end_date_val
     return out
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_pr_balance_historical_api(end_date_val) -> pd.DataFrame:
+def load_pr_balance_historical_api(
+    end_date_val,
+    pr_df: pd.DataFrame | None = None,
+    po_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """
     Historical / AS-OF PR Balance berbasis ERP API.
 
@@ -1468,7 +1512,9 @@ def load_pr_balance_historical_api(end_date_val) -> pd.DataFrame:
     cutoff = pd.Timestamp(end_date_val).date()
     cutoff_next = pd.Timestamp(cutoff).normalize() + pd.Timedelta(days=1)
 
-    pr = get_api_data_new(
+    # Reuse purchase-requests yang sudah di-fetch oleh main() bila tersedia.
+    # Ini menghilangkan fetch kedua untuk dataset yang sama.
+    pr = pr_df.copy() if pr_df is not None else get_api_data_new(
         "purchase-requests",
         source="erp",
         start_date=PR_BALANCE_START_DATE,
@@ -1490,6 +1536,14 @@ def load_pr_balance_historical_api(end_date_val) -> pd.DataFrame:
         & work["transaction_date"].lt(cutoff_next)
     ].copy()
 
+    # Exclude internal/non-production PR SEBELUM history dipanggil.
+    # Output bisnis sama dengan exclude_pr_numbers() di main, tetapi request history berkurang.
+    number_upper = work["transaction_number"].str.upper()
+    work = work.loc[
+        ~number_upper.str.startswith(("SIBIMA.PR.", "SIBPRGA"), na=False)
+        & ~number_upper.eq("#N/A")
+    ].copy()
+
     # one row per PR detail
     work["__pr_detail_key"] = _api_clean_key(_api_first_series(work, ["item_id", "item_pr_detail_id", "pr_detail_id"], ""))
     fallback = (
@@ -1501,8 +1555,19 @@ def load_pr_balance_historical_api(end_date_val) -> pd.DataFrame:
     work["__row_key"] = work["__pr_detail_key"].where(work["__pr_detail_key"].ne(""), fallback)
     work = work.drop_duplicates("__row_key", keep="last").copy()
 
-    # Status historical as-of cutoff.
-    status_map = _build_pr_status_asof_api(pr, cutoff)
+    # PR Balance wajib terhubung ke SO Detail. Filter ini dilakukan SEBELUM history
+    # agar PR tanpa SO tidak menghasilkan request history yang sia-sia.
+    work["__so_detail_key"] = _api_clean_key(_api_first_series(work, [
+        "item_so_detail_id", "so_detail_id", "item_sales_order_detail_id"
+    ], ""))
+    work["No. SO"] = _api_clean_key(_api_first_series(work, [
+        "item_so_transaction_number", "so_transaction_number", "item_sales_order_number"
+    ], ""))
+    work = work.loc[work["__so_detail_key"].ne("")].copy()
+
+    # Status historical/current AS-OF cutoff. Hanya dokumen candidate yang dipanggil ke history.
+    candidate_pr_numbers = tuple(sorted(work["transaction_number"].dropna().astype(str).unique().tolist()))
+    status_map = _build_pr_status_asof_api(pr, cutoff, transaction_numbers=candidate_pr_numbers)
     work["__pr_number"] = work["transaction_number"]
     work = work.merge(status_map, how="left", on="__pr_number")
     current_status = _api_first_series(work, ["status", "status_description", "Status"], "").map(_normalize_pr_status_for_balance)
@@ -1546,18 +1611,8 @@ def load_pr_balance_historical_api(end_date_val) -> pd.DataFrame:
 
     work = work[work["Status"].isin(["Need Approve", "Approved", "In Progress"])].copy()
 
-    # Parity dengan PostgreSQL INNER JOIN x4_sales_order_detail:
-    # PR Balance WAJIB memiliki SO Detail ID yang valid; nomor SO saja tidak cukup.
-    work["__so_detail_key"] = _api_clean_key(_api_first_series(work, [
-        "item_so_detail_id", "so_detail_id", "item_sales_order_detail_id"
-    ], ""))
-    work["No. SO"] = _api_clean_key(_api_first_series(work, [
-        "item_so_transaction_number", "so_transaction_number", "item_sales_order_number"
-    ], ""))
-    work = work.loc[work["__so_detail_key"].ne("")].copy()
-
     # Cumulative PO until cutoff; do NOT use current item_po_quantity as historical truth.
-    po = _load_purchase_orders_until_api(cutoff)
+    po = po_df.copy() if po_df is not None else _load_purchase_orders_until_api(cutoff)
     po_map = _build_po_qty_by_pr_detail_api(po, cutoff)
     if not po_map.empty:
         work = work.merge(po_map, how="left", on="__pr_detail_key")
@@ -2635,45 +2690,88 @@ def main():
         start_date, end_date = default_start, today
 
     with st.spinner("Mengambil data dashboard..."):
-        # Outstanding lain tetap memakai dashboard API existing.
-        data_old = load_all_data()
-        # PR Balance TIDAK lagi memakai /dashboard/pr-balance sebagai angka final.
-        # Ia direkonstruksi historical/as-of dari ERP API agar parity dengan PostgreSQL.
-        data_old["pr"] = load_pr_balance_historical_api(end_date)
-        data_new = load_all_data_new(start_date=start_date, end_date=end_date)
+        # =========================================================
+        # LAZY LOAD BY DOCUMENT TYPE
+        # =========================================================
+        # Hanya endpoint yang dibutuhkan oleh jenis dokumen aktif yang dipanggil.
+        # Business calculation tidak berubah; ini hanya menghapus request yang sebelumnya
+        # selalu dijalankan walaupun user sedang melihat dokumen lain.
+        # Skeleton columns menjaga transform existing tetap aman walaupun source lain
+        # sengaja tidak di-fetch pada document type yang sedang aktif.
+        df_pr = pd.DataFrame(columns=[
+            "Nominal", "No. PR", "Status", "PIC Procurement", "transaction_date"
+        ])
+        df_po = pd.DataFrame(columns=["Nominal", "transaction_date"])
+        df_grn = pd.DataFrame(columns=["Nominal", "transaction_date"])
+        df_do = pd.DataFrame(columns=[
+            "Nominal", "No. DO", "Status", "PIC Procurement", "PIC Purchasing", "transaction_date"
+        ])
+        df_npr = pd.DataFrame(columns=[
+            "No. Transaksi", "Status", "Sales", "transaction_date"
+        ])
+        df_pr_final = pd.DataFrame(columns=[
+            "transaction_number", "transaction_date", "Status", "PIC Procurement",
+            "item_price", "item_discount", "item_quantity",
+            "item_tax1_percentage", "item_tax2_percentage"
+        ])
+        df_do_final = pd.DataFrame(columns=[
+            "transaction_number", "transaction_date", "Status", "PIC Procurement",
+            "item_price", "item_discount", "item_quantity",
+            "item_tax1_percentage", "item_tax2_percentage"
+        ])
 
-    # ---------- ASSIGN DATAFRAME ----------
-    df_pr = data_old["pr"]
+        if selected_doc_type == "PR":
+            # Purchase Requests diambil SATU KALI dari 1-Jan-2026 s/d cutoff lalu direuse:
+            # - PR Balance memakai seluruh horizon kumulatif
+            # - Total PR memakai realization filter start_date..end_date di bawah
+            pr_all = get_api_data_new(
+                "purchase-requests",
+                source="erp",
+                start_date=PR_BALANCE_START_DATE,
+                end_date=end_date,
+            )
+            df_pr = load_pr_balance_historical_api(
+                end_date,
+                pr_df=pr_all,
+            )
+            df_pr_final = pr_all.copy()
 
-    # =====================================================
-    # API-ONLY PR BALANCE CLEANING
-    # =====================================================
-    # pr-balance endpoint memakai kolom "No. PR".
-    # Exclude format internal/non-production dan current Status Close
-    # sebelum seluruh metric/chart/download PR Balance dihitung.
-    df_pr = exclude_pr_numbers(df_pr, "No. PR")
-    # Jangan exclude berdasarkan CURRENT Status Close. Membership PR Balance sudah
-    # ditentukan oleh Status As-Of cutoff di load_pr_balance_historical_api().
+        elif selected_doc_type == "DO":
+            # DO balance + DO transaction saja. Tidak fetch PR/PO/SO/NPR.
+            df_do = get_api_data_old(
+                "do-balance",
+                source="outstanding",
+                start_date=None,
+                end_date=end_date,
+            )
+            if not df_do.empty:
+                df_do = df_do.rename(columns={"Tgl. DO": "transaction_date"})
+                df_do = safe_to_datetime(df_do, "transaction_date")
 
-    df_po = data_old["po"]
-    df_grn = data_old["grn"]
-    df_do = data_old["do"]
-    # Full NPR module from ERP API; outstanding-npr is not used.
-    df_npr = load_full_npr_from_api(start_date=start_date, end_date=end_date)
-    #df_pur = data_old["pur"]
+            df_do_final = get_api_data_new(
+                "delivery-orders",
+                source="erp",
+                start_date=start_date,
+                end_date=end_date,
+            )
 
-    df_pr_final = data_new["pr"]
+        elif selected_doc_type == "NPR":
+            # Full NPR saja.
+            df_npr = load_full_npr_from_api(
+                start_date=start_date,
+                end_date=end_date,
+            )
 
-    # =====================================================
-    # API-ONLY TOTAL PR CLEANING
-    # =====================================================
-    # purchase-requests endpoint memakai "transaction_number".
-    # Close TETAP masuk Total PR; yang di-exclude hanya nomor PR internal/non-production.
-    df_pr_final = exclude_pr_numbers(df_pr_final, "transaction_number")
+        else:
+            # PUR belum memiliki source aktif pada script existing.
+            pass
 
-    df_do_final = data_new["do"]
-    #df_npr_final = data_new["npr"]
+    # ---------- ASSIGN / CLEAN DATAFRAME ----------
+    if selected_doc_type == "PR":
+        df_pr = exclude_pr_numbers(df_pr, "No. PR")
+        df_pr_final = exclude_pr_numbers(df_pr_final, "transaction_number")
 
+    # Untuk NPR, data sudah di-load di lazy-load block; jangan fetch kedua kali.
     # Pastikan kolom PIC dan Status sesuai
     #PR
     df_pr_final = df_pr_final.rename(columns={
