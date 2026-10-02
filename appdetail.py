@@ -437,86 +437,169 @@ def get_api_data_new(
     start_date=None,
     end_date=None,
     silent: bool = False,
+    per_page: int = 200,
+    max_pages: int = 500,
 ):
+    """Fetch ERP API dengan pagination penuh dan flatten item detail.
+
+    Perbaikan penting:
+    - tidak lagi berhenti di page pertama;
+    - aman bila endpoint mengabaikan parameter page (signature guard);
+    - menerima payload data=list maupun data={data:[...], current_page, last_page};
+    - satu output row per item/detail;
+    - dipakai oleh purchase-requests, purchase-orders, delivery-orders, sales-orders.
+    """
     base_url = BASE_URL.get(source, BASE_URL["erp"])
     url = f"{base_url}{endpoint}"
 
-    params = {
-        "date_start": start_date,
-        "date_end": end_date,
-        "token": API_TOKEN,
-    }
+    session = create_session()
+    all_rows = []
+    previous_signature = None
+
+    def _extract_page(payload, requested_page):
+        rows = []
+        current_page = requested_page
+        last_page = None
+
+        if not isinstance(payload, dict):
+            return rows, current_page, last_page
+
+        data_layer = payload.get("data", [])
+        meta_candidates = []
+
+        if isinstance(data_layer, dict):
+            nested = data_layer.get("data", [])
+            if isinstance(nested, list):
+                rows = nested
+            elif isinstance(data_layer.get("items"), list):
+                rows = data_layer.get("items", [])
+            meta_candidates.append(data_layer)
+        elif isinstance(data_layer, list):
+            rows = data_layer
+
+        for key in ("meta", "pagination", "paginate"):
+            obj = payload.get(key)
+            if isinstance(obj, dict):
+                meta_candidates.append(obj)
+        meta_candidates.append(payload)
+
+        for meta in meta_candidates:
+            if not isinstance(meta, dict):
+                continue
+            if current_page == requested_page:
+                current_page = (
+                    meta.get("current_page")
+                    or meta.get("page")
+                    or meta.get("currentPage")
+                    or current_page
+                )
+            if last_page is None:
+                last_page = (
+                    meta.get("last_page")
+                    or meta.get("total_pages")
+                    or meta.get("lastPage")
+                    or meta.get("page_count")
+                )
+
+        return rows if isinstance(rows, list) else [], current_page, last_page
 
     try:
-        session = create_session()
-        response = session.get(
-            url,
-            params=params,
-            timeout=REQUEST_TIMEOUT,
-        )
+        for page in range(1, max_pages + 1):
+            params = {
+                "date_start": start_date,
+                "date_end": end_date,
+                "token": API_TOKEN,
+                "page": page,
+                "per_page": per_page,
+            }
+            # Buang None agar API tidak menerima string/null yang tidak perlu.
+            params = {k: v for k, v in params.items() if v is not None and v != ""}
 
-        response.raise_for_status()
-        payload = response.json()
+            logger.info(
+                "Fetching endpoint=%s source=%s page=%s params=%s",
+                endpoint, source, page,
+                {k: v for k, v in params.items() if k != "token"},
+            )
 
-        rows = payload.get("data", [])
+            response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            payload = response.json()
 
-        if isinstance(rows, list):
-            all_rows = []
+            rows, current_page, last_page = _extract_page(payload, page)
+            if not rows:
+                break
+
+            # Guard bila backend mengabaikan ?page= dan selalu mengembalikan page yang sama.
+            signature = "|".join(
+                str(
+                    (r.get("id") if isinstance(r, dict) else "")
+                    or (r.get("transaction_number") if isinstance(r, dict) else "")
+                    or ""
+                )
+                for r in rows[:25]
+            )
+            if page > 1 and signature and signature == previous_signature:
+                logger.warning(
+                    "Endpoint %s mengembalikan page identik pada page=%s; stop untuk mencegah duplikasi.",
+                    endpoint, page,
+                )
+                break
+            previous_signature = signature
 
             for row in rows:
-                items = row.get("items", [])
+                if not isinstance(row, dict):
+                    continue
 
-                if items:
+                items = row.get("items", [])
+                if isinstance(items, dict):
+                    items = items.get("data", [])
+
+                if isinstance(items, list) and items:
                     for item in items:
+                        if not isinstance(item, dict):
+                            continue
                         flat = {
                             **row,
-                            **{
-                                f"item_{k}": v
-                                for k, v in item.items()
-                            },
+                            **{f"item_{k}": v for k, v in item.items()},
                         }
+                        # Hindari menyimpan nested list besar pada setiap detail row.
+                        flat.pop("items", None)
                         all_rows.append(flat)
                 else:
-                    all_rows.append(row)
+                    flat = row.copy()
+                    flat.pop("items", None)
+                    all_rows.append(flat)
 
-            df = pd.DataFrame(all_rows)
-            df = safe_to_datetime(df, "transaction_date")
+            try:
+                if last_page is not None and int(current_page) >= int(last_page):
+                    break
+            except Exception:
+                pass
 
-            return df
+        if not all_rows:
+            return pd.DataFrame()
 
-        return pd.DataFrame()
+        df = pd.DataFrame(all_rows)
+        df = safe_to_datetime(df, "transaction_date")
+        return df
 
     except requests.exceptions.HTTPError as e:
-        # Tidak tampilkan ke dashboard jika silent=True
         logger.warning(
             "HTTP error endpoint=%s source=%s status=%s",
             endpoint,
             source,
             getattr(e.response, "status_code", "-"),
         )
-
         if not silent:
-            st.warning(
-                f"Gagal mengambil data dari endpoint "
-                f"{endpoint} ({source})."
-            )
-
+            st.warning(f"Gagal mengambil data dari endpoint {endpoint} ({source}).")
         return pd.DataFrame()
 
-    except Exception as e:
-        logger.exception(
-            "Gagal mengambil endpoint=%s source=%s",
-            endpoint,
-            source,
-        )
-
+    except Exception:
+        logger.exception("Gagal mengambil endpoint=%s source=%s", endpoint, source)
         if not silent:
-            st.warning(
-                f"Gagal mengambil data dari endpoint "
-                f"{endpoint} ({source})."
-            )
-
+            st.warning(f"Gagal mengambil data dari endpoint {endpoint} ({source}).")
         return pd.DataFrame()
+
 
 
 def load_all_data(start_date=None, end_date=None) -> dict[str, pd.DataFrame]:
@@ -918,52 +1001,55 @@ def _load_pr_history_status_map_api(transaction_numbers: tuple, cutoff) -> pd.Da
 
 
 def _build_pr_status_asof_api(pr_df: pd.DataFrame, cutoff) -> pd.DataFrame:
-    """Resolve status PR pada cutoff.
+    """Resolve status PR exactly AS-OF the selected cutoff.
 
-    Rule parity:
-    - cutoff hari ini: current status /purchase-requests authoritative;
-    - cutoff historis: endpoint /purchase-requests/history authoritative;
-    - nested history lalu milestone hanya fallback bila endpoint history tidak memberi row.
+    Business rule:
+    - Historical cutoff: latest history status whose timestamp is <= cutoff is authoritative.
+      A Complete/Close that happens later must NOT be applied backwards.
+    - Current/today cutoff: current state must win. Because the purchase-requests payload can
+      expose a stale status_description, combine current payload, latest history, and milestones.
+      Terminal evidence (Complete/Close) overrides a stale Approved/In Progress description.
+    - Nested history and milestone dates are fallbacks when the history endpoint is incomplete.
     """
     if pr_df is None or pr_df.empty:
         return pd.DataFrame(columns=[
             "__pr_number", "Status As Of", "Status Code As Of",
             "Status As Of Timestamp", "Status As Of Source",
+            "History Endpoint State", "First History Timestamp",
         ])
 
     cutoff_date = pd.Timestamp(cutoff).date()
+    cutoff_ts = pd.Timestamp(cutoff_date).normalize() + pd.Timedelta(days=1)
+    is_current_cutoff = cutoff_date >= date.today()
 
     docs = pr_df.copy()
     docs["__pr_number"] = _api_clean_key(_api_first_series(docs, ["transaction_number"], ""))
     docs = docs[docs["__pr_number"].ne("")].drop_duplicates("__pr_number", keep="last")
 
-    # 1) Current cutoff: pakai current header status dari purchase-requests.
-    if cutoff_date >= date.today():
-        current_status = _api_first_series(
-            docs, ["status", "status_description", "Status"], ""
-        ).map(_normalize_pr_status_for_balance)
-        current_at = pd.to_datetime(
-            _api_first_series(docs, ["updated_at", "modified_at", "created_at", "transaction_date"], pd.NaT),
-            errors="coerce",
-        )
-        return pd.DataFrame({
-            "__pr_number": docs["__pr_number"],
-            "Status As Of": current_status,
-            "Status Code As Of": current_status.map(_status_code_from_label),
-            "Status As Of Timestamp": current_at,
-            "Status As Of Source": "CURRENT_STATUS_AT_CURRENT_CUTOFF",
-        }).reset_index(drop=True)
-
-    # 2) Historical cutoff: endpoint history menjadi source-of-truth.
+    # Always request history, including for today's cutoff. This is essential when the
+    # purchase-requests status_description is stale while the workflow has already completed.
     pr_numbers = tuple(sorted(docs["__pr_number"].dropna().astype(str).unique().tolist()))
     history_endpoint = _load_pr_history_status_map_api(pr_numbers, cutoff_date)
-
-    # 3) Fallbacks hanya untuk PR yang history endpoint-nya kosong/gagal.
     nested = _extract_nested_pr_status_asof(pr_df, cutoff_date)
     inferred = _infer_pr_status_asof_from_milestones(pr_df, cutoff_date)
 
+    current_status = _api_first_series(
+        docs, ["status", "status_description", "Status"], ""
+    ).map(_normalize_pr_status_for_balance)
+    current_at = pd.to_datetime(
+        _api_first_series(docs, ["updated_at", "modified_at", "created_at", "transaction_date"], pd.NaT),
+        errors="coerce",
+    )
+    current_map = pd.DataFrame({
+        "__pr_number": docs["__pr_number"],
+        "__current_status": current_status,
+        "__current_code": current_status.map(_status_code_from_label),
+        "__current_ts": current_at,
+    })
+
     base = docs[["__pr_number"]].copy()
     base = base.merge(history_endpoint, how="left", on="__pr_number")
+    base = base.merge(current_map, how="left", on="__pr_number")
 
     if nested is not None and not nested.empty:
         n = nested.rename(columns={
@@ -971,7 +1057,10 @@ def _build_pr_status_asof_api(pr_df: pd.DataFrame, cutoff) -> pd.DataFrame:
             "Status Code As Of": "__nested_code",
             "Status As Of Timestamp": "__nested_ts",
         })
-        base = base.merge(n[[c for c in ["__pr_number", "__nested_status", "__nested_code", "__nested_ts"] if c in n.columns]], how="left", on="__pr_number")
+        base = base.merge(
+            n[[c for c in ["__pr_number", "__nested_status", "__nested_code", "__nested_ts"] if c in n.columns]],
+            how="left", on="__pr_number",
+        )
     else:
         base["__nested_status"] = pd.NA
         base["__nested_code"] = pd.NA
@@ -983,36 +1072,113 @@ def _build_pr_status_asof_api(pr_df: pd.DataFrame, cutoff) -> pd.DataFrame:
             "Status Code As Of": "__fallback_code",
             "Status As Of Timestamp": "__fallback_ts",
         })
-        base = base.merge(f[[c for c in ["__pr_number", "__fallback_status", "__fallback_code", "__fallback_ts"] if c in f.columns]], how="left", on="__pr_number")
+        base = base.merge(
+            f[[c for c in ["__pr_number", "__fallback_status", "__fallback_code", "__fallback_ts"] if c in f.columns]],
+            how="left", on="__pr_number",
+        )
     else:
         base["__fallback_status"] = pd.NA
         base["__fallback_code"] = pd.NA
         base["__fallback_ts"] = pd.NaT
 
-    endpoint_missing = base["Status As Of"].isna() | base["Status As Of"].fillna("").astype(str).str.strip().eq("")
-
-    # Bila endpoint history berhasil dan menunjukkan seluruh history baru terjadi SETELAH cutoff,
-    # jangan pernah fallback ke milestone/current-state. PR tersebut belum eksis pada snapshot.
     history_state = base.get("History Endpoint State", pd.Series("", index=base.index)).fillna("").astype(str)
     proven_not_existing = history_state.eq("HISTORY_AFTER_CUTOFF_ONLY")
 
-    nested_present = base["__nested_status"].notna() & base["__nested_status"].astype(str).str.strip().ne("")
-    use_nested = endpoint_missing & ~proven_not_existing & nested_present
-    base.loc[use_nested, "Status As Of"] = base.loc[use_nested, "__nested_status"]
-    base.loc[use_nested, "Status Code As Of"] = base.loc[use_nested, "__nested_code"]
-    base.loc[use_nested, "Status As Of Timestamp"] = base.loc[use_nested, "__nested_ts"]
-    base.loc[use_nested, "Status As Of Source"] = "NESTED_HISTORY_FALLBACK"
+    # Historical cutoff: history <= cutoff is source-of-truth. Only fallback when history
+    # endpoint did not provide a usable status. Never use today's status to rewrite history.
+    if not is_current_cutoff:
+        endpoint_missing = (
+            base["Status As Of"].isna()
+            | base["Status As Of"].fillna("").astype(str).str.strip().eq("")
+        )
 
-    still_missing = base["Status As Of"].isna() | base["Status As Of"].fillna("").astype(str).str.strip().eq("")
-    fallback_present = base["__fallback_status"].notna() & base["__fallback_status"].astype(str).str.strip().ne("")
-    use_fallback = still_missing & ~proven_not_existing & fallback_present
-    base.loc[use_fallback, "Status As Of"] = base.loc[use_fallback, "__fallback_status"]
-    base.loc[use_fallback, "Status Code As Of"] = base.loc[use_fallback, "__fallback_code"]
-    base.loc[use_fallback, "Status As Of Timestamp"] = base.loc[use_fallback, "__fallback_ts"]
-    base.loc[use_fallback, "Status As Of Source"] = "MILESTONE_FALLBACK"
+        nested_present = base["__nested_status"].notna() & base["__nested_status"].astype(str).str.strip().ne("")
+        use_nested = endpoint_missing & ~proven_not_existing & nested_present
+        base.loc[use_nested, "Status As Of"] = base.loc[use_nested, "__nested_status"]
+        base.loc[use_nested, "Status Code As Of"] = base.loc[use_nested, "__nested_code"]
+        base.loc[use_nested, "Status As Of Timestamp"] = base.loc[use_nested, "__nested_ts"]
+        base.loc[use_nested, "Status As Of Source"] = "NESTED_HISTORY_FALLBACK"
 
-    # Tandai secara eksplisit PR yang terbukti belum eksis pada cutoff.
-    base.loc[proven_not_existing, "Status As Of Source"] = "HISTORY_PROVES_NOT_EXISTING_AT_CUTOFF"
+        still_missing = (
+            base["Status As Of"].isna()
+            | base["Status As Of"].fillna("").astype(str).str.strip().eq("")
+        )
+        fallback_present = base["__fallback_status"].notna() & base["__fallback_status"].astype(str).str.strip().ne("")
+        use_fallback = still_missing & ~proven_not_existing & fallback_present
+        base.loc[use_fallback, "Status As Of"] = base.loc[use_fallback, "__fallback_status"]
+        base.loc[use_fallback, "Status Code As Of"] = base.loc[use_fallback, "__fallback_code"]
+        base.loc[use_fallback, "Status As Of Timestamp"] = base.loc[use_fallback, "__fallback_ts"]
+        base.loc[use_fallback, "Status As Of Source"] = "MILESTONE_FALLBACK"
+
+        # Last fallback only when no historical evidence is available at all.
+        still_missing = (
+            base["Status As Of"].isna()
+            | base["Status As Of"].fillna("").astype(str).str.strip().eq("")
+        )
+        use_current_fallback = still_missing & ~proven_not_existing & base["__current_status"].fillna("").astype(str).str.strip().ne("")
+        base.loc[use_current_fallback, "Status As Of"] = base.loc[use_current_fallback, "__current_status"]
+        base.loc[use_current_fallback, "Status Code As Of"] = base.loc[use_current_fallback, "__current_code"]
+        base.loc[use_current_fallback, "Status As Of Timestamp"] = base.loc[use_current_fallback, "__current_ts"]
+        base.loc[use_current_fallback, "Status As Of Source"] = "CURRENT_STATUS_LAST_RESORT_FALLBACK"
+
+        base.loc[proven_not_existing, "Status As Of"] = pd.NA
+        base.loc[proven_not_existing, "Status Code As Of"] = pd.NA
+        base.loc[proven_not_existing, "Status As Of Timestamp"] = pd.NaT
+        base.loc[proven_not_existing, "Status As Of Source"] = "HISTORY_PROVES_NOT_EXISTING_AT_CUTOFF"
+
+    else:
+        # Current cutoff: choose the best current-state evidence.
+        # Start from current payload status, then override stale values with stronger terminal
+        # evidence from latest history/milestone.
+        base["Status As Of"] = base["__current_status"]
+        base["Status Code As Of"] = base["__current_code"]
+        base["Status As Of Timestamp"] = base["__current_ts"]
+        base["Status As Of Source"] = "CURRENT_PURCHASE_REQUEST_STATUS"
+
+        history_status = base.get("Status As Of", pd.Series(index=base.index, dtype="object"))
+        # The merge above's history Status As Of was overwritten, so recover directly from
+        # history_endpoint through a lightweight map keyed by PR number.
+        hist_status_map = {}
+        hist_code_map = {}
+        hist_ts_map = {}
+        if history_endpoint is not None and not history_endpoint.empty:
+            hist_status_map = history_endpoint.set_index("__pr_number")["Status As Of"].to_dict()
+            hist_code_map = history_endpoint.set_index("__pr_number")["Status Code As Of"].to_dict()
+            hist_ts_map = history_endpoint.set_index("__pr_number")["Status As Of Timestamp"].to_dict()
+        hist_status = base["__pr_number"].map(hist_status_map).fillna("").astype(str).str.strip()
+        hist_code = base["__pr_number"].map(hist_code_map)
+        hist_ts = pd.to_datetime(base["__pr_number"].map(hist_ts_map), errors="coerce")
+
+        # Complete/Close are terminal for PR Balance membership and must override stale
+        # Approved/In Progress descriptions on today's snapshot.
+        hist_terminal = hist_status.isin(["Complete", "Close"])
+        base.loc[hist_terminal, "Status As Of"] = hist_status.loc[hist_terminal]
+        base.loc[hist_terminal, "Status Code As Of"] = hist_code.loc[hist_terminal]
+        base.loc[hist_terminal, "Status As Of Timestamp"] = hist_ts.loc[hist_terminal]
+        base.loc[hist_terminal, "Status As Of Source"] = "CURRENT_HISTORY_TERMINAL_STATUS"
+
+        # Milestone Complete is also strong evidence when history endpoint is incomplete.
+        fallback_status = base["__fallback_status"].fillna("").astype(str).str.strip()
+        fallback_complete = fallback_status.eq("Complete")
+        base.loc[fallback_complete, "Status As Of"] = "Complete"
+        base.loc[fallback_complete, "Status Code As Of"] = _status_code_from_label("Complete")
+        base.loc[fallback_complete, "Status As Of Timestamp"] = base.loc[fallback_complete, "__fallback_ts"]
+        base.loc[fallback_complete, "Status As Of Source"] = "CURRENT_COMPLETE_MILESTONE"
+
+        # If current payload is blank, use latest history, then inferred milestone status.
+        current_blank = base["Status As Of"].fillna("").astype(str).str.strip().eq("")
+        use_hist = current_blank & hist_status.ne("")
+        base.loc[use_hist, "Status As Of"] = hist_status.loc[use_hist]
+        base.loc[use_hist, "Status Code As Of"] = hist_code.loc[use_hist]
+        base.loc[use_hist, "Status As Of Timestamp"] = hist_ts.loc[use_hist]
+        base.loc[use_hist, "Status As Of Source"] = "CURRENT_HISTORY_FALLBACK"
+
+        still_blank = base["Status As Of"].fillna("").astype(str).str.strip().eq("")
+        use_inferred = still_blank & fallback_status.ne("")
+        base.loc[use_inferred, "Status As Of"] = fallback_status.loc[use_inferred]
+        base.loc[use_inferred, "Status Code As Of"] = base.loc[use_inferred, "__fallback_code"]
+        base.loc[use_inferred, "Status As Of Timestamp"] = base.loc[use_inferred, "__fallback_ts"]
+        base.loc[use_inferred, "Status As Of Source"] = "CURRENT_MILESTONE_FALLBACK"
 
     return base[[c for c in [
         "__pr_number", "Status As Of", "Status Code As Of",
@@ -1101,35 +1267,34 @@ def _build_po_qty_by_pr_detail_api(po_df: pd.DataFrame, cutoff) -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _load_sales_orders_api_for_pricing(end_date_val) -> pd.DataFrame:
-    """Ambil SO detail untuk lookup harga PR Balance.
+    """Ambil seluruh SO detail untuk lookup harga PR Balance.
 
-    Correctness lebih penting daripada current-status SO. Pricing SO hanya dipakai sebagai
-    lookup berdasarkan relasi PR -> SO, sehingga SO lama tetap harus tersedia.
+    get_api_data_new() sudah pagination penuh. Horizon dimulai 2024 karena PR 2026
+    dapat mereferensikan SO yang dibuat lebih lama. Jika dated fetch kosong, coba all-time.
     """
-    frames = []
+    df = get_api_data_new(
+        "sales-orders",
+        source="erp",
+        start_date=date(2024, 1, 1),
+        end_date=end_date_val,
+        silent=True,
+        per_page=200,
+        max_pages=500,
+    )
 
-    # Primary: horizon lebar. PR 2026 dapat berasal dari SO tahun sebelumnya.
-    for start_candidate in [date(2024, 1, 1), None]:
-        try:
-            df = get_api_data_new(
-                "sales-orders",
-                source="erp",
-                start_date=start_candidate,
-                end_date=end_date_val if start_candidate is not None else None,
-            )
-        except Exception:
-            df = pd.DataFrame()
+    if df is None or df.empty:
+        df = get_api_data_new(
+            "sales-orders",
+            source="erp",
+            start_date=None,
+            end_date=None,
+            silent=True,
+            per_page=200,
+            max_pages=500,
+        )
 
-        if df is not None and not df.empty:
-            frames.append(df)
-            # Bila broad dated fetch berhasil, tidak perlu all-time fallback.
-            if start_candidate is not None:
-                break
+    return df.reset_index(drop=True) if df is not None else pd.DataFrame()
 
-    if not frames:
-        return pd.DataFrame()
-
-    return pd.concat(frames, ignore_index=True, sort=False)
 
 
 def _normalize_match_text(series: pd.Series) -> pd.Series:
@@ -1344,14 +1509,10 @@ def load_pr_balance_historical_api(end_date_val) -> pd.DataFrame:
     work["Status"] = work.get("Status As Of", pd.Series("", index=work.index)).fillna("")
     work.loc[work["Status"].eq(""), "Status"] = current_status.loc[work["Status"].eq("")]
 
-    # Parity rule dengan PostgreSQL: untuk cutoff hari ini, current header/API status
-    # adalah authoritative. Ini memastikan Complete/Close/Draft benar-benar keluar.
-    if cutoff >= date.today():
-        work["Status"] = current_status
-        work["Status As Of"] = current_status
-        work["Status Code As Of"] = current_status.map(_status_code_from_label)
-        work["Status As Of Source"] = "CURRENT_STATUS_AT_CURRENT_CUTOFF"
-    else:
+    # Status membership sudah diselesaikan sepenuhnya oleh _build_pr_status_asof_api().
+    # Historical cutoff tetap membutuhkan existence guard agar transaksi backdated yang
+    # sebenarnya belum ada pada cutoff tidak ikut snapshot lama.
+    if cutoff < date.today():
         # Historical existence guard.
         # transaction_date dapat dibackdate. Jangan masukkan PR ke snapshot lama bila bukti workflow
         # pertama (history endpoint atau milestone aktual) baru terjadi setelah cutoff.
@@ -1489,8 +1650,11 @@ def load_pr_balance_historical_api(end_date_val) -> pd.DataFrame:
     work["PO Quantity Source"] = "PURCHASE_ORDERS_API_AS_OF"
     work["Closed Quantity Source"] = "PR_DETAIL_CURRENT_IF_UPDATED_BEFORE_CUTOFF"
 
-    # Current status kept only for forensic comparison, never for historical membership.
-    work["Current Status"] = current_status.reindex(work.index)
+    # Current status diagnostic must be derived AFTER all merges/filters so index alignment
+    # cannot attach another PR's status to this row. Never use this field for historical membership.
+    work["Current Status"] = _api_first_series(
+        work, ["status", "status_description"], ""
+    ).map(_normalize_pr_status_for_balance)
 
     return work.drop(columns=["__row_key", "__pr_number"], errors="ignore").reset_index(drop=True)
 
