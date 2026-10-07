@@ -657,130 +657,6 @@ def _api_numeric(df: pd.DataFrame, candidates, default=0.0) -> pd.Series:
     ).fillna(default)
 
 
-def _resolve_pr_closed_quantity_api(
-    work: pd.DataFrame,
-    pr_qty: pd.Series,
-    po_qty: pd.Series,
-    cutoff,
-    today_val=None,
-) -> pd.DataFrame:
-    """Resolve closure per PR detail without treating missing quantity as known zero.
-
-    Native numeric quantity, including zero/partial closure, takes precedence.
-    Only a current snapshot may infer full remaining closure from the verified
-    item label "Item di closed". A current item label is not historical evidence.
-    Native historical timing retains the PostgreSQL detail-updated-at fallback.
-    """
-    idx = work.index
-    cutoff_date = pd.Timestamp(cutoff).date()
-    evaluation_date = pd.Timestamp(today_val).date() if today_val is not None else date.today()
-    current_cutoff = cutoff_date >= evaluation_date
-    cutoff_next = pd.Timestamp(cutoff_date) + pd.Timedelta(days=1)
-
-    native_qty = pd.Series(float("nan"), index=idx, dtype="float64")
-    native_field = pd.Series("", index=idx, dtype="object")
-    invalid_qty = pd.Series(False, index=idx, dtype="bool")
-    for col in [
-        "item_closed_quantity", "item_closed_qty", "item_close_quantity",
-        "item_qty_closed", "closed_quantity", "close_quantity",
-    ]:
-        if col not in work.columns:
-            continue
-        raw = work[col]
-        values = pd.to_numeric(raw, errors="coerce").replace(
-            [float("inf"), float("-inf")], float("nan")
-        )
-        values = values.where(values.ge(0))
-        present = raw.notna() & raw.astype(str).str.strip().ne("")
-        invalid_qty |= present & values.isna()
-        take = native_qty.isna() & values.notna()
-        native_qty.loc[take] = values.loc[take]
-        native_field.loc[take] = col
-    has_native_qty = native_qty.notna()
-
-    def local_timestamp(value):
-        try:
-            ts = pd.Timestamp(value)
-            if pd.isna(ts):
-                return pd.NaT
-            if ts.tzinfo is not None:
-                ts = ts.tz_convert("Asia/Jakarta").tz_localize(None)
-            return ts
-        except (TypeError, ValueError, OverflowError):
-            return pd.NaT
-
-    detail_updated = pd.Series(pd.NaT, index=idx, dtype="datetime64[ns]")
-    for col in [
-        "item_updated_at", "item_modified_at", "item_last_updated_at", "item_created_at",
-    ]:
-        if col in work.columns:
-            values = pd.to_datetime(work[col].map(local_timestamp), errors="coerce")
-            detail_updated = detail_updated.combine_first(values)
-
-    # Check the item field only. Header PR/PO status 3 does not mean item closed.
-    item_label = pd.Series("", index=idx, dtype="object")
-    for col in ["item_po_status", "item_po_status_description"]:
-        if col in work.columns:
-            values = work[col].fillna("").astype(str).str.strip()
-            take = item_label.eq("") & values.ne("")
-            item_label.loc[take] = values.loc[take]
-    normalized_label = item_label.str.casefold().str.replace(r"\s+", " ", regex=True).str.strip()
-    item_is_closed = normalized_label.eq("item di closed")
-    item_code = pd.to_numeric(
-        work.get("item_po_status_original", pd.Series(float("nan"), index=idx)),
-        errors="coerce",
-    )
-
-    closed_asof = pd.Series(0.0, index=idx, dtype="float64")
-    source = pd.Series("NUMERIC_CLOSED_QTY_UNAVAILABLE_ZERO_FALLBACK", index=idx, dtype="object")
-    review = pd.Series("", index=idx, dtype="object")
-    timestamp_known = detail_updated.notna()
-    before_cutoff = timestamp_known & detail_updated.lt(cutoff_next)
-    use_native = has_native_qty & before_cutoff
-    closed_asof.loc[use_native] = native_qty.loc[use_native]
-    source.loc[use_native] = "PR_DETAIL_NUMERIC_UPDATED_BEFORE_CUTOFF"
-
-    if current_cutoff:
-        use_current_native = has_native_qty & ~timestamp_known
-        closed_asof.loc[use_current_native] = native_qty.loc[use_current_native]
-        source.loc[use_current_native] = "PR_DETAIL_NUMERIC_CURRENT_WITHOUT_TIMESTAMP"
-    else:
-        source.loc[has_native_qty & ~timestamp_known] = "HISTORICAL_NUMERIC_CLOSED_QTY_WITHOUT_TIMESTAMP"
-
-    source.loc[has_native_qty & timestamp_known & ~before_cutoff] = "NUMERIC_CLOSED_QTY_NOT_VERIFIED_AT_CUTOFF"
-    unresolved_native = has_native_qty & ~use_native
-    if current_cutoff:
-        unresolved_native &= timestamp_known
-    review.loc[unresolved_native & (native_qty.gt(0) | item_is_closed)] = "Waktu penutupan detail belum terverifikasi pada cutoff."
-
-    remaining_after_po = (pr_qty - po_qty).clip(lower=0)
-    if current_cutoff:
-        infer_closed = ~has_native_qty & item_is_closed & (~timestamp_known | before_cutoff)
-        closed_asof.loc[infer_closed] = remaining_after_po.loc[infer_closed]
-        source.loc[infer_closed] = "CURRENT_ITEM_CLOSED_STATUS_FALLBACK"
-        review.loc[~has_native_qty & item_is_closed & timestamp_known & ~before_cutoff] = "Timestamp detail melewati cutoff; status item closed belum diterapkan."
-    else:
-        review.loc[~has_native_qty & item_is_closed] = "Status item closed saat ini belum membuktikan penutupan pada cutoff historis."
-        source.loc[~has_native_qty & item_is_closed] = "HISTORICAL_ITEM_CLOSED_WITHOUT_QUANTITY_AND_TIMING"
-
-    # Do not overwrite an explicit numeric zero or partial quantity using a label.
-    native_conflict = item_is_closed & has_native_qty & (remaining_after_po - closed_asof).gt(1e-9)
-    review.loc[native_conflict & review.eq("")] = "Status item closed bertentangan dengan sisa kuantitas numerik; periksa detail sumber."
-    review.loc[item_code.eq(3) & ~item_is_closed] = "Kode status item 3 tidak disertai label Item di closed yang sesuai."
-    review.loc[invalid_qty] = "Ada nilai closed quantity tidak valid pada data sumber."
-
-    return pd.DataFrame({
-        "Qty Closed": closed_asof,
-        "Closed Quantity Raw": native_qty,
-        "Closed Quantity Available": has_native_qty,
-        "Closed Quantity Field": native_field,
-        "Item Closed Status": item_is_closed,
-        "Closed Quantity Source": source,
-        "Closed Quantity Review Required": review.ne(""),
-        "Closed Quantity Review": review,
-    }, index=idx)
-
-
 def _normalize_pr_status_for_balance(value):
     if value is None or pd.isna(value):
         return ""
@@ -2069,7 +1945,7 @@ def load_pr_balance_historical_api(
       - PR sejak 1-Jan-2026 sampai end_date;
       - status PR = status pada cutoff (nested history bila tersedia, fallback milestone);
       - PO qty = cumulative PO detail sampai cutoff, status 1/2/3/4;
-      - native closed qty mengikuti timestamp detail; fallback label item closed hanya untuk current cutoff;
+      - closed qty current hanya berlaku bila detail update <= cutoff;
       - outstanding = PR qty - PO qty as-of - closed qty as-of;
       - hanya outstanding > 0 dan PR terhubung SO;
       - nominal = outstanding x net selling price SO (price-discount+Tax1+Tax2);
@@ -2205,35 +2081,26 @@ def load_pr_balance_historical_api(
 
     pr_qty = _api_numeric(work, ["item_quantity", "quantity"], 0.0).clip(lower=0)
 
-    closure = _resolve_pr_closed_quantity_api(
-        work, pr_qty, work["PO Qty Linked"], cutoff,
-    )
-    for col in closure.columns:
-        work[col] = closure[col]
-    closed_asof = closure["Qty Closed"]
+    # Historical closed qty fallback = same idea as repaired PostgreSQL file.
+    closed_current = _api_numeric(work, [
+        "item_closed_quantity", "item_closed_qty", "item_close_quantity", "item_qty_closed",
+        "closed_quantity", "close_quantity",
+    ], 0.0).clip(lower=0)
+    detail_updated = pd.to_datetime(_api_first_series(work, [
+        "item_updated_at", "item_modified_at", "item_last_updated_at", "item_created_at"
+    ], pd.NaT), errors="coerce")
+
+    has_detail_timestamp = detail_updated.notna()
+    closed_asof = pd.Series(0.0, index=work.index)
+    closed_asof.loc[has_detail_timestamp & detail_updated.lt(cutoff_next)] = closed_current.loc[
+        has_detail_timestamp & detail_updated.lt(cutoff_next)
+    ]
+    # Untuk cutoff hari ini/masa kini, bila API tidak expose detail timestamp, current value aman dipakai.
+    if cutoff >= date.today():
+        closed_asof.loc[~has_detail_timestamp] = closed_current.loc[~has_detail_timestamp]
 
     balance_qty = (pr_qty - work["PO Qty Linked"] - closed_asof).clip(lower=0)
     outstanding = pr_qty.gt(0) & balance_qty.gt(0)
-
-    # Preserve closure decisions before fully closed rows leave PR Balance.
-    audit_mask = closure["Item Closed Status"] | closed_asof.gt(0) | closure["Closed Quantity Review Required"]
-    closure_audit = pd.DataFrame({
-        "No. PR": work["transaction_number"],
-        "PR Detail ID": work["__pr_detail_key"],
-        "Nama Barang": _api_first_series(work, ["item_item_name", "item_name"], ""),
-        "Status Item": _api_first_series(work, ["item_po_status", "item_po_status_description"], ""),
-        "PR Qty": pr_qty,
-        "PO Qty": work["PO Qty Linked"],
-        "Qty Closed": closed_asof,
-        "Qty Outstanding": balance_qty,
-        "Closed Quantity Available": closure["Closed Quantity Available"],
-        "Closed Quantity Source": closure["Closed Quantity Source"],
-        "Closed Quantity Review Required": closure["Closed Quantity Review Required"],
-        "Catatan": closure["Closed Quantity Review"],
-        "Snapshot Date": str(cutoff),
-        "Hasil": outstanding.map({True: "TETAP OUTSTANDING", False: "DIKELUARKAN DARI BALANCE"}),
-    }).loc[audit_mask].to_dict("records")
-
     work = work.loc[outstanding].copy()
     pr_qty = pr_qty.loc[work.index]
     closed_asof = closed_asof.loc[work.index]
@@ -2292,7 +2159,7 @@ def load_pr_balance_historical_api(
     work["SO Number"] = work["No. SO"]
     work["No. PO"] = work.get("PO Documents", pd.Series("", index=work.index)).fillna("")
     work["PO Quantity Source"] = "PURCHASE_ORDERS_API_AS_OF"
-    # Closed Quantity Source is assigned per detail by the closure resolver.
+    work["Closed Quantity Source"] = "PR_DETAIL_CURRENT_IF_UPDATED_BEFORE_CUTOFF"
 
     # Current status diagnostic must be derived AFTER all merges/filters so index alignment
     # cannot attach another PR's status to this row. Never use this field for historical membership.
@@ -2300,9 +2167,7 @@ def load_pr_balance_historical_api(
         work, ["status", "status_description"], ""
     ).map(_normalize_pr_status_for_balance)
 
-    result = work.drop(columns=["__row_key", "__pr_number"], errors="ignore").reset_index(drop=True)
-    result.attrs["pr_closed_quantity_audit"] = closure_audit
-    return result
+    return work.drop(columns=["__row_key", "__pr_number"], errors="ignore").reset_index(drop=True)
 
 
 def load_all_data_new(start_date=None, end_date=None) -> dict[str, pd.DataFrame]:
@@ -3292,7 +3157,6 @@ def main():
         df_pr = pd.DataFrame(columns=[
             "Nominal", "No. PR", "Status", "PIC Procurement", "transaction_date"
         ])
-        pr_closed_quantity_audit = []
         df_po = pd.DataFrame(columns=["Nominal", "transaction_date"])
         df_grn = pd.DataFrame(columns=["Nominal", "transaction_date"])
         df_do = pd.DataFrame(columns=[
@@ -3326,7 +3190,6 @@ def main():
                 end_date,
                 pr_df=pr_all,
             )
-            pr_closed_quantity_audit = df_pr.attrs.get("pr_closed_quantity_audit", [])
             df_pr_final = pr_all.copy()
 
         elif selected_doc_type == "DO":
@@ -3481,16 +3344,6 @@ def main():
     df_do_final_real = ensure_columns(df_do_final_real, ["PIC Procurement", "transaction_number","Status", "price", "quantity", "discount", "transaction_total", "tax1_percentage", "tax2_percentage"])
 
     df_pr_f = safe_to_numeric(df_pr_f, ["Nominal"])
-    if selected_doc_type == "PR":
-        closure_review_count = int(df_pr_f.get(
-            "Closed Quantity Review Required", pd.Series(False, index=df_pr_f.index)
-        ).fillna(False).sum())
-        if closure_review_count:
-            st.warning(
-                f"Nominal PR Balance masih memuat {closure_review_count:,} detail dengan penutupan "
-                "yang belum terverifikasi pada tanggal laporan atau data yang bertentangan. "
-                "Lihat Penutupan detail PR di bagian Diagnostic untuk rincian."
-            )
     df_po_f = safe_to_numeric(df_po_f, ["Nominal"])
     df_grn_f = safe_to_numeric(df_grn_f, ["Nominal"])
     df_do_f = safe_to_numeric(df_do_f, ["Nominal"])
@@ -3554,25 +3407,6 @@ def main():
     # PR BALANCE API PARITY DIAGNOSTIC
     # =========================================================
     with st.expander("🧪 Diagnostic PR Balance API Historical", expanded=False):
-        if pr_closed_quantity_audit:
-            closure_audit_df = pd.DataFrame(pr_closed_quantity_audit)
-            st.markdown("**Penutupan detail PR**")
-            st.caption("Keputusan penutupan sebelum filter saldo, untuk seluruh kandidat PR pada cutoff yang dipilih.")
-            review_count = int(closure_audit_df["Closed Quantity Review Required"].fillna(False).sum())
-            if review_count:
-                st.warning(
-                    f"Ada {review_count:,} detail dengan penutupan yang belum terverifikasi atau data yang bertentangan. "
-                    "Periksa catatan sebelum memakai nominal sebagai hasil final untuk cutoff ini."
-                )
-            st.dataframe(closure_audit_df, use_container_width=True, hide_index=True)
-            st.download_button(
-                "Download Pemeriksaan Penutupan PR.xlsx",
-                data=to_excel_bytes(closure_audit_df, sheet_name="PR_Closed_Detail"),
-                file_name=f"Pemeriksaan_Penutupan_PR_{pd.Timestamp(report_end_date).strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_pr_closed_quantity_audit",
-                use_container_width=True,
-            )
         if df_pr_f.empty:
             st.info("PR Balance kosong pada cutoff ini.")
         else:
