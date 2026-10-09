@@ -3694,7 +3694,7 @@ def main():
 
             # Download per Category PR Aging
             with st.container(border=True):
-                st.subheader("📥 Download Data per Categori Aging PR")
+                st.subheader("📥 Download Data Distribusi Aging PR")
 
                 if not df_pr_final_valid.empty:
                     # Filter data aging PR berdasarkan kategori yang dipilih
@@ -3725,7 +3725,7 @@ def main():
 
             # Download per Category PR Balance Aging
             with st.container(border=True):
-                st.subheader("📥 Download Data per Categori Aging PR Balance")
+                st.subheader("📥 Download Data Distribusi Aging PR Balance")
 
                 if not df_pr_valid.empty:
                     # Filter data aging PR berdasarkan kategori yang dipilih
