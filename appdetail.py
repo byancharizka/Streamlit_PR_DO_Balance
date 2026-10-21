@@ -50,7 +50,14 @@ BASE_URL = {
     "brp": "https://brp.sibima.id/api/"
 }
 
-API_TOKEN = os.getenv("SIBIMA_API_TOKEN", "3bd1c8f44fa6ba220af7382c57c547a9673b0f6f5ada977b850d7f5215e6")
+# v11.2: use existing environment/secrets, never embed an API credential.
+API_TOKEN = os.getenv("SIBIMA_API_TOKEN", "").strip()
+if not API_TOKEN:
+    try:
+        API_TOKEN = str(st.secrets.get("SIBIMA_API_TOKEN", "") or
+                        st.secrets.get("api", {}).get("token", "") or "").strip()
+    except Exception:
+        API_TOKEN = ""
 
 # Pastikan setiap URL diakhiri dengan "/"
 for key in BASE_URL:
@@ -2193,138 +2200,2691 @@ def load_all_data_new(start_date=None, end_date=None) -> dict[str, pd.DataFrame]
 
 
 
-NPR_STATUS_MAP = {
-    0: "Request",
-    1: "Process",
-    2: "Complete",
-}
-
+# === BEGIN NPR SHARED RULES: identical in API and PostgreSQL files ===
+# The data adapters are deliberately separate; no cross-source replacement.
+NPR_PARITY_VERSION = "20261019-npr-retry-and-period-proof-v11_2"
+NPR_PARITY_CACHE_TTL = 600
+NPR_STATUS_MAP = {0: "Request", 1: "Process", 2: "Complete"}
 NPR_VALID_STATUSES = tuple(NPR_STATUS_MAP.values())
+NPR_PUBLIC_COLUMNS = (
+    "No. Transaksi", "Nama NPR", "Sales", "Status", "Tanggal Deadline",
+    "Catatan", "User Input", "transaction_date",
+    "Created At NPR", "Date Source NPR",
+)
+NPR_HISTORY_KEYS = (
+    "history", "histories", "status_history", "status_histories",
+    "product_request_histories", "product_requests_history",
+    "new_product_request_histories", "request_histories", "transaction_histories",
+)
+
+
+def _npr_text(value) -> str:
+    if value is None or isinstance(value, (dict, list, tuple)):
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        return ""
+    text = str(value).strip()
+    return "" if text.casefold() in {"nan", "none", "null", "<na>", "nat"} else text
+
+
+def _npr_pick(row: dict, names, default=None):
+    lookup = {str(k).casefold(): v for k, v in row.items()}
+    for name in names:
+        value = lookup.get(str(name).casefold())
+        if isinstance(value, (dict, list)) or _npr_text(value):
+            return value
+    return default
+
+
+def _npr_id(value) -> str:
+    text = _npr_text(value)
+    if text.endswith(".0") and text[:-2].lstrip("-").isdigit():
+        return text[:-2]
+    return text
+
+
+def _npr_person_name(value) -> str:
+    if isinstance(value, dict):
+        return _npr_person_name(_npr_pick(value, ("name", "full_name", "display_name", "user")))
+    return _npr_text(value)
+
 
 def _normalize_npr_text_status(value):
-    if value is None or pd.isna(value):
+    if isinstance(value, dict):
+        value = _npr_pick(value, ("id", "code", "status", "name", "description"))
+    text = _npr_text(value)
+    if not text:
         return ""
-    s = str(value).strip()
-    if not s:
-        return ""
-    # Numeric status from x4_product_requests / API full NPR
     try:
-        n = int(float(s))
-        if n in NPR_STATUS_MAP:
-            return NPR_STATUS_MAP[n]
-    except Exception:
+        number = float(text)
+        return NPR_STATUS_MAP.get(int(number), text) if number.is_integer() else text
+    except (ValueError, OverflowError):
         pass
-
-    key = " ".join(s.casefold().split())
-    text_map = {
-        "request": "Request",
-        "requested": "Request",
-        "process": "Process",
-        "processed": "Process",
-        "proses": "Process",
-        "in process": "Process",
-        "complete": "Complete",
-        "completed": "Complete",
+    return {
+        "request": "Request", "requested": "Request", "process": "Process",
+        "processed": "Process", "proses": "Process", "in process": "Process",
+        "in progress": "Process", "complete": "Complete", "completed": "Complete",
         "selesai": "Complete",
-    }
-    return text_map.get(key, s)
+    }.get(" ".join(text.casefold().split()), text)
+
+
+def _npr_status(value):
+    return _normalize_npr_text_status(value)
+
+
+def _npr_event_status(event: dict) -> str:
+    for field in ("status_code", "status", "status_id", "status_description", "status_name", "Status"):
+        raw = _npr_pick(event, (field,))
+        if isinstance(raw, dict):
+            raw = _npr_pick(raw, ("id", "code", "status", "name"))
+        text = _npr_text(raw)
+        if not text:
+            continue
+        try:
+            code = float(text)
+            return NPR_STATUS_MAP.get(int(code), "") if code.is_integer() else ""
+        except (ValueError, OverflowError):
+            candidate = _normalize_npr_text_status(text)
+            if candidate in NPR_VALID_STATUSES:
+                return candidate
+    return ""
+
+
+def _npr_timestamp(value):
+    """Preserve source wall-clock, as in the existing PG reference. No epoch guessing."""
+    if not _npr_text(value) or isinstance(value, (int, float)):
+        return pd.NaT
+    try:
+        timestamp = pd.Timestamp(value)
+        return timestamp.tz_localize(None) if timestamp.tzinfo is not None else timestamp
+    except (TypeError, ValueError, OverflowError):
+        return pd.NaT
+
+
+def _npr_date_from(row: dict, names):
+    for name in names:
+        timestamp = _npr_timestamp(_npr_pick(row, (name,)))
+        if pd.notna(timestamp):
+            return timestamp
+    return pd.NaT
+
+
+def _npr_date_series(series):
+    # Parse scalars so mixed ISO formats/offsets do not discard otherwise valid rows.
+    return pd.to_datetime(series.map(_npr_timestamp), errors="coerce")
+
 
 def _npr_empty_frame():
-    return pd.DataFrame(columns=[
-        "No. Transaksi", "Nama NPR", "Sales", "Status",
-        "Tanggal Deadline", "Catatan", "User Input", "transaction_date"
-    ])
+    out = pd.DataFrame(columns=NPR_PUBLIC_COLUMNS)
+    for col in ("transaction_date", "Tanggal Deadline", "Created At NPR"):
+        out[col] = pd.Series(dtype="datetime64[ns]")
+    return out
 
 
+def _npr_pic(value):
+    name = " ".join(_npr_text(value).upper().split())
+    if name in {"", "UNASSIGNED"}:
+        return "Unassigned"
+    return "FAQIH" if name == "FAQIH RAMADHAN" else name
 
-@st.cache_data(ttl=300, show_spinner=False)
-def load_full_npr_from_api(start_date=None, end_date=None) -> pd.DataFrame:
+
+def _npr_assign_pic(df, col="Sales"):
+    out = df.copy()
+    if col not in out:
+        out[col] = "Unassigned"
+    out[col] = out[col].map(_npr_pic)
+    return out
+
+
+def _npr_safe_datetime(df, col):
+    out = df.copy()
+    if col in out:
+        out[col] = _npr_date_series(out[col])
+    return out
+
+
+def _npr_unique(df, col):
+    return int(df[col].nunique()) if df is not None and col in df else 0
+
+
+def _npr_resolve_person(row: dict, id_names, name_names, lookup: dict) -> str:
+    raw_id = _npr_pick(row, id_names)
+    key = _npr_id(_npr_pick(raw_id, ("id", "user_id"))) if isinstance(raw_id, dict) else _npr_id(raw_id)
+    if key in lookup and _npr_text(lookup[key]):
+        return _npr_text(lookup[key])
+    for field in name_names:
+        person = _npr_pick(row, (field,))
+        nested_id = _npr_id(_npr_pick(person, ("id", "user_id"))) if isinstance(person, dict) else ""
+        if nested_id in lookup and _npr_text(lookup[nested_id]):
+            return _npr_text(lookup[nested_id])
+        name = _npr_person_name(person)
+        if name:
+            return _npr_text(lookup.get(_npr_id(name))) or name
+        key = key or nested_id
+    return key
+
+
+def _npr_native_created_dates(df):
+    """Canonical NPR document date for parity.
+
+    v10 contract: input_date when available on both API and PostgreSQL; created_at
+    only for legacy rows where input_date is missing. This same series drives filter,
+    aging, SLA, heatmap and timeline on both adapters.
     """
-    Full NPR from ERP API. outstanding-npr is intentionally not used.
+    if "Created At NPR" in df:
+        return _npr_date_series(df["Created At NPR"])
+    return _npr_date_series(df.get("transaction_date", pd.Series(pd.NaT, index=df.index)))
 
-    Candidate endpoint order is tried safely because the exact full-NPR route
-    can differ by deployment. Payload is accepted only when it contains
-    SIBNPR transactions and statuses mapped to Request/Process/Complete.
+
+def _npr_source_rows_complete_v11_1(df):
+    """A source-reader assertion, not a date check and not proof of DB parity.
+
+    Missing metadata is unverified. An explicit negative pagination diagnostic
+    cannot be overridden by a stale positive DataFrame attribute. An explicit
+    number/date comparison against a supplied complete PG period export is a
+    separate, snapshot-relative proof; it does not alter pagination_complete.
     """
-    candidates = [
-        "product-requests",
-        "new-product-requests",
-        "new-product-request",
-        "product-request",
-        "nprs",
-        "npr",
+    def is_true(value):
+        return str(value).strip().casefold() in {"true", "1"}
+    evidence = df.attrs.get("npr_period_reference_v11_2", {})
+    if evidence.get("matched") is True and evidence.get("basis") == "MATCHED_SUPPLIED_POSTGRESQL_PERIOD_EXPORT":
+        return True  # Only the chosen period matches the supplied PG snapshot.
+    fetch = df.attrs.get("npr_api_fetch_diagnostic", {})
+    if "pagination_complete" in fetch and not is_true(fetch["pagination_complete"]):
+        return False
+    return is_true(df.attrs.get("npr_source_rows_complete", False))
+
+
+def _npr_date_coverage(df):
+    """Keep dates, source enumeration and final assessment as separate signals.
+
+    'ready' is the legacy overall gate, retained for export compatibility.
+    It must NOT be used as the reason that a document date is missing, or as
+    a prerequisite to reading histories of already dated/selected documents.
+    """
+    canonical = _npr_native_created_dates(df)
+    source = df.get("Date Source NPR", pd.Series("created_at", index=df.index))
+    selected_dates_ready = bool(len(df) and canonical.notna().all())
+    scope_dates_complete = bool(df.attrs.get("npr_scope_dates_complete", canonical.notna().all()))
+    dates_ready = selected_dates_ready and scope_dates_complete
+    source_rows_complete = _npr_source_rows_complete_v11_1(df)
+    return {
+        "total": len(df), "native_created_valid": int(canonical.notna().sum()),
+        "preview_input_date": int(source.eq("input_date").sum()),
+        "missing_created_at": int(canonical.isna().sum()),
+        "canonical_dates_valid": int(canonical.notna().sum()),
+        "missing_canonical_dates": int(canonical.isna().sum()),
+        "selected_dates_ready": selected_dates_ready,
+        "scope_dates_complete": scope_dates_complete,
+        "dates_ready": dates_ready,
+        "source_rows_complete": source_rows_complete,
+        "ready": bool(dates_ready and source_rows_complete),
+    }
+
+
+def _npr_assessment_message_v11_1(df, history_ready, dates_ready, metric):
+    """Explain each real blocker; do not label unverified pagination as a date error."""
+    checks = _npr_date_coverage(df)
+    blockers = []
+    if not dates_ready or not checks["dates_ready"]:
+        blockers.append("Masih ada tanggal NPR canonical (input_date/created_at) yang kosong dalam cakupan sumber.")
+    if not checks["source_rows_complete"]:
+        blockers.append("Kelengkapan daftar NPR dari sumber belum terverifikasi (pagination/cakupan header).")
+    if not history_ready:
+        blockers.append("History NPR terpilih belum selesai atau belum berhasil dibaca.")
+    return " ".join(blockers + [metric + " final belum ditampilkan."])
+
+
+def _npr_date_field_profile(raw):
+    """Inspect date fields only. Never export arbitrary payloads, notes or tokens."""
+    fields = ("created_at", "input_date", "transaction_date", "date", "request_date")
+    result = {key: {"rows_with_key": 0, "nonblank": 0, "parsed_valid": 0, "types": {}} for key in fields}
+    samples = []
+    for row in raw.to_dict("records"):
+        lower = {str(k).casefold(): v for k, v in row.items()}
+        sample = {"transaction_number": _npr_text(_npr_pick(row, ("transaction_number", "No. Transaksi", "npr_number")))}
+        for key in fields:
+            value = lower.get(key)
+            stats = result[key]
+            if key in lower:
+                stats["rows_with_key"] += 1
+                kind = type(value).__name__
+                stats["types"][kind] = stats["types"].get(kind, 0) + 1
+            if _npr_text(value) or isinstance(value, (dict, list)):
+                stats["nonblank"] += 1
+            parsed = _npr_timestamp(value)
+            if pd.notna(parsed):
+                stats["parsed_valid"] += 1
+            sample[key] = parsed.isoformat() if pd.notna(parsed) else None
+        if len(samples) < 5:
+            samples.append(sample)
+    return {"fields": result, "parsed_samples": samples,
+            "note": "Sampel hanya hasil parsing tanggal; bukan bukti input_date setara created_at PostgreSQL."}
+
+
+def normalize_npr_headers(raw: pd.DataFrame, users=None, endpoint="", *, allow_input_date_preview=False) -> pd.DataFrame:
+    """Preserve created_at for aging; optional input_date is a labelled document preview.
+
+    API adapter enables preview for its legacy response. PostgreSQL stays strict.
+    A preview date never enters Created At NPR or the aging/SLA calculation.
+
+    One row per uppercase transaction number. Duplicate resolution is deterministic:
+    display date, updated_at, ID, then public-field values (ascending, keep last).
+    Invalid dates retain the old na-last convention and remain explicitly reported.
+    """
+    users = {_npr_id(k): _npr_text(v) for k, v in (users or {}).items()}
+    raw = raw if isinstance(raw, pd.DataFrame) else pd.DataFrame()
+    rows, contexts = [], []
+    counts = dict(headers_input=len(raw), removed_deleted=0, removed_missing_number=0,
+                  removed_invalid_status=0, duplicates_removed=0, invalid_created_date=0,
+                  unresolved_pic_ids=0, conflicting_duplicate_documents=0)
+    for row in raw.to_dict("records"):
+        if _npr_text(_npr_pick(row, ("deleted_at",))):
+            counts["removed_deleted"] += 1
+            continue
+        number = _npr_text(_npr_pick(row, ("transaction_number", "No. Transaksi", "no_npr", "npr_number", "number", "code"))).upper()
+        if not number:
+            counts["removed_missing_number"] += 1
+            continue
+        status = _npr_event_status(row)
+        if status not in NPR_VALID_STATUSES:
+            counts["removed_invalid_status"] += 1
+            continue
+        native_created = _npr_date_from(row, ("created_at",))
+        input_date = _npr_date_from(row, ("input_date", "transaction_date"))
+        # v10 parity contract: use the same business document date on BOTH sources.
+        # Production API exposes input_date but not header created_at, while PostgreSQL
+        # exposes both. Therefore input_date is authoritative when present; created_at
+        # is only a fallback for legacy rows without input_date.
+        created = input_date if pd.notna(input_date) else native_created
+        source = "input_date" if pd.notna(input_date) else ("created_at" if pd.notna(native_created) else "MISSING_DATE")
+        identifier = _npr_id(_npr_pick(row, ("id", "npr_id", "product_request_id", "header_id")))
+        pic = _npr_resolve_person(row, ("pic_id", "responsible_id", "assignee_id"),
+                                  ("pic_name", "pic", "Sales", "penanggung_jawab", "responsible_name", "assignee_name"), users)
+        record = {
+            "No. Transaksi": number,
+            "Nama NPR": _npr_text(_npr_pick(row, ("name", "Nama NPR", "nama_npr", "npr_name", "title", "description"))),
+            "Sales": _npr_pic(pic), "Status": status,
+            "Tanggal Deadline": _npr_date_from(row, ("due_date", "Tanggal Deadline", "deadline", "deadline_date", "tanggal_deadline")),
+            "Catatan": _npr_text(_npr_pick(row, ("notes", "note", "Catatan", "remarks", "remark"))),
+            "User Input": _npr_resolve_person(row, ("created_by", "created_by_id", "user_id"),
+                         ("created_by_name", "User Input", "user_input", "creator_name", "creator", "created_by", "user_name"), users),
+            "transaction_date": created,
+            "Created At NPR": created, "Date Source NPR": source,
+        }
+        context = {
+            "number": number, "id": identifier, "endpoint": endpoint,
+            "source_number": _npr_text(_npr_pick(row, ("transaction_number", "No. Transaksi", "no_npr", "npr_number", "number", "code"))),
+            "embedded": {k: row[k] for k in row if str(k).casefold() in NPR_HISTORY_KEYS + ("history_meta", "history_pagination")},
+            "date_source": source,
+            "native_created_at": native_created, "input_date": input_date,
+            "api_pic_id": _npr_id(_npr_pick(row, ("pic_id", "responsible_id", "assignee_id"))),
+            "api_pic_name_raw": _npr_person_name(_npr_pick(row, ("pic_name", "pic", "Sales"))),
+            "header_date_inprogress": _npr_date_from(row, ("date_inprogress",)),
+            "header_date_complete": _npr_date_from(row, ("date_complete",)),
+            "header_updated_at": _npr_date_from(row, ("updated_at", "modified_at")),
+            "record_created_date": created,
+            "declared_milestones": {k: row[k] for k in ("milestone_contract", "first_process_at", "first_complete_at", "history_count", "history_key_variants") if k in row},
+            "pg_history_state": row.get("__pg_history_state", ""),
+        }
+        record.update(__ctx=len(contexts), __sort_updated=context["header_updated_at"],
+                      __sort_id=identifier, __sort_tie=repr(tuple(_npr_text(record[c]) for c in NPR_PUBLIC_COLUMNS)))
+        rows.append(record)
+        contexts.append(context)
+    if not rows:
+        out = _npr_empty_frame()
+        out.attrs.update(npr_api_context={}, npr_normalization_diagnostic=counts)
+        return out
+    work = pd.DataFrame(rows)
+    for col in ("transaction_date", "Tanggal Deadline", "Created At NPR", "__sort_updated"):
+        work[col] = _npr_date_series(work[col])
+    duplicates = work.loc[work.duplicated("No. Transaksi", keep=False)]
+    if not duplicates.empty:
+        counts["conflicting_duplicate_documents"] = int(duplicates.groupby("No. Transaksi")["__sort_tie"].nunique().gt(1).sum())
+    work = work.sort_values(["transaction_date", "__sort_updated", "__sort_id", "__sort_tie"],
+                            kind="stable", na_position="last").drop_duplicates("No. Transaksi", keep="last")
+    chosen = {r["No. Transaksi"]: contexts[int(r["__ctx"])] for r in work.to_dict("records")}
+    out = work[list(NPR_PUBLIC_COLUMNS)].sort_values(["transaction_date", "No. Transaksi"], kind="stable").reset_index(drop=True)
+    counts.update(duplicates_removed=len(rows)-len(out), invalid_created_date=int(out["Created At NPR"].isna().sum()),
+                  invalid_document_date=int(out["transaction_date"].isna().sum()),
+                  preview_input_date=0,
+                  headers_valid=len(out), unresolved_pic_ids=int(out["Sales"].str.fullmatch(r"\d+", na=False).sum()))
+    counts["created_date_sources"] = {
+        "input_date": int(out["Date Source NPR"].eq("input_date").sum()),
+        "created_at_fallback": int(out["Date Source NPR"].eq("created_at").sum()),
+        "MISSING_DATE": counts["invalid_created_date"],
+    }
+    counts["document_date_sources"] = {str(k): int(v) for k, v in out["Date Source NPR"].value_counts().items()}
+    out.attrs.update(npr_api_context=chosen, npr_api_endpoint=endpoint, npr_normalization_diagnostic=counts)
+    return out
+
+
+def apply_npr_date_filter(df, end_date, source_start=None):
+    working = _npr_safe_datetime(df, "transaction_date")
+    if working.empty:
+        return working
+    end = _npr_timestamp(end_date)
+    if pd.isna(end):
+        raise ValueError("Tanggal akhir NPR tidak valid.")
+    # Exclusive next midnight includes fractions after 23:59:59.
+    mask = working["transaction_date"].notna() & working["transaction_date"].lt(end.normalize() + pd.Timedelta(days=1))
+    if source_start is not None and _npr_text(source_start):
+        start = _npr_timestamp(source_start)
+        if pd.isna(start) or start.normalize() > end.normalize():
+            raise ValueError("Batas awal NPR tidak valid atau melewati tanggal akhir.")
+        mask &= working["transaction_date"].ge(start.normalize())
+    return working.loc[mask].copy()
+
+
+def _apply_npr_filters_v3(df, search_number="", search_status="", search_pic="Semua PIC"):
+    working = _npr_assign_pic(df)
+    if working.empty:
+        return working
+    working["Status"] = working["Status"].map(_normalize_npr_text_status)
+    pattern = _npr_text(search_number).casefold()
+    if pattern:
+        mask = pd.Series(False, index=working.index)
+        for col in ("No. Transaksi", "Nama NPR", "Sales", "Catatan", "User Input"):
+            if col in working:
+                mask |= working[col].fillna("").astype(str).str.casefold().str.contains(pattern, regex=False)
+        working = working.loc[mask].copy()
+    status = _npr_text(search_status)
+    if status and status.casefold() != "semua status":
+        working = working.loc[working["Status"].eq(_normalize_npr_text_status(status))].copy()
+    if _npr_text(search_pic) and str(search_pic).strip().casefold() != "semua pic":
+        working = working.loc[working["Sales"].eq(_npr_pic(search_pic))].copy()
+    return working.loc[working["Status"].isin(NPR_VALID_STATUSES)].copy()
+
+
+def _npr_first_milestones(events):
+    # Exact same rule as SQL MIN(COALESCE(updated_at, created_at)) FILTER(status).
+    dates = {"Process": [], "Complete": []}
+    for event in events:
+        if _npr_text(_npr_pick(event, ("deleted_at",))):
+            continue
+        status = _npr_event_status(event)
+        timestamp = _npr_date_from(event, ("updated_at", "created_at"))
+        if status in dates and pd.notna(timestamp):
+            dates[status].append(timestamp)
+    return tuple(min(dates[k]) if dates[k] else pd.NaT for k in ("Process", "Complete"))
+
+
+def _npr_normalize_history(history):
+    cols = ["__npr_number", "__first_process_date", "__first_complete_date"]
+    hist = history.reindex(columns=cols).copy() if isinstance(history, pd.DataFrame) else pd.DataFrame(columns=cols)
+    attributes = dict(getattr(history, "attrs", {}))
+    hist["__npr_number"] = hist["__npr_number"].map(_npr_text).str.upper()
+    for col in cols[1:]:
+        hist[col] = _npr_date_series(hist[col])
+    hist = hist.loc[hist["__npr_number"].ne("")]
+    hist = hist.groupby("__npr_number", as_index=False, sort=True)[cols[1:]].min()
+    hist.attrs = attributes
+    return hist
+
+
+def _npr_build_aging(df, history, milestone):
+    out = df.copy() if isinstance(df, pd.DataFrame) else _npr_empty_frame()
+    for col in ("No. Transaksi", "transaction_date"):
+        if col not in out:
+            out[col] = pd.Series(index=out.index, dtype="object")
+    suffix = "" if milestone == "Process" else " Complete"
+    public_date, internal_date = "First " + milestone + " Date", "__first_" + milestone.lower() + "_date"
+    aging_col, category_col = "Aging NPR" + suffix, "Aging Category NPR" + suffix
+    out = out.drop(columns=[public_date, aging_col, category_col, "__npr_number", internal_date], errors="ignore")
+    out["No. Transaksi"] = out["No. Transaksi"].map(_npr_text).str.upper()
+    out["transaction_date"] = _npr_date_series(out["transaction_date"])
+    hist = _npr_normalize_history(history)
+    diagnostics = hist.attrs.get("npr_history_diagnostic")
+    if diagnostics is not None:
+        readable = {_npr_text(r.get("__npr_number")).upper() for r in diagnostics
+                    if r.get("History State") in {"API_HISTORY", "NESTED_HISTORY",
+                                                  "API_FIRST_MILESTONES", "POSTGRESQL_HISTORY"}}
+        hist = hist.loc[hist["__npr_number"].isin(readable)].copy()
+    mapping = hist.set_index("__npr_number")[internal_date]
+    out[public_date] = _npr_date_series(out["No. Transaksi"].map(mapping))
+    out[aging_col] = (out[public_date].dt.normalize() - _npr_native_created_dates(out).dt.normalize()).dt.days.astype("float64")
+    out.loc[out[aging_col].lt(0), aging_col] = float("nan")
+    out[category_col] = pd.cut(out[aging_col], [-1, 2, 5, 10, 30, float("inf")],
+                               labels=["0-2 hari", "3-5 hari", "6-10 hari", "11-30 hari", ">30 hari"], right=True)
+    return out
+
+
+def build_npr_aging_first_process(df, history_df=None):
+    history = history_df if history_df is not None else load_npr_first_process_history(df)
+    return _npr_build_aging(df, history, "Process")
+
+
+def build_npr_aging_first_complete(df, history_df=None):
+    history = history_df if history_df is not None else load_npr_first_complete_history(df)
+    return _npr_build_aging(df, history, "Complete")
+
+
+def build_npr_sla_first_process(df):
+    required = {"No. Transaksi", "transaction_date", "First Process Date", "Aging NPR"}
+    if df is None or not required.issubset(df.columns):
+        return pd.DataFrame(columns=["No. Transaksi", "Aging"])
+    working = df.copy()
+    working["No. Transaksi"] = working["No. Transaksi"].map(_npr_text).str.upper()
+    working["Aging"] = pd.to_numeric(working["Aging NPR"], errors="coerce")
+    valid = (working["No. Transaksi"].ne("") & _npr_native_created_dates(working).notna()
+             & _npr_date_series(working["First Process Date"]).notna() & working["Aging"].notna() & working["Aging"].ge(0))
+    return working.loc[valid].drop_duplicates("No. Transaksi", keep="first").copy()
+
+
+def _npr_coverage(df, history):
+    records = history.attrs.get("npr_history_diagnostic", [])
+    good = {"API_HISTORY", "NESTED_HISTORY", "API_FIRST_MILESTONES", "POSTGRESQL_HISTORY"}
+    states = {_npr_text(r.get("__npr_number")).upper(): r.get("History State", "HISTORY_NOT_LOADED") for r in records}
+    keys = set(df["No. Transaksi"].map(_npr_text).str.upper()) if not df.empty else set()
+    resolved = sum(states.get(k) in good for k in keys)
+    return {"total": len(keys), "resolved": resolved, "unresolved": len(keys)-resolved,
+            "ready": resolved == len(keys), "states": states}
+
+
+def _npr_render_sla_gauge(df: pd.DataFrame, threshold: int = 5, title: str = "SLA Compliance"):
+    if df.empty or "Aging" not in df.columns:
+        st.info("Data aging tidak tersedia untuk SLA.")
+        return
+
+    sla_compliance = (df["Aging"] <= threshold).mean() * 100
+
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=sla_compliance,
+        number={'suffix': '%', 'font': {'size': 48, 'color': "#000"}},  # 🔹 tambahkan ini
+        title={'text': f"{title} (≤{threshold} hari)"},
+        gauge={
+            'axis': {'range': [0, 100]},
+            'bar': {'color': "blue"},
+            'steps': [
+                {'range': [0, 50], 'color': "red"},
+                {'range': [50, 80], 'color': "yellow"},
+                {'range': [80, 100], 'color': "green"}
+            ]
+        }
+    ))
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_npr_outstanding_heatmap(df: pd.DataFrame):
+    """NPR Request/Process saat ini, per PIC NPR dan bulan dokumen dibuat.
+
+    Sales berasal dari PIC dokumen (padanan pic_id -> users.name), sama dengan
+    grafik NPR Outstanding per PIC. Fungsi ini tidak merekonstruksi status
+    historis atau menghitung frekuensi tindakan PIC.
+    """
+    required = {"Sales", "Status", "transaction_date", "No. Transaksi"}
+    if df is None or df.empty:
+        st.info("Data NPR tidak tersedia untuk heatmap.")
+        return
+    if not required.issubset(df.columns):
+        st.info("Data PIC, status, tanggal, atau nomor NPR belum tersedia.")
+        return
+
+    working = df.copy()
+    working["Status"] = working["Status"].map(_normalize_npr_text_status)
+    working = working[working["Status"].isin(["Request", "Process"])].copy()
+    if working.empty:
+        st.info("Tidak ada NPR berstatus Request atau Process.")
+        return
+
+    # Pakai normalisasi yang sama dengan grafik batang NPR.
+    # Nama tertentu tidak dipindahkan ke Unassigned hanya karena judul grafik.
+    working = _npr_assign_pic(working, "Sales")
+    working["Sales"] = working["Sales"].replace({"UNASSIGNED": "Unassigned"})
+    working["No. Transaksi"] = (
+        working["No. Transaksi"].fillna("").astype(str).str.strip()
+    )
+    working = working[
+        ~working["No. Transaksi"].str.upper().isin(["", "NAN", "NONE", "NULL", "<NA>"])
+    ].copy()
+    working = _npr_safe_datetime(working, "transaction_date")
+    missing_date_count = working.loc[
+        working["transaction_date"].isna(), "No. Transaksi"
+    ].nunique()
+    working = working[working["transaction_date"].notna()].copy()
+    if working.empty:
+        st.info("Tidak ada NPR outstanding dengan nomor dan tanggal yang valid.")
+        return
+
+    # Period M menyimpan tahun dan bulan: Jan 2025 berbeda dari Jan 2026.
+    working["Bulan"] = working["transaction_date"].dt.to_period("M")
+    matrix = (
+        working.groupby(["Sales", "Bulan"], observed=True)["No. Transaksi"]
+        .nunique()
+        .unstack("Bulan", fill_value=0)
+    )
+    months = pd.period_range(
+        working["Bulan"].min(), working["Bulan"].max(), freq="M"
+    )
+    matrix = matrix.reindex(columns=months, fill_value=0).fillna(0).astype(int)
+    pic_order = matrix.sum(axis=1).sort_values(ascending=False, kind="stable").index
+    matrix = matrix.loc[pic_order]
+
+    month_names = [
+        "Jan", "Feb", "Mar", "Apr", "Mei", "Jun",
+        "Jul", "Agu", "Sep", "Okt", "Nov", "Des",
+    ]
+    month_labels = [f"{month_names[p.month - 1]} {p.year}" for p in months]
+    fig = go.Figure(go.Heatmap(
+        z=matrix.to_numpy().tolist(),
+        x=month_labels,
+        y=matrix.index.tolist(),
+        colorscale=[[0, "#EDF7ED"], [0.5, "#F2994A"], [1, "#A80B0B"]],
+        zmin=0,
+        zmax=max(1, int(matrix.to_numpy().max())),
+        texttemplate="%{z:.0f}",
+        textfont=dict(size=11),
+        hovertemplate=(
+            "PIC: %{y}<br>Bulan dibuat: %{x}"
+            "<br>NPR outstanding: %{z:.0f}<extra></extra>"
+        ),
+        colorbar=dict(title="NPR", tickformat=".0f", thickness=12, len=0.7),
+        xgap=1,
+        ygap=1,
+    ))
+    fig.update_layout(
+        xaxis=dict(
+            title="Bulan NPR Dibuat", type="category", tickangle=-45,
+            categoryorder="array", categoryarray=month_labels,
+        ),
+        yaxis=dict(
+            title="PIC Procurement", type="category", autorange="reversed",
+            categoryorder="array", categoryarray=matrix.index.tolist(),
+            automargin=True,
+        ),
+        margin=dict(l=70, r=20, t=20, b=90),
+        height=max(400, 150 + 32 * len(matrix)),
+    )
+    st.plotly_chart(
+        fig, use_container_width=True, key="heatmap_npr_outstanding"
+    )
+    st.caption(
+        "Angka menunjukkan jumlah NPR unik berstatus Request atau Process. "
+        "Semakin merah, semakin banyak outstanding pada sel tersebut."
+    )
+    st.caption(
+        ("Bulan mengikuti input_date untuk NPR pratinjau, bukan created_at yang sudah diverifikasi; "
+         if _npr_date_coverage(df)["preview_input_date"] else "Bulan mengikuti tanggal NPR dibuat; ") +
+        "status mengikuti data terbaru "
+        "saat dimuat. PIC mengikuti penanggung jawab pada dokumen NPR."
+    )
+    if missing_date_count:
+        st.caption(
+            f"{missing_date_count:,} NPR tanpa tanggal pembuatan valid "
+            "tidak ditampilkan dalam heatmap."
+        )
+
+
+def render_npr_aging_first_process(df: pd.DataFrame):
+    """Grafik distribusi waktu NPR Created -> First Process."""
+    if (
+        df is None
+        or df.empty
+        or "Aging Category NPR" not in df.columns
+        or "No. Transaksi" not in df.columns
+    ):
+        st.info("Data Aging NPR ke First Process tidak tersedia.")
+        return
+
+    valid = df[
+        df["Aging NPR"].notna()
+        & df["Aging Category NPR"].notna()
+    ].copy()
+
+    if valid.empty:
+        st.info("Tanggal First Process yang valid belum berhasil diperoleh untuk grafik ini.")
+        return
+
+    summary = (
+        valid.groupby("Aging Category NPR", observed=False)["No. Transaksi"]
+        .nunique()
+        .reset_index(name="Jumlah NPR")
+    )
+    summary = summary[summary["Jumlah NPR"] > 0].copy()
+
+    category_order = [
+        "0-2 hari",
+        "3-5 hari",
+        "6-10 hari",
+        "11-30 hari",
+        ">30 hari",
     ]
 
-    for endpoint in candidates:
-        try:
-            raw = get_api_data_new(
-                endpoint,
-                source="erp",
-                start_date=start_date,
-                end_date=end_date,
-                silent=True,
+    fig = px.bar(
+        summary,
+        x="Aging Category NPR",
+        y="Jumlah NPR",
+        color="Aging Category NPR",
+        text="Jumlah NPR",
+        title="Distribusi Aging NPR — Created ke First Process",
+        category_orders={"Aging Category NPR": category_order},
+    )
+
+    fig.update_traces(textposition="outside")
+    fig.update_layout(
+        showlegend=False,
+        xaxis_title="Waktu dari NPR dibuat sampai First Process",
+        yaxis_title="Jumlah NPR",
+        margin=dict(l=40, r=40, t=60, b=90),
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key="aging_npr_first_process",
+    )
+
+
+def render_npr_aging_first_complete(df: pd.DataFrame):
+    """Grafik distribusi waktu NPR Created -> First Complete."""
+    if (
+        df is None
+        or df.empty
+        or "Aging Category NPR Complete" not in df.columns
+        or "No. Transaksi" not in df.columns
+    ):
+        st.info("Data Aging NPR ke First Complete tidak tersedia.")
+        return
+
+    valid = df[
+        df["Aging NPR Complete"].notna()
+        & df["Aging Category NPR Complete"].notna()
+    ].copy()
+
+    if valid.empty:
+        st.info("Tanggal First Complete yang valid belum berhasil diperoleh untuk grafik ini.")
+        return
+
+    summary = (
+        valid.groupby("Aging Category NPR Complete", observed=False)["No. Transaksi"]
+        .nunique()
+        .reset_index(name="Jumlah NPR")
+    )
+    summary = summary[summary["Jumlah NPR"] > 0].copy()
+
+    category_order = [
+        "0-2 hari",
+        "3-5 hari",
+        "6-10 hari",
+        "11-30 hari",
+        ">30 hari",
+    ]
+
+    fig = px.bar(
+        summary,
+        x="Aging Category NPR Complete",
+        y="Jumlah NPR",
+        color="Aging Category NPR Complete",
+        text="Jumlah NPR",
+        title="Distribusi Aging NPR — Created ke First Complete",
+        category_orders={
+            "Aging Category NPR Complete": category_order
+        },
+    )
+
+    fig.update_traces(textposition="outside")
+    fig.update_layout(
+        showlegend=False,
+        xaxis_title="Waktu dari NPR dibuat sampai First Complete",
+        yaxis_title="Jumlah NPR",
+        margin=dict(l=40, r=40, t=60, b=90),
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key="aging_npr_first_complete",
+    )
+
+
+def render_npr_dashboard(
+    df_npr_f: pd.DataFrame,
+    df_npr_aging: pd.DataFrame,
+    df_npr_sla: pd.DataFrame,
+    df_npr_aging_complete: pd.DataFrame,
+    history_ready: bool = True,
+    dates_ready: bool = True,
+):
+    """Seven shared panels; no final aging/SLA for partial history or unverified dates."""
+    date_checks = _npr_date_coverage(df_npr_f)
+    dates_ready = dates_ready and (date_checks["dates_ready"] or df_npr_f.empty)
+    source_ready = date_checks["source_rows_complete"]
+    col_kiri, col_tengah, col_kanan = st.columns([1, 1, 1], gap="small")
+    with col_kiri:
+        with st.container(border=True):
+            st.subheader("📊 Detail NPR per Status")
+
+            if df_npr_f.empty:
+                st.info("Data NPR tidak tersedia.")
+            else:
+                status_summary = (
+                    df_npr_f.groupby("Status")["No. Transaksi"]
+                    .nunique()
+                    .reset_index(name="Jumlah_Doc")
+                )
+
+                # Warna status konsisten dengan PR
+                STATUS_COLORS = {
+                    "Complete": "#00CC96",
+                    "In Progress": "#F2C94C",
+                    "Process": "#F2C94C",
+                    "Approved": "#F2994A",
+                    "Need Approve": "#EB5757",
+                    "Request": "#56CCF2"  # tambahan untuk NPR
+                }
+
+                # Pie chart berdasarkan jumlah dokumen
+                fig = px.pie(
+                    status_summary,
+                    values="Jumlah_Doc",
+                    names="Status",
+                    color="Status",
+                    color_discrete_map=STATUS_COLORS,
+                    hole=0.45,
+                    title="Proporsi Jumlah NPR per Status"
+                )
+
+                # Tampilkan persentase dan jumlah
+                fig.update_traces(
+                    textinfo="percent+value",
+                    texttemplate="%{percent:.1%}<br>(%{value} dokumen)"
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+
+
+        with st.container(border=True):
+            st.subheader("🔥 Heatmap NPR Outstanding - Aktivitas PIC Procurement")
+            render_npr_outstanding_heatmap(df_npr_f)
+
+
+
+
+# =====================================================
+# MID NPR
+# =====================================================
+
+    with col_tengah:
+        with st.container(border=True):
+            st.subheader("👥 NPR Outstanding per PIC — Request & Process")
+
+            if df_npr_f.empty:
+                st.info("Data NPR tidak tersedia.")
+            else:
+                # =========================================================
+                # NPR OUTSTANDING PER PIC
+                # =========================================================
+                # Grafik ini khusus menampilkan NPR yang MASIH perlu diproses.
+                # Complete sengaja dibuang dari visual ini.
+                npr_active = df_npr_f[
+                    df_npr_f["Status"].isin(["Request", "Process"])
+                ].copy()
+
+                if npr_active.empty:
+                    st.info("Tidak ada NPR berstatus Request atau Process.")
+                else:
+                    # PIC NPR pada dataframe dashboard disimpan di kolom "Sales".
+                    npr_active = _npr_assign_pic(npr_active, "Sales")
+                    npr_active["Sales"] = npr_active["Sales"].replace(
+                        {"UNASSIGNED": "Unassigned"}
+                    )
+
+                    # Ringkas jumlah NPR unik per PIC dan status aktif.
+                    sales_summary = (
+                        npr_active.groupby(["Sales", "Status"], dropna=False)
+                        .agg(Jumlah_Doc=("No. Transaksi", "nunique"))
+                        .reset_index()
+                    )
+
+                    # Urutkan PIC berdasarkan total outstanding terbanyak.
+                    pic_order = (
+                        sales_summary.groupby("Sales", as_index=False)["Jumlah_Doc"]
+                        .sum()
+                        .sort_values("Jumlah_Doc", ascending=False, kind="stable")["Sales"]
+                        .tolist()
+                    )
+
+                    STATUS_COLORS = {
+                        "Process": "#F2C94C",
+                        "Request": "#56CCF2",
+                    }
+
+                    # Stacked bar: Request + Process per PIC.
+                    fig = px.bar(
+                        sales_summary,
+                        x="Sales",
+                        y="Jumlah_Doc",
+                        color="Status",
+                        color_discrete_map=STATUS_COLORS,
+                        text="Jumlah_Doc",
+                        title="NPR Outstanding per PIC — Request & Process",
+                        category_orders={
+                            "Sales": pic_order,
+                            "Status": ["Request", "Process"],
+                        },
+                    )
+
+                    # Total outstanding di atas masing-masing PIC.
+                    totals = (
+                        sales_summary.groupby("Sales", as_index=False)["Jumlah_Doc"]
+                        .sum()
+                    )
+                    for _, row in totals.iterrows():
+                        fig.add_annotation(
+                            x=row["Sales"],
+                            y=row["Jumlah_Doc"],
+                            text=f"{int(row['Jumlah_Doc'])}",
+                            showarrow=False,
+                            font=dict(size=12, color="black"),
+                            yshift=10,
+                        )
+
+                    fig.update_traces(
+                        textposition="inside",
+                        textfont=dict(size=10, color="white"),
+                    )
+                    fig.update_layout(
+                        uniformtext_mode="hide",
+                        yaxis_title="Jumlah NPR Outstanding",
+                        xaxis_title="PIC",
+                        margin=dict(l=40, r=40, t=60, b=100),
+                    )
+
+                    st.plotly_chart(fig, use_container_width=True)
+
+
+        with st.container(border=True):
+            st.subheader("⏳ Aging NPR — Created ke First Process")
+            st.caption(
+                "Aging dihitung dari selisih tanggal NPR pertama kali berstatus Process "
+                "dikurangi tanggal NPR dibuat. NPR yang belum pernah Process belum dihitung."
             )
-        except Exception:
+            if history_ready and dates_ready and source_ready:
+                render_npr_aging_first_process(df_npr_aging)
+            else:
+                st.info(_npr_assessment_message_v11_1(df_npr_f, history_ready, dates_ready, "Aging"))
+
+
+
+
+
+# =====================================================
+# 📈 RIGHT - NPR Timeline
+# =====================================================
+    with col_kanan:
+        with st.container(border=True):
+            st.subheader("📏 SLA Compliance NPR")
+            if history_ready and dates_ready and source_ready:
+                npr_sla_threshold = 2
+                _npr_render_sla_gauge(
+                    df_npr_sla,
+                    threshold=npr_sla_threshold,
+                    title="SLA Compliance NPR",
+                )
+                npr_sla_total = len(df_npr_sla)
+                npr_sla_met = int(df_npr_sla["Aging"].le(npr_sla_threshold).sum())
+                npr_sla_not_assessed = max(
+                    0, _npr_unique(df_npr_aging, "No. Transaksi") - npr_sla_total
+                )
+                st.caption(
+                    "Durasi: tanggal NPR dibuat sampai pertama kali Process, "
+                    f"dengan batas {npr_sla_threshold} hari kalender."
+                )
+                st.caption(
+                    f"Dinilai: {npr_sla_total:,} NPR | "
+                    f"Memenuhi SLA: {npr_sla_met:,} NPR | "
+                    f"Belum dapat dinilai karena data aging tidak valid/lengkap: "
+                    f"{npr_sla_not_assessed:,} NPR."
+                )
+            else:
+                st.info(_npr_assessment_message_v11_1(df_npr_f, history_ready, dates_ready, "SLA"))
+
+
+        with st.container(border=True):
+            st.subheader("⏳ Aging NPR — Created ke First Complete")
+            st.caption(
+                "Aging dihitung dari selisih tanggal NPR pertama kali berstatus Complete "
+                "dikurangi tanggal NPR dibuat. NPR yang belum pernah Complete belum dihitung."
+            )
+            if history_ready and dates_ready and source_ready:
+                render_npr_aging_first_complete(df_npr_aging_complete)
+            else:
+                st.info(_npr_assessment_message_v11_1(df_npr_f, history_ready, dates_ready, "Aging"))
+
+        with st.container(border=True):
+            st.subheader("📈 Timeline NPR per Tanggal Transaksi")
+            if _npr_date_coverage(df_npr_f)["preview_input_date"]:
+                st.caption("Tanggal NPR mengikuti kontrak parity v10: input_date, fallback created_at.")
+
+            if df_npr_f.empty:
+                st.info("Data NPR tidak tersedia.")
+            else:
+                # Pastikan kolom tanggal valid
+                df_npr_f['transaction_date'] = pd.to_datetime(df_npr_f['transaction_date'], errors='coerce')
+
+                # Hitung jumlah NPR unik per tanggal
+                timeline = (
+                    df_npr_f.groupby(df_npr_f['transaction_date'].dt.date)['No. Transaksi']
+                    .nunique()
+                    .reset_index(name='Jumlah_Doc')
+                )
+
+                # Line chart timeline NPR
+                fig = px.line(
+                    timeline,
+                    x='transaction_date',
+                    y='Jumlah_Doc',
+                    markers=True,
+                    title='Timeline NPR (Jumlah NPR Unik per Hari)',
+                    line_shape='linear',
+                    color_discrete_sequence=['#56CCF2']
+                )
+
+                fig.update_traces(
+                    textposition="top center",
+                    textfont=dict(size=10, color="black")
+                )
+                fig.update_layout(
+                    yaxis_title="Jumlah NPR",
+                    xaxis_title="Tanggal Transaksi",
+                    margin=dict(l=40, r=40, t=60, b=80)
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+
+
+def _npr_default_source_start():
+    """Compatibility helper: derive the lower bound from the MAIN period only."""
+    period = st.session_state.get("_npr_main_period_v11", {})
+    start = _npr_timestamp(period.get("start"))
+    return start.date() if pd.notna(start) else None
+
+
+def _npr_export_frame(df, history, end_date, source_start, search_number, search_status, search_pic):
+    """Identical audit schema, without tokens/server addresses or fabricated dates."""
+    process = build_npr_aging_first_process(df, history)
+    complete = build_npr_aging_first_complete(df, history).set_index("No. Transaksi")
+    coverage = _npr_coverage(df, history)
+    good = {"API_HISTORY", "NESTED_HISTORY", "API_FIRST_MILESTONES", "POSTGRESQL_HISTORY"}
+    date_coverage = _npr_date_coverage(df)
+    native_dates = dict(zip(df["No. Transaksi"], _npr_native_created_dates(df)))
+    rows = []
+    def timestamp(value):
+        value = _npr_timestamp(value)
+        return value.isoformat() if pd.notna(value) else ""
+    def days(value):
+        return str(int(value)) if pd.notna(value) else ""
+    for row in process.sort_values("No. Transaksi", kind="stable").to_dict("records"):
+        number = row["No. Transaksi"]
+        other = complete.loc[number]
+        read_ok = coverage["states"].get(number) in good
+        aging = row["Aging NPR"]
+        eligible = read_ok and pd.notna(aging) and aging >= 0
+        rows.append({
+            "transaction_number": number, "status_description": row["Status"], "pic": row["Sales"],
+            "npr_name": _npr_text(row.get("Nama NPR")), "notes": _npr_text(row.get("Catatan")),
+            "user_input": _npr_text(row.get("User Input")), "deadline": timestamp(row.get("Tanggal Deadline")),
+            "date_policy": df.attrs.get("npr_date_policy", "CREATED_AT_ONLY"),
+            "scope_creation_dates_complete": str(date_coverage["scope_dates_complete"]),
+            "source_rows_complete": str(date_coverage["source_rows_complete"]),
+            "created_at": timestamp(native_dates.get(number)),
+            "document_date": timestamp(row["transaction_date"]),
+            "document_date_source": row.get("Date Source NPR", "created_at"),
+            "created_date_verified": str(pd.notna(native_dates.get(number))),
+            "first_process_at": timestamp(row["First Process Date"]),
+            "first_complete_at": timestamp(other["First Complete Date"]),
+            "aging_process_days": days(aging), "aging_complete_days": days(other["Aging NPR Complete"]),
+            "sla_eligible": str(bool(eligible)) if read_ok else "",
+            "sla_met": str(bool(aging <= 2)) if eligible else "",
+            "history_read": "READ_OK" if read_ok else "UNRESOLVED",
+            "rule_version": NPR_PARITY_VERSION,
+            "scope_start": str(source_start or ""), "scope_end": str(pd.Timestamp(end_date).date()),
+            "filter_number": _npr_text(search_number).casefold(),
+            "filter_status": _normalize_npr_text_status(search_status) if _npr_text(search_status).casefold() != "semua status" else "",
+            "filter_pic": _npr_pic(search_pic) if _npr_text(search_pic).casefold() != "semua pic" else "",
+            "documents_in_export": str(len(process)), "history_read_complete": str(coverage["ready"]),
+            "assessment_ready": str(coverage["ready"] and date_coverage["ready"]),
+        })
+    cols = ["transaction_number", "status_description", "pic", "created_at", "first_process_at", "first_complete_at",
+            "aging_process_days", "aging_complete_days", "sla_eligible", "sla_met", "history_read", "rule_version",
+            "scope_start", "scope_end", "filter_number", "filter_status", "filter_pic", "documents_in_export", "history_read_complete", "document_date", "document_date_source",
+            "created_date_verified", "assessment_ready", "npr_name", "notes", "user_input", "deadline",
+            "date_policy", "scope_creation_dates_complete", "source_rows_complete"]
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _npr_compare_exports(current, reference):
+    required = list(current.columns)
+    if not set(required).issubset(reference.columns):
+        raise ValueError("Gunakan CSV NPR_Pembanding_v11_2 dari kedua script baru; format lama belum memisahkan tanggal pratinjau.")
+    frames = []
+    scope = ["rule_version", "scope_start", "scope_end", "filter_number", "filter_status", "filter_pic", "date_policy"]
+    for label, frame in (("Aktif", current), ("Pembanding", reference)):
+        frame = frame[required].fillna("").astype(str).copy()
+        if frame.empty or frame["transaction_number"].eq("").any() or frame["transaction_number"].duplicated().any():
+            raise ValueError(label + ": CSV kosong atau nomor NPR kosong/duplikat.")
+        count = pd.to_numeric(frame["documents_in_export"], errors="coerce")
+        if count.isna().any() or not count.eq(len(frame)).all():
+            raise ValueError(label + ": CSV tidak lengkap; jumlah baris tidak cocok dengan kontrol ekspor.")
+        if any(frame[c].nunique(dropna=False) != 1 for c in scope):
+            raise ValueError(label + ": CSV mencampur beberapa aturan/filter/periode.")
+        frames.append(frame)
+    for col in scope:
+        if frames[0][col].iloc[0] != frames[1][col].iloc[0]:
+            raise ValueError("Samakan cakupan/filter sebelum membandingkan: " + col)
+    merged = frames[0].merge(frames[1], on="transaction_number", how="outer", suffixes=("_aktif", "_pembanding"),
+                             indicator=True, validate="one_to_one")
+    results, reasons = [], []
+    for row in merged.to_dict("records"):
+        if row["_merge"] != "both":
+            results.append("BERBEDA")
+            reasons.append("HANYA_AKTIF" if row["_merge"] == "left_only" else "HANYA_PEMBANDING")
             continue
+        history_ok = row["history_read_aktif"] == row["history_read_pembanding"] == "READ_OK"
+        dates_ok = row["created_date_verified_aktif"] == row["created_date_verified_pembanding"] == "True"
+        tested = ["status_description", "pic", "document_date", "npr_name", "notes", "user_input", "deadline"]
+        if dates_ok:
+            tested += ["created_at"]
+        if history_ok:
+            tested += ["first_process_at", "first_complete_at"]
+        if history_ok and dates_ok:
+            tested += ["aging_process_days", "aging_complete_days", "sla_eligible", "sla_met"]
+        differences = [field for field in tested if row[field+"_aktif"] != row[field+"_pembanding"]]
+        unresolved = ([] if dates_ok else ["CREATED_AT_BELUM_TERVERIFIKASI"])
+        unresolved += [] if history_ok else ["HISTORY_BELUM_LENGKAP"]
+        if not (row["scope_creation_dates_complete_aktif"] == row["scope_creation_dates_complete_pembanding"] == "True"):
+            unresolved.append("CAKUPAN_TANGGAL_SUMBER_BELUM_LENGKAP")
+        if not (row["source_rows_complete_aktif"] == row["source_rows_complete_pembanding"] == "True"):
+            unresolved.append("CAKUPAN_DOKUMEN_SUMBER_BELUM_TERVERIFIKASI")
+        results.append("BERBEDA" if differences else ("BELUM_DAPAT_DINILAI" if unresolved else "COCOK"))
+        reasons.append(" | ".join(differences + unresolved) or "FIELD_YANG_DIBANDINGKAN_COCOK")
+    merged["Hasil"], merged["Penyebab"] = results, reasons
+    return merged[["transaction_number", "Hasil", "Penyebab"] + [c for c in merged if c not in {"transaction_number", "Hasil", "Penyebab", "_merge"}]]
 
-        if raw is None or raw.empty:
-            continue
 
-        cols = {str(c).casefold(): c for c in raw.columns}
+def _npr_render_export(df, history, end_date, source_start, search_number, search_status, search_pic):
+    import hashlib
+    audit = _npr_export_frame(df, history, end_date, source_start, search_number, search_status, search_pic)
+    content = audit.to_csv(index=False, lineterminator="\n").encode("utf-8-sig")
+    with st.expander("📥 Data NPR dan pemeriksaan kesamaan", expanded=False):
+        st.caption("Ekspor mengikuti filter aktif. CSV hanya untuk pemeriksaan, tidak pernah mengganti sumber grafik.")
+        st.download_button("⬇️ Unduh NPR pembanding.csv", content, "NPR_Pembanding_v11_2_" + _npr_source_label() + ".csv",
+                            "text/csv", key="npr_v7_download")
+        st.caption("Sidik data NPR terfilter: " + hashlib.sha256(content).hexdigest())
+        upload = st.file_uploader("Bandingkan dengan CSV NPR_Pembanding_v11_2 dari sumber lainnya", type=["csv"], key="npr_v7_compare_upload")
+        if upload is not None:
+            try:
+                data = upload.getvalue()
+                if len(data) > 25 * 1024 * 1024:
+                    raise ValueError("CSV pembanding maksimal 25 MB.")
+                other = pd.read_csv(BytesIO(data), dtype=str, keep_default_na=False, encoding="utf-8-sig")
+                comparison = _npr_compare_exports(audit, other)
+                counts = comparison["Hasil"].value_counts().to_dict()
+                st.write(counts)
+                if comparison["Hasil"].eq("COCOK").all():
+                    st.success("Semua nomor dan field yang diperiksa cocok pada kedua ekspor ini. Ini bukan bukti database sumber identik.")
+                else:
+                    st.warning("Masih ada field berbeda, tanggal dibuat belum terverifikasi, atau history belum lengkap.")
+                st.dataframe(comparison, use_container_width=True, hide_index=True)
+                st.download_button("⬇️ Unduh hasil perbandingan.csv", comparison.to_csv(index=False).encode("utf-8-sig"),
+                                    "Perbandingan_NPR_v11_2.csv", "text/csv", key="npr_v7_compare_download")
+            except (ValueError, KeyError, UnicodeError, pd.errors.ParserError) as exc:
+                st.warning(str(exc))
 
-        def col(*names):
-            for n in names:
-                c = cols.get(str(n).casefold())
-                if c is not None:
-                    return c
-            return None
 
-        no_col = col("transaction_number", "no_npr", "npr_number", "number", "code")
-        status_col = col("status_description", "status_name", "status")
-        if not no_col or not status_col:
-            continue
+def _npr_period_bounds_v11(start_date, end_date):
+    """Require BOTH bounds from the main Select Date Range; never invent a period."""
+    start = _npr_timestamp(start_date)
+    end = _npr_timestamp(end_date)
+    if pd.isna(start) or pd.isna(end):
+        raise ValueError("Lengkapi tanggal awal dan akhir pada Select Date Range untuk NPR.")
+    if start.normalize() > end.normalize():
+        raise ValueError("Tanggal awal NPR tidak boleh melewati tanggal akhir pada Select Date Range.")
+    return start.date(), end.date()
 
-        out = pd.DataFrame(index=raw.index)
-        out["No. Transaksi"] = raw[no_col].fillna("").astype(str).str.strip()
-        out["Nama NPR"] = raw[col("name", "nama_npr", "npr_name", "title", "description")].fillna("").astype(str).str.strip() if col("name", "nama_npr", "npr_name", "title", "description") else ""
 
-        pic_col = col("pic_name", "pic", "penanggung_jawab", "responsible_name", "assignee_name")
-        if pic_col:
-            out["Sales"] = raw[pic_col].fillna("").astype(str).str.strip()
-        else:
-            pic_id_col = col("pic_id")
-            out["Sales"] = raw[pic_id_col].fillna("").astype(str).str.strip() if pic_id_col else ""
+def run_npr_dashboard_v7(end_date, search_number, search_status, pic_column, *, start_date=None):
+    """NPR v11: one period picker, supplied by main() on both adapters.
 
-        out["Status"] = raw[status_col].map(_normalize_npr_text_status)
-
-        deadline_col = col("due_date", "deadline", "deadline_date", "tanggal_deadline")
-        out["Tanggal Deadline"] = pd.to_datetime(raw[deadline_col], errors="coerce") if deadline_col else pd.NaT
-
-        notes_col = col("notes", "note", "catatan", "remarks", "remark")
-        out["Catatan"] = raw[notes_col].fillna("").astype(str).str.strip() if notes_col else ""
-
-        creator_col = col("created_by_name", "user_input", "creator_name", "created_by", "user_name")
-        out["User Input"] = raw[creator_col].fillna("").astype(str).str.strip() if creator_col else ""
-
-        date_col = col("created_at", "transaction_date", "date", "request_date")
-        out["transaction_date"] = pd.to_datetime(raw[date_col], errors="coerce") if date_col else pd.NaT
-
-        out = out[
-            out["No. Transaksi"].str.upper().str.startswith("SIBNPR", na=False)
-            & out["Status"].isin(NPR_VALID_STATUSES)
-        ].copy()
-
-        if out.empty:
-            continue
-
-        out = (
-            out.sort_values("transaction_date", na_position="last")
-            .drop_duplicates("No. Transaksi", keep="last")
-            .reset_index(drop=True)
+    The v10 date/milestone/SLA contract is unchanged. The lower bound now follows
+    Select Date Range instead of a separate NPR control or a cumulative horizon.
+    """
+    try:
+        source_start, end_date = _npr_period_bounds_v11(start_date, end_date)
+    except ValueError as exc:
+        st.info(str(exc))
+        return
+    # Retain only the selected period for legacy diagnostic helpers. Old NPR date
+    # settings and session-state pickers cannot override the main period.
+    st.session_state["_npr_main_period_v11"] = {
+        "start": source_start.isoformat(), "end": end_date.isoformat()
+    }
+    if not _npr_source_controls(end_date, source_start):
+        return
+    with st.spinner("Membaca dokumen NPR..."):
+        df = _npr_source_headers(source_start, end_date)
+    if df.attrs.get("npr_source_state") != "OK":
+        st.warning(df.attrs.get("npr_source_message", "Dokumen NPR belum berhasil dibaca; jumlah dokumen tidak dianggap nol."))
+        _npr_source_diagnostics(df, None)
+        return
+    df = _npr_source_prepare_headers_v9(df)
+    df = _npr_apply_date_policy_v9(df, preview=False)
+    _npr_render_header_audit_v9(df, end_date, source_start)
+    normal = df.attrs.get("npr_normalization_diagnostic", {})
+    dated = apply_npr_date_filter(df, end_date, source_start)
+    pic_options = ["Semua PIC"] + sorted(dated["Sales"].dropna().unique().tolist())
+    # A PIC from another period must not keep the new period accidentally empty.
+    if st.session_state.get("npr_v7_pic", "Semua PIC") not in pic_options:
+        st.session_state["npr_v7_pic"] = "Semua PIC"
+    with pic_column:
+        selected_pic = st.selectbox("Pilih PIC Procurement 👤", pic_options,
+                                   index=0, key="npr_v7_pic")
+    filtered = _apply_npr_filters_v3(dated, search_number, search_status, selected_pic)
+    date_values = _npr_date_series(df["transaction_date"])
+    native = _npr_date_coverage(df)
+    diag = {
+        "normalized_documents": len(df), "missing_native_created_at": native["missing_created_at"],
+        "preview_input_date": native["preview_input_date"], "date_policy": df.attrs["npr_date_policy"],
+        "excluded_missing_document_date": int(date_values.isna().sum()),
+        "excluded_before_source_start": int(date_values.lt(pd.Timestamp(source_start).normalize()).sum()) if source_start else 0,
+        "excluded_after_cutoff": int(date_values.ge(pd.Timestamp(end_date).normalize()+pd.Timedelta(days=1)).sum()),
+        "after_date_filter": len(dated), "after_filters": len(filtered),
+        "report_end": str(pd.Timestamp(end_date).date()), "source_start": str(source_start),
+        "period_source": "MAIN_SELECT_DATE_RANGE", "period_start": str(source_start),
+        "period_end": str(end_date), "period_bounds": "START_INCLUSIVE_END_DAY_INCLUSIVE",
+    }
+    df.attrs.update(npr_filter_diagnostic=diag, npr_report_end=str(end_date))
+    st.caption("Periode NPR: " + source_start.strftime("%d-%m-%Y") +
+               " s.d. " + end_date.strftime("%d-%m-%Y") +
+               f" | Dokumen terbaca: {len(df):,} → Sesuai periode: {len(dated):,} → Setelah filter: {len(filtered):,}")
+    st.caption("Status mengikuti data terbaru saat dimuat; bukan snapshot status historis. "
+               "Tanggal dokumen mengikuti kontrak v10: input_date, lalu created_at bila kosong. "
+               "Aging/SLA tetap memakai milestone FIRST; batas SLA ≤2 hari kalender.")
+    if not native["source_rows_complete"]:
+        paging = df.attrs.get("npr_api_fetch_diagnostic", {}).get("pagination", "UNVERIFIED")
+        st.warning(
+            f"Daftar NPR dari sumber belum terverifikasi lengkap. Terbaca {len(df):,} dokumen; "
+            f"status cakupan: {paging}. Grafik jumlah/status/PIC hanya menggambarkan dokumen yang terbaca, "
+            "belum hasil final seluruh periode. Ini bukan berarti tanggal NPR kosong."
         )
+    if native["missing_created_at"]:
+        st.warning(f"{native['missing_created_at']:,} NPR belum memiliki tanggal canonical (input_date/created_at). "
+                   "Dokumen tersebut tidak dapat dinilai pada filter tanggal maupun aging/SLA.")
+    alerts = [("nomor kosong", normal.get("removed_missing_number", 0)),
+              ("status tidak valid", normal.get("removed_invalid_status", 0)),
+              ("baris duplikat", normal.get("duplicates_removed", 0)),
+              ("PIC masih berupa ID", normal.get("unresolved_pic_ids", 0))]
+    found = [f"{label}: {int(count):,}" for label, count in alerts if count]
+    if found:
+        st.warning("Periksa data sumber — " + " | ".join(found) + ".")
+    if filtered.empty:
+        if not df.empty and date_values.isna().all():
+            st.error(f"{len(df):,} NPR terbaca tetapi tanggal canonical belum tersedia. Ini bukan nol dokumen. "
+                     "Periksa field input_date/created_at pada sumber.")
+        elif not dated.empty:
+            st.info("Dokumen tersedia pada periode ini, tetapi tidak cocok dengan pencarian/status/PIC.")
+        else:
+            st.info("Tidak ada dokumen dengan tanggal valid dalam cakupan terpilih. Periksa ekspor sumber sebelum filter.")
+        _npr_source_diagnostics(df, None)
+        _npr_source_after_headers_v9(df)
+        return
+    date_coverage = _npr_date_coverage(filtered)
+    # Histories of selected/dated documents can be read even when source
+    # enumeration is unverified. Final aggregate assessment stays gated below.
+    load_history = date_coverage["selected_dates_ready"]
+    if not load_history:
+        load_history = st.checkbox("Periksa history untuk diagnostik dokumen tanpa tanggal canonical",
+                                   value=False, key="npr_v10_inspect_history_without_date")
+    if load_history:
+        _npr_source_history_controls(filtered)
+        with st.spinner("Memeriksa history NPR..."):
+            history = _npr_normalize_history(_npr_source_history(filtered))
+    else:
+        history = _npr_normalize_history(None)
+        history.attrs["npr_history_diagnostic"] = [
+            {"__npr_number": number, "History State": "PAUSED_MISSING_CANONICAL_DATE"}
+            for number in filtered["No. Transaksi"]]
+    coverage = _npr_coverage(filtered, history)
+    st.caption(f"History diperiksa: {coverage['resolved']:,}/{coverage['total']:,} NPR. "
+               "History berhasil dibaca tanpa milestone dibedakan dari history belum/gagal dibaca.")
+    if load_history and not coverage["ready"]:
+        st.warning(f"History {coverage['unresolved']:,} NPR belum selesai diperiksa. "
+                   "Grafik dokumen tetap tampil; aging/SLA final tidak memakai subset parsial.")
+    df.attrs["npr_validation_v11_1"] = {
+        "selected_documents": len(filtered),
+        "selected_canonical_dates_valid": date_coverage["canonical_dates_valid"],
+        "selected_missing_canonical_dates": date_coverage["missing_canonical_dates"],
+        "source_missing_canonical_dates": native["missing_canonical_dates"],
+        "selected_dates_ready": date_coverage["selected_dates_ready"],
+        "scope_dates_complete": date_coverage["scope_dates_complete"],
+        "source_rows_complete": date_coverage["source_rows_complete"],
+        "history_resolved": coverage["resolved"],
+        "history_total": coverage["total"],
+        "history_ready": coverage["ready"],
+        "assessment_ready": bool(date_coverage["ready"] and coverage["ready"]),
+    }
+    process = build_npr_aging_first_process(filtered, history)
+    complete = build_npr_aging_first_complete(filtered, history)
+    sla = build_npr_sla_first_process(process)
+    render_npr_dashboard(filtered, process, sla, complete,
+                         history_ready=coverage["ready"], dates_ready=date_coverage["dates_ready"])
+    _npr_render_export(filtered, history, end_date, source_start, search_number, search_status, selected_pic)
+    _npr_source_diagnostics(df, history)
+    _npr_source_after_headers_v9(df)
+    if load_history:
+        _npr_source_after_render(history)
+def _npr_apply_date_policy_v9(df, preview=False):
+    """v10 shared date policy: one canonical date on both data sources.
+
+    input_date is preferred because it exists in production API and PostgreSQL.
+    created_at is a fallback only when input_date is absent. The legacy preview
+    argument is retained for UI compatibility but no longer changes calculations.
+    """
+    import copy
+    out = df.copy()
+    out.attrs = copy.deepcopy(df.attrs)
+    canonical = _npr_native_created_dates(out)
+    out["Created At NPR"] = canonical
+    out["transaction_date"] = canonical
+    if "Date Source NPR" not in out:
+        out["Date Source NPR"] = "MISSING_DATE"
+    out.loc[canonical.isna(), "Date Source NPR"] = "MISSING_DATE"
+    out.attrs["npr_date_policy"] = "INPUT_DATE_PREFERRED_CREATED_AT_FALLBACK"
+    # Date completeness describes dates only. Pagination has its own attribute.
+    out.attrs["npr_scope_dates_complete"] = bool(canonical.notna().all())
+    return out
+
+
+def _npr_header_audit_frame_v9(df, end_date, source_start=None):
+    """All normalized source headers, including undated rows excluded by date filtering."""
+    def stamp(value):
+        ts = _npr_timestamp(value)
+        return ts.isoformat() if pd.notna(ts) else ""
+    end = _npr_timestamp(end_date).normalize() + pd.Timedelta(days=1)
+    start = _npr_timestamp(source_start).normalize() if source_start else None
+    rows = []
+    for r in df.sort_values("No. Transaksi", kind="stable").to_dict("records"):
+        dt = _npr_timestamp(r.get("transaction_date"))
+        membership = "UNKNOWN" if pd.isna(dt) else str(bool(dt < end and (start is None or dt >= start)))
+        rows.append({
+            "transaction_number": r["No. Transaksi"], "status_description": r["Status"],
+            "pic": r["Sales"], "npr_name": _npr_text(r.get("Nama NPR")),
+            "notes": _npr_text(r.get("Catatan")), "user_input": _npr_text(r.get("User Input")),
+            "deadline": stamp(r.get("Tanggal Deadline")), "created_at": stamp(r.get("Created At NPR")),
+            "document_date": stamp(dt), "document_date_source": r.get("Date Source NPR", "MISSING_DATE"),
+            "in_report_period": membership, "documents_in_export": str(len(df)),
+            "rule_version": NPR_PARITY_VERSION,
+            "data_source": _npr_source_label(),
+            "source_fetched_at_utc": df.attrs.get("npr_api_fetch_diagnostic", {}).get("fetched_at_utc", "") or df.attrs.get("npr_pg_snapshot", {}).get("fetched_at_utc", ""),
+            "source_rows_complete": str(_npr_source_rows_complete_v11_1(df)),
+            "date_policy": df.attrs.get("npr_date_policy", "CREATED_AT_ONLY"),
+            "scope_start": str(source_start or ""), "scope_end": str(pd.Timestamp(end_date).date()),
+        })
+    cols = ["transaction_number", "status_description", "pic", "npr_name", "notes", "user_input",
+            "deadline", "created_at", "document_date", "document_date_source", "in_report_period",
+            "documents_in_export", "rule_version", "date_policy", "scope_start", "scope_end", "source_rows_complete", "data_source", "source_fetched_at_utc"]
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _npr_compare_header_audits_v9(current, reference):
+    required = list(current.columns)
+    if not set(required).issubset(reference.columns):
+        raise ValueError("Gunakan CSV NPR_Header_Sumber_v11_2 dari kedua dashboard, bukan CSV aging/versi lama.")
+    frames = []
+    scope = ["rule_version", "date_policy", "scope_start", "scope_end"]
+    for label, raw in (("Aktif", current), ("Pembanding", reference)):
+        f = raw[required].fillna("").astype(str).copy()
+        if f.empty or f["transaction_number"].eq("").any() or f["transaction_number"].duplicated().any():
+            raise ValueError(label + ": header kosong/nomor kosong/duplikat; tidak dapat disahkan cocok.")
+        counts = pd.to_numeric(f["documents_in_export"], errors="coerce")
+        if not counts.eq(len(f)).all():
+            raise ValueError(label + ": kontrol jumlah baris gagal. Gunakan hasil ekspor lengkap.")
+        if any(f[c].nunique(dropna=False) != 1 for c in scope):
+            raise ValueError(label + ": ekspor mencampur beberapa aturan/periode.")
+        frames.append(f)
+    for col in scope:
+        if frames[0][col].iloc[0] != frames[1][col].iloc[0]:
+            raise ValueError("Samakan pengaturan sebelum membandingkan: " + col)
+    result = frames[0].merge(frames[1], how="outer", on="transaction_number",
+                            suffixes=("_aktif", "_pembanding"), indicator=True, validate="one_to_one")
+    outcomes, reasons = [], []
+    fields = ["status_description", "pic", "npr_name", "notes", "user_input", "deadline",
+              "created_at", "document_date", "in_report_period"]
+    for r in result.to_dict("records"):
+        if r["_merge"] != "both":
+            outcomes.append("BERBEDA")
+            reasons.append("HANYA_AKTIF" if r["_merge"] == "left_only" else "HANYA_PEMBANDING")
+            continue
+        diff = [c for c in fields if r[c+"_aktif"] != r[c+"_pembanding"]]
+        unknown = not r["created_at_aktif"] or not r["created_at_pembanding"]
+        unresolved = ["TANGGAL_CANONICAL_BELUM_TERVERIFIKASI"] if unknown else []
+        if not (r["source_rows_complete_aktif"] == r["source_rows_complete_pembanding"] == "True"):
+            unresolved.append("CAKUPAN_DOKUMEN_SUMBER_BELUM_TERVERIFIKASI")
+        outcomes.append("BERBEDA" if diff else ("BELUM_DAPAT_DINILAI" if unresolved else "COCOK"))
+        reasons.append(" | ".join(diff + unresolved) or "HEADER_COCOK")
+    result["Hasil"], result["Penyebab"] = outcomes, reasons
+    return result[["transaction_number", "Hasil", "Penyebab"] +
+                  [c for c in result if c not in {"transaction_number", "Hasil", "Penyebab", "_merge"}]]
+
+
+def _npr_render_header_audit_v9(df, end_date, source_start=None):
+    # Proof is recomputed from the current API snapshot on EVERY run, never copied
+    # blindly from an earlier period. It changes attributes only, not data cells.
+    df.attrs.pop("npr_period_reference_v11_2", None)
+    audit = _npr_header_audit_frame_v9(df, end_date, source_start)
+    with st.expander("🔎 Periksa dokumen sumber sebelum filter tanggal", expanded=False):
+        if st.button("🔄 Muat ulang data NPR", key="npr_v11_reload"):
+            _npr_source_clear()
+            st.rerun()
+        st.caption("Ekspor mencakup header yang diterima sumber; status in_report_period menunjukkan periode utama. "
+                   "CSV hanya dipakai membandingkan, tidak pernah memasok nilai grafik atau history API.")
+        st.download_button("⬇️ Unduh seluruh header NPR.csv", audit.to_csv(index=False).encode("utf-8-sig"),
+                           "NPR_Header_Sumber_v11_2_" + _npr_source_label() + ".csv", "text/csv", key="npr_v9_header_csv")
+        if _npr_source_label() == "API":
+            st.caption("Untuk API tanpa metadata pagination: unggah ekspor header PostgreSQL v11.2 dengan Select Date Range yang sama. "
+                       "Nomor dan tanggal seluruh NPR pada periode harus cocok; jumlah total yang sama saja tidak cukup.")
+            other = st.file_uploader("Periksa cakupan terhadap header PostgreSQL v11.2", type=["csv"], key="npr_v11_2_period_reference")
+            if other is not None:
+                try:
+                    content = other.getvalue()
+                    if len(content) > 25 * 1024 * 1024:
+                        raise ValueError("CSV pembanding maksimal 25 MB.")
+                    reference = pd.read_csv(BytesIO(content), dtype=str, keep_default_na=False, encoding="utf-8-sig")
+                    proof, comparison = _npr_period_header_check_v11_2(audit, reference)
+                    df.attrs["npr_period_reference_v11_2"] = proof
+                    if proof["matched"]:
+                        st.success("Nomor dan tanggal NPR pada periode cocok dengan snapshot PostgreSQL yang diunggah. "
+                                   "Validasi cakupan periode lolos; history tetap wajib dibaca dari API.")
+                        if not proof["all_header_fields_match"]:
+                            st.warning("Cakupan cocok, tetapi ada field header berbeda. Hasil kedua dashboard belum boleh dinyatakan sama persis.")
+                    else:
+                        st.warning("Cakupan periode BELUM cocok. Periksa dokumen/tanggal yang berbeda; penanda lengkap tidak dipaksakan.")
+                    st.write({"NPR API dalam periode": proof["api_period_documents"], "NPR PostgreSQL dalam periode": proof["reference_period_documents"],
+                              "Semua field header cocok": proof["all_header_fields_match"]})
+                    st.dataframe(comparison, use_container_width=True, hide_index=True)
+                    st.download_button("⬇️ Unduh perbandingan header periode.csv", comparison.to_csv(index=False).encode("utf-8-sig"),
+                                       "Perbandingan_Header_Periode_NPR_v11_2.csv", "text/csv", key="npr_v11_2_period_diff")
+                except (ValueError, KeyError, UnicodeError, pd.errors.ParserError) as exc:
+                    st.warning(str(exc))
+        else:
+            st.caption("Gunakan CSV header ini pada dashboard API untuk memeriksa cakupan periode yang sama. "
+                       "Setelah history API selesai, gunakan NPR pembanding.csv untuk memeriksa milestone, aging, dan SLA.")
+
+def _npr_period_header_check_v11_2(current, reference):
+    """Compare *period* headers without importing any reference values into the API.
+
+    Complete enumeration is supported only relative to the supplied, complete
+    PostgreSQL snapshot. Matching counts alone is insufficient: numbers AND dates
+    must match. Header field parity is a separate result.
+    """
+    import hashlib
+    required = {"transaction_number", "document_date", "in_report_period", "documents_in_export",
+                "rule_version", "date_policy", "scope_start", "scope_end", "source_rows_complete", "data_source"}
+    frames = []
+    for label, original in (("Aktif", current), ("Pembanding", reference)):
+        if not required.issubset(original.columns):
+            raise ValueError(label + ": gunakan ekspor header NPR v11.2, bukan CSV lama atau CSV aging.")
+        f = original.fillna("").astype(str).copy()
+        if f.empty or f["transaction_number"].str.strip().eq("").any() or f["transaction_number"].duplicated().any():
+            raise ValueError(label + ": file kosong atau nomor NPR kosong/duplikat.")
+        if not pd.to_numeric(f["documents_in_export"], errors="coerce").eq(len(f)).all():
+            raise ValueError(label + ": jumlah baris tidak sesuai kontrol ekspor.")
+        for col in ("rule_version", "date_policy", "scope_start", "scope_end", "data_source", "source_rows_complete"):
+            if f[col].nunique(dropna=False) != 1:
+                raise ValueError(label + ": metadata bercampur pada " + col)
+        start, end = _npr_period_bounds_v11(f["scope_start"].iloc[0], f["scope_end"].iloc[0])
+        dates = _npr_date_series(f["document_date"])
+        expected = pd.Series("UNKNOWN", index=f.index)
+        valid = dates.notna()
+        inside = valid & dates.ge(pd.Timestamp(start)) & dates.lt(pd.Timestamp(end) + pd.Timedelta(days=1))
+        expected.loc[valid] = inside.loc[valid].map({True: "True", False: "False"})
+        if not f["in_report_period"].eq(expected).all():
+            raise ValueError(label + ": penanda periode tidak sesuai tanggal dokumen.")
+        frames.append((f, inside, bool(valid.all())))
+    a, am, av = frames[0]
+    b, bm, bv = frames[1]
+    for col in ("rule_version", "date_policy", "scope_start", "scope_end"):
+        if a[col].iloc[0] != b[col].iloc[0]:
+            raise ValueError("Samakan Select Date Range dan versi file: " + col)
+    if b["data_source"].iloc[0] != "POSTGRESQL":
+        raise ValueError("Bukti cakupan harus berasal dari ekspor POSTGRESQL, bukan API lain.")
+    if not b["source_rows_complete"].eq("True").all() or not bv:
+        raise ValueError("Ekspor PostgreSQL belum lengkap atau memuat tanggal tidak valid.")
+    aa, bb = a.loc[am].copy(), b.loc[bm].copy()
+    # Compare ISO-normalized dates, never replace API values by CSV values.
+    aa["document_date"] = _npr_date_series(aa["document_date"]).map(lambda t: t.isoformat())
+    bb["document_date"] = _npr_date_series(bb["document_date"]).map(lambda t: t.isoformat())
+    fields = ["document_date", "status_description", "pic", "npr_name", "notes", "user_input", "deadline"]
+    if not set(fields).issubset(aa.columns) or not set(fields).issubset(bb.columns):
+        raise ValueError("Kolom pembanding header tidak lengkap.")
+    compare = aa[["transaction_number"] + fields].merge(bb[["transaction_number"] + fields],
+                 on="transaction_number", how="outer", suffixes=("_api", "_postgre"), indicator=True, validate="one_to_one")
+    results, reasons = [], []
+    for r in compare.to_dict("records"):
+        if r["_merge"] != "both":
+            results.append("BERBEDA")
+            reasons.append("HANYA_API" if r["_merge"] == "left_only" else "HANYA_POSTGRESQL")
+        else:
+            differences = [c for c in fields if r[c + "_api"] != r[c + "_postgre"]]
+            results.append("BERBEDA" if differences else "COCOK")
+            reasons.append(" | ".join(differences) or "HEADER_PERIODE_COCOK")
+    compare["Hasil"], compare["Penyebab"] = results, reasons
+    membership_ok = bool(av and len(aa) == len(bb) and compare["_merge"].eq("both").all()
+                         and compare["document_date_api"].eq(compare["document_date_postgre"]).all())
+    content = aa.sort_values("transaction_number")[["transaction_number", "document_date"]].to_csv(index=False, lineterminator="\n")
+    proof = {"matched": membership_ok, "basis": "MATCHED_SUPPLIED_POSTGRESQL_PERIOD_EXPORT",
+             "period_start": a["scope_start"].iloc[0], "period_end": a["scope_end"].iloc[0],
+             "api_period_documents": len(aa), "reference_period_documents": len(bb),
+             "all_header_fields_match": bool(membership_ok and compare["Hasil"].eq("COCOK").all()),
+             "membership_sha256": hashlib.sha256(content.encode()).hexdigest(),
+             "reference_snapshot_utc": b.get("source_fetched_at_utc", pd.Series([""])).iloc[0],
+             "note": "Bukti dua snapshot pada periode ini; bukan sertifikasi database, token, atau history."}
+    return proof, compare.drop(columns="_merge")
+
+
+# === END NPR SHARED RULES ===
+
+
+
+# =========================================================
+# NPR API -> skema dan milestone yang sama dengan PostgreSQL
+# =========================================================
+# NPR memakai server BRP TEST yang diberikan pengguna, TERPISAH dari ERP PR/DO.
+# Secrets opsional: [npr_api] base_url, token, endpoint, history_endpoint.
+# Atau environment: SIBIMA_NPR_BASE_URL / SIBIMA_NPR_API_TOKEN.
+# Token NPR tidak pernah mengambil API_TOKEN ERP secara otomatis.
+# product-requests = NPR; price-update-requests = PUR (TIDAK digabung ke NPR).
+# History route diuji terbatas sebelum dipakai; lihat Koneksi riwayat NPR.
+# Field date_inprogress/date_complete header belum terbukti FIRST transition.
+NPR_API_CACHE_TTL = NPR_PARITY_CACHE_TTL
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def _npr_setting(name: str, env_name: str, default=""):
+    """Environment > secrets [npr_api] > default. Aman tanpa secrets.toml."""
+    value = os.getenv(env_name)
+    if value is not None and str(value).strip():
+        return value
+    try:
+        section = st.secrets.get("npr_api", {})
+        value = section.get(name)
+        if value is not None and str(value).strip():
+            return value
+        value = st.secrets.get(env_name)
+        if value is not None and str(value).strip():
+            return value
+    except Exception:
+        pass
+    return default
+
+
+# NPR reader fix 2026-10-14. Tidak mengubah source/formula PR dan DO.
+NPR_READER_VERSION = NPR_PARITY_VERSION
+NPR_DEFAULT_FETCH_START = ""
+
+
+class NPRAPIFetchError(RuntimeError):
+    """Kesalahan aman tanpa URL ber-token. Tidak disimpan sebagai hasil cache."""
+    def __init__(self, diagnostic):
+        self.diagnostic = dict(diagnostic)
+        super().__init__(str(self.diagnostic.get("state", "FETCH_ERROR")))
+
+
+def _npr_clean_token(value, base_url: str) -> str:
+    """Terima token atau URL product-requests yang disalin dari pesan pengguna."""
+    from urllib.parse import urlsplit, parse_qs, unquote
+    raw = str(value or "").strip().strip("\u200b\ufeff").strip()
+    if not raw:
+        return ""
+    if raw.lower().startswith(("http://", "https://")):
+        try:
+            source, expected = urlsplit(raw), urlsplit(base_url)
+            same_origin = (source.scheme, source.hostname, source.port or 443) == (
+                expected.scheme, expected.hostname, expected.port or 443
+            )
+            endpoint_path = unquote(source.path).rstrip("/")
+            allowed_path = expected.path.rstrip("/") + "/product-requests"
+            if (not same_origin or source.username or source.password or source.fragment
+                    or endpoint_path != allowed_path):
+                raise ValueError("URL token harus endpoint product-requests pada server NPR yang dipilih.")
+            values = parse_qs(source.query).get("token", [])
+            if len(values) != 1:
+                raise ValueError("URL NPR harus mempunyai tepat satu parameter token.")
+            raw = values[0].strip()
+        except ValueError:
+            raise ValueError("URL token tidak valid atau tidak berasal dari endpoint NPR pada server yang dipilih.") from None
+    if (not raw or any(ch.isspace() for ch in raw) or any(ch in raw for ch in ("?", "&", "\u200b", "\ufeff"))):
+        raise ValueError("Token tidak valid: gunakan token saja atau URL product-requests lengkap, tanpa spasi di tengah.")
+    return raw
+
+
+def _npr_safe_message(value, token="") -> str:
+    """Pesan API singkat; URL query, token, dan kredensial panjang disamarkan."""
+    import re
+    text = value if isinstance(value, str) else ""
+    if token:
+        text = text.replace(token, "[REDACTED]")
+    text = re.sub(r"https?://[^\s<>\"']+", "[URL disamarkan]", text)
+    text = re.sub(r"(?i)(token|password|authorization|api[_-]?key)\s*[=:]\s*[^\s,;]+", r"\1=[REDACTED]", text)
+    text = re.sub(r"\b[A-Za-z0-9_\-]{32,}\b", "[REDACTED]", text)
+    return " ".join(text.split())[:260]
+
+
+def _npr_api_config() -> dict:
+    """NPR connection from existing config; period comes only from Select Date Range.
+
+    An ERP token may be reused only for the exact same HTTPS origin AND API path.
+    A nonblank but invalid NPR token is an error, not permission to try another key.
+    """
+    from urllib.parse import urlsplit, unquote
+    base = str(st.session_state.get("_npr_api_base_v6") or _npr_setting(
+        "base_url", "SIBIMA_NPR_BASE_URL", "https://erp.sibima.id/api/"
+    )).strip().rstrip("/") + "/"
+    base = _npr_validate_base_v6(base)
+    try:
+        parsed = urlsplit(base)
+        valid = (parsed.scheme == "https" and parsed.hostname and not parsed.username
+                 and not parsed.password and not parsed.query and not parsed.fragment
+                 and ".." not in unquote(parsed.path).split("/"))
+        _ = parsed.port
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError("Base URL NPR harus HTTPS tanpa token, query, username, atau password.")
+    token_value = _npr_setting("token", "SIBIMA_NPR_API_TOKEN", "")
+    fetch_start = _npr_default_source_start()
+    # Preserve an existing session credential only on its original host/path.
+    saved = st.session_state.get("_npr_api_credentials", {})
+    if saved.get("base_url") == base and str(saved.get("token", "")).strip():
+        token_value = saved["token"]
+    if not str(token_value or "").strip():
+        erp_base = str(BASE_URL.get("erp", "")).strip().rstrip("/") + "/"
+        try:
+            erp = urlsplit(erp_base)
+            same_erp = (
+                parsed.scheme == erp.scheme == "https"
+                and parsed.hostname == erp.hostname
+                and (parsed.port or 443) == (erp.port or 443)
+                and parsed.path.rstrip("/") == erp.path.rstrip("/")
+                and not erp.username and not erp.password and not erp.query and not erp.fragment
+            )
+        except ValueError:
+            same_erp = False
+        if same_erp:
+            token_value = str(API_TOKEN or "").strip()
+            if not token_value:
+                try:
+                    token_value = str(st.secrets.get("SIBIMA_API_TOKEN", "") or
+                                      st.secrets.get("api", {}).get("token", "") or "").strip()
+                except Exception:
+                    token_value = ""
+    token_error = ""
+    try:
+        token = _npr_clean_token(token_value, base)
+    except ValueError as exc:
+        # Invalid credentials remain visible as a configuration error.
+        token, token_error = "", str(exc)
+    end_param = str(_npr_setting("end_date_param", "SIBIMA_NPR_END_DATE_PARAM", "end_date")).strip()
+    if end_param not in {"end_date", "date_end"}:
+        raise ValueError("end_date_param NPR harus end_date atau date_end.")
+    return {
+        "base_url": base,
+        "token": token,
+        "token_config_error": token_error,
+        "end_date_param": end_param,
+        "fetch_start_date": str(fetch_start) if fetch_start else None,
+        "history_endpoint": str(_npr_setting("history_endpoint", "SIBIMA_NPR_HISTORY_ENDPOINT", "")).strip(),
+        "discover_history": str(_npr_setting("discover_history", "SIBIMA_NPR_DISCOVER_HISTORY", "true")).casefold() in {"1", "true", "yes"},
+    }
+
+
+def _npr_list_page(payload):
+    """Baca list/header dan wrapper pagination tanpa me-flatten items produk."""
+    meta = {}
+    page_keys = ("current_page", "page", "last_page", "total_pages", "next_page_url", "has_more", "total")
+
+    def visit(obj, depth=0):
+        if depth > 8:
+            return [], False
+        if isinstance(obj, list):
+            if any(not isinstance(row, dict) for row in obj):
+                return [], False
+            return obj, True
+        if not isinstance(obj, dict):
+            return [], False
+        if str(obj.get("success", True)).strip().casefold() in {"false", "0"}:
+            return [], False
+        # Satu header dapat punya "items"; jangan menganggap items sebagai daftar NPR.
+        if any(k in obj for k in ("transaction_number", "no_npr", "npr_number", "No. Transaksi")):
+            return [obj], True
+        for candidate in (obj, obj.get("meta"), obj.get("pagination"), obj.get("paginate")):
+            if isinstance(candidate, dict):
+                meta.update({key: candidate[key] for key in page_keys if key in candidate})
+        for key in ("data", "results", "records", "product_requests", "items"):
+            if isinstance(obj.get(key), (list, dict)):
+                rows, valid = visit(obj[key], depth + 1)
+                if valid:
+                    return rows, True
+        if obj and all(str(k).isdigit() and isinstance(v, dict) for k, v in obj.items()):
+            return list(obj.values()), True
+        return [], False
+
+    rows, recognized = visit(payload)
+    return rows, meta, recognized
+
+
+def _npr_terminal_page(meta: dict, page: int, count: int):
+    """None berarti list tanpa metadata pagination, bukan bukti seluruh DB lengkap."""
+    for key in ("last_page", "total_pages"):
+        if meta.get(key) is not None:
+            try:
+                return page >= int(meta[key])
+            except (ValueError, TypeError):
+                return None
+    if "next_page_url" in meta:
+        return not bool(meta["next_page_url"])
+    if "has_more" in meta:
+        text = str(meta["has_more"]).strip().casefold()
+        if text in {"false", "0", "none", ""}:
+            return True
+        if text in {"true", "1"}:
+            return False
+    return None
+
+
+def _create_npr_session():
+    # Retry manual: mencegah logger urllib3 menuliskan URL lengkap ber-token.
+    session = requests.Session()
+    session.headers.update({"Accept": "application/json", "User-Agent": "Sibima-NPR-Dashboard/20261014"})
+    session.mount("https://", HTTPAdapter(max_retries=0))
+    return session
+
+
+def _npr_request_json(session, base_url, endpoint, params, diagnostic, read_timeout=None):
+    """Transport NPR: TLS aktif, redirect origin sama, 429 tanpa retry cepat."""
+    from urllib.parse import urlsplit, urljoin, parse_qsl, unquote, urlunsplit
+    base = urlsplit(base_url)
+    url, request_params = base_url + endpoint, dict(params)
+    token = str(params.get("token", ""))
+    timeout = REQUEST_TIMEOUT if read_timeout is None else read_timeout
+    for redirect_count in range(4):
+        response = _npr_get_response_v5(session, url, request_params, base_url, diagnostic, timeout)
+        try:
+            if response.status_code in (301, 302, 303, 307, 308):
+                target = urlsplit(urljoin(url, response.headers.get("Location", "")))
+                try:
+                    allowed = ((target.scheme, target.hostname, target.port or 443) ==
+                               (base.scheme, base.hostname, base.port or 443)
+                               and not target.username and not target.password and not target.fragment
+                               and unquote(target.path).startswith(base.path)
+                               and ".." not in unquote(target.path).split("/")
+                               and bool(response.headers.get("Location")))
+                except ValueError:
+                    allowed = False
+                if not allowed or redirect_count >= 3:
+                    diagnostic["state"] = "REDIRECT_BLOCKED"
+                    raise NPRAPIFetchError(diagnostic)
+                url = urlunsplit((target.scheme, target.netloc, target.path, "", ""))
+                request_params = {**dict(parse_qsl(target.query)), **request_params}
+                diagnostic["redirects"] = redirect_count + 1
+                continue
+            if response.status_code != 200:
+                diagnostic["state"] = f"HTTP_{response.status_code}"
+                try:
+                    payload = response.json()
+                    if isinstance(payload, dict):
+                        message = _npr_safe_message(payload.get("message", ""), token)
+                        if message:
+                            diagnostic["server_message"] = message
+                except (ValueError, TypeError):
+                    pass
+                raise NPRAPIFetchError(diagnostic)
+            try:
+                payload = response.json()
+            except ValueError:
+                diagnostic["state"] = "INVALID_JSON"
+                raise NPRAPIFetchError(diagnostic) from None
+            if isinstance(payload, dict) and str(payload.get("success", True)).strip().casefold() in {"false", "0"}:
+                diagnostic["state"] = "API_REJECTED"
+                message = _npr_safe_message(payload.get("message", ""), token)
+                if message:
+                    diagnostic["server_message"] = message
+                raise NPRAPIFetchError(diagnostic)
+            return payload
+        finally:
+            response.close()
+    diagnostic["state"] = "REDIRECT_BLOCKED"
+    raise NPRAPIFetchError(diagnostic)
+
+
+
+@st.cache_data(ttl=NPR_API_CACHE_TTL, show_spinner=False)
+def _cached_npr_header_rows_v3(base_url: str, token: str, endpoint: str,
+                               start_date: str, end_date: str, end_date_param: str,
+                               reader_version: str = NPR_READER_VERSION) -> pd.DataFrame:
+    """Fetch NPR headers with full pagination, including bare-list APIs.
+
+    v10 rule: a response without pagination metadata is NOT assumed complete after
+    page 1. The reader probes page 2+ until an empty page, explicit terminal
+    metadata, or proof that the backend ignores the page parameter.
+    """
+    import hashlib
+    import json
+    from datetime import timezone
+    diagnostic = {
+        "reader_version": reader_version, "state": "NOT_FETCHED", "base_url": base_url,
+        "endpoint": endpoint, "date_start": start_date, end_date_param: end_date,
+        "date_end_parameter": end_date_param, "pages": 0, "headers_returned": 0,
+        "pagination": "UNKNOWN", "pagination_complete": False, "request_attempts": 0,
+    }
+    session = _create_npr_session()
+    all_rows, signatures = [], set()
+    base_params = {k: v for k, v in {
+        "date_start": start_date, end_date_param: end_date, "token": token
+    }.items() if v is not None and v != ""}
+    per_page = 200
+
+    def finish(label, complete):
+        diagnostic.update(
+            fetched_at_utc=datetime.now(timezone.utc).isoformat(),
+            state="OK", headers_returned=len(all_rows), pagination=label,
+            pagination_complete=bool(complete),
+        )
+        diagnostic.pop("headers_received_before_failure", None)
+        out = pd.DataFrame(all_rows)
+        out.attrs["npr_api_fetch_diagnostic"] = diagnostic.copy()
         return out
 
-    return _npr_empty_frame()
+    try:
+        for page in range(1, 501):
+            request_params = dict(base_params)
+            request_params.update({"page": page, "per_page": per_page})
+            diagnostic["pages"] = page
+            payload = _npr_request_json(session, base_url, endpoint, request_params, diagnostic)
+            rows, meta, recognized = _npr_list_page(payload)
+            if not recognized:
+                diagnostic["state"] = "UNSUPPORTED_PAYLOAD"
+                raise NPRAPIFetchError(diagnostic)
+
+            if not rows:
+                terminal = _npr_terminal_page(meta, page, 0)
+                if terminal is False:
+                    diagnostic["state"] = "INCOMPLETE_PAGINATION"
+                    raise NPRAPIFetchError(diagnostic)
+                if meta.get("total") is not None:
+                    try:
+                        expected = int(meta["total"])
+                    except (TypeError, ValueError):
+                        diagnostic["state"] = "INVALID_PAGINATION_META"
+                        raise NPRAPIFetchError(diagnostic) from None
+                    if expected != len(all_rows):
+                        diagnostic.update(state="TOTAL_MISMATCH", expected_total=expected)
+                        raise NPRAPIFetchError(diagnostic)
+                return finish("EMPTY_PAGE_TERMINAL" if not meta else "METADATA_EMPTY_TERMINAL", True)
+
+            signature = hashlib.sha256(json.dumps(rows, sort_keys=True, default=str).encode()).hexdigest()
+            if signature in signatures:
+                # Backend ignored ?page=. Keep the unique first response but flag scope as unproven.
+                return finish("PAGE_PARAMETER_IGNORED_NO_METADATA", False)
+            signatures.add(signature)
+            all_rows.extend(rows)
+            diagnostic["headers_received_before_failure"] = len(all_rows)
+
+            terminal = _npr_terminal_page(meta, page, len(rows))
+            if terminal is True:
+                if meta.get("total") is not None:
+                    try:
+                        expected_total = int(meta["total"])
+                    except (ValueError, TypeError):
+                        expected_total = None
+                    if expected_total is not None and expected_total != len(all_rows):
+                        diagnostic.update(state="TOTAL_MISMATCH", expected_total=expected_total)
+                        raise NPRAPIFetchError(diagnostic)
+                return finish("METADATA_COMPLETE", True)
+            if terminal is False:
+                continue
+
+            # No pagination metadata: continue probing page+1. If the next page is
+            # empty we know the scope is complete; if it repeats we know paging is ignored.
+            diagnostic["pagination"] = "PROBING_BARE_LIST_PAGES"
+
+        diagnostic["state"] = "INCOMPLETE_PAGINATION"
+        raise NPRAPIFetchError(diagnostic)
+    except NPRAPIFetchError:
+        raise
+    except Exception as exc:
+        diagnostic.update(state="FETCH_ERROR", error_type=type(exc).__name__)
+        raise NPRAPIFetchError(diagnostic) from None
+    finally:
+        session.close()
+
+def _fetch_npr_header_rows_api(base_url: str, token: str, endpoint: str,
+                                start_date=None, end_date=None, end_date_param="end_date") -> pd.DataFrame:
+    """Read optional date scope. No implicit 2025 lower bound or truncated-date fallback."""
+    diagnostic = {"state": "NOT_FETCHED", "reader_version": NPR_READER_VERSION,
+                  "base_url": base_url, "endpoint": endpoint, "headers_returned": 0}
+    try:
+        endpoint = _npr_safe_route(endpoint)
+        token = _npr_clean_token(token, base_url)
+        if not token:
+            diagnostic["state"] = "TOKEN_MISSING"
+            raise NPRAPIFetchError(diagnostic)
+        if end_date_param not in {"end_date", "date_end"}:
+            raise ValueError("Unsupported date parameter")
+        start, end = _npr_timestamp(start_date), _npr_timestamp(end_date)
+        if (_npr_text(start_date) and pd.isna(start)) or (_npr_text(end_date) and pd.isna(end)):
+            diagnostic["state"] = "INVALID_DATE"
+            raise NPRAPIFetchError(diagnostic)
+        if pd.notna(start) and pd.notna(end) and start.date() > end.date():
+            diagnostic["state"] = "INVALID_DATE_RANGE"
+            raise NPRAPIFetchError(diagnostic)
+        return _cached_npr_header_rows_v3(
+            base_url, token, endpoint, start.date().isoformat() if pd.notna(start) else "",
+            end.date().isoformat() if pd.notna(end) else "", end_date_param, reader_version=NPR_READER_VERSION)
+    except NPRAPIFetchError as exc:
+        diagnostic = exc.diagnostic
+    except ValueError:
+        diagnostic["state"] = "INVALID_CONFIG"
+    out = pd.DataFrame()
+    out.attrs["npr_api_fetch_diagnostic"] = diagnostic
+    logger.warning("NPR API read failed: state=%s", diagnostic.get("state"))
+    return out
+
+
+def _clear_npr_caches():
+    """Muat ulang header saja. Cache history sukses/cooldown tidak dihapus."""
+    func = globals().get("_cached_npr_header_rows_v3")
+    if hasattr(func, "clear"):
+        func.clear()
+
+
+def _render_npr_connection_controls(end_date):
+    return _npr_source_controls(end_date, None)
+
+
+def _npr_failure_message(diagnostic):
+    state = str(diagnostic.get("state", "UNKNOWN"))
+    messages = {
+        "TOKEN_MISSING": "Token API NPR belum diisi.",
+        "HTTP_401": "Server menolak autentikasi (HTTP 401). Periksa/ganti token NPR.",
+        "HTTP_403": "Akses NPR ditolak (HTTP 403). Periksa izin token atau pembatasan akses server.",
+        "HTTP_404": "Endpoint NPR tidak ditemukan (HTTP 404). Periksa base URL dan route product-requests.",
+        "HTTP_422": "Parameter request ditolak (HTTP 422). Lihat tanggal dan pesan server pada diagnostik.",
+        "HTTP_429": "Server membatasi request (HTTP 429). Tunggu Retry-After pada diagnostik; hasil riwayat sukses tidak dihapus.",
+        "RATE_LIMIT_WAIT": "Request NPR belum dikirim karena masa tunggu server belum berakhir. Lihat retry_after_seconds pada diagnostik.",
+        "CONNECTION_ERROR": "Koneksi dari komputer yang menjalankan Streamlit ke server NPR gagal. Periksa DNS, jaringan, VPN, atau proxy.",
+        "SSL_ERROR": "Verifikasi sertifikat HTTPS server NPR gagal. Periksa sertifikat server/CA pada komputer; verifikasi TLS tidak dinonaktifkan.",
+        "TIMEOUT": "Server NPR tidak merespons dalam batas waktu. Coba muat ulang atau uji tanggal akhir 26 Juni 2026.",
+        "INVALID_JSON": "Server merespons, tetapi isinya bukan JSON valid. Respons mungkin halaman login atau kesalahan server.",
+        "API_REJECTED": "API menyatakan request tidak berhasil. Periksa pesan server pada diagnostik.",
+        "NORMALIZATION_ERROR": "Respons API telah diterima, tetapi normalisasi header NPR gagal. Periksa error_type pada diagnostik.",
+        "UNSUPPORTED_PAYLOAD": "Format respons NPR belum dikenali; data tidak dianggap sebagai nol dokumen.",
+        "INCOMPLETE_PAGINATION": "Pembacaan halaman NPR belum lengkap/berulang. Angka parsial tidak dipakai untuk grafik.",
+        "TOTAL_MISMATCH": "Jumlah NPR yang diterima berbeda dari total yang diumumkan API. Angka parsial tidak dipakai untuk grafik.",
+        "REDIRECT_BLOCKED": "Request dialihkan ke lokasi yang tidak diizinkan atau berulang. Token tidak diteruskan ke host lain.",
+        "INVALID_DATE": "Parameter tanggal NPR tidak valid.",
+        "INVALID_DATE_RANGE": "Batas awal NPR lebih besar dari tanggal akhir laporan.",
+        "INVALID_CONFIG": "Konfigurasi route atau token NPR tidak valid.",
+    }
+    message = messages.get(state, f"Pembacaan API NPR belum berhasil ({state}). Periksa diagnostik.")
+    return message + " Kegagalan pembacaan ini bukan berarti jumlah NPR = 0."
+
+
+
+def _render_npr_diagnostics(df, end_date, filtered=None, history=None, expanded=False):
+    import json
+    with st.expander("ℹ️ Informasi Teknis Dashboard", expanded=expanded or bool(df.attrs.get("npr_diagnostics_expanded"))):
+        fetch_diag = dict(df.attrs.get("npr_api_fetch_diagnostic", {}))
+        normalization = dict(df.attrs.get("npr_normalization_diagnostic", {}))
+        overview = {"fetch": fetch_diag, "normalization": normalization,
+                    "headers_valid": len(df), "report_end": str(end_date),
+                    "after_filters": len(filtered) if filtered is not None else df.attrs.get("npr_filter_diagnostic", {}).get("after_filters"),
+                    "filters": df.attrs.get("npr_filter_diagnostic", {}),
+                    "date_field_profile": df.attrs.get("npr_date_field_profile", {}),
+                    "created_at_recovery": df.attrs.get("npr_created_recovery", {}),
+                    "recovery_connection": df.attrs.get("npr_recovery_history_connection", {}),
+                    "validation": df.attrs.get("npr_validation_v11_1", {}),
+                    "period_reference": df.attrs.get("npr_period_reference_v11_2", {}),
+                    "source_date_coverage": _npr_date_coverage(df)}
+        if history is not None:
+            overview["history_connection"] = history.attrs.get("npr_history_connection", {})
+            overview["history_documents"] = history.attrs.get("npr_history_diagnostic", [])
+            from collections import Counter
+            records = overview["history_documents"]
+            overview["history_summary"] = {
+                "states": dict(Counter(r.get("History State", "UNKNOWN") for r in records)),
+                "first_process_filled": int(history["__first_process_date"].notna().sum()),
+                "first_complete_filled": int(history["__first_complete_date"].notna().sum()),
+            }
+        st.json({key: value for key, value in overview.items() if key != "history_documents"})
+        st.caption("Status NPR mengikuti data terbaru. Tanggal awal dan akhir mengikuti Select Date Range; ini bukan snapshot status historis.")
+        if not _npr_source_rows_complete_v11_1(df):
+            st.warning("Cakupan header API belum terbukti lengkap. Reader sudah mencoba page berikutnya; lihat field pagination pada diagnostik.")
+        st.caption("Snapshot header API: " + str(fetch_diag.get("fetched_at_utc", "-")) +
+                   ". Snapshot dipertahankan selama pemuatan history; Muat ulang data NPR memulai pembacaan baru.")
+        st.caption("Kontrak v10 memakai input_date pada kedua sumber bila tersedia, dan created_at hanya sebagai fallback. Dasar tanggal yang sama dipakai untuk filter, aging, SLA, heatmap, dan timeline.")
+        st.caption("Aging memakai riwayat status pertama. date_inprogress/date_complete pada header tidak otomatis dianggap sebagai transisi pertama.")
+        st.download_button(
+            "⬇️ Unduh diagnostik NPR.json", data=json.dumps(overview, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
+            file_name="Diagnostik_NPR_API.json", mime="application/json", key="npr_diagnostic_download_v3",
+        )
+        if history is not None:
+            details = pd.DataFrame(history.attrs.get("npr_history_diagnostic", []))
+            if not details.empty:
+                st.dataframe(details, use_container_width=True, hide_index=True)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def _npr_endpoint_candidates():
+    # Endpoint terkonfirmasi dari pengguna. Tidak menebak new-product-requests.
+    configured = str(_npr_setting("endpoint", "SIBIMA_NPR_ENDPOINT", "product-requests")).strip("/")
+    if configured == "price-update-requests":
+        raise ValueError("price-update-requests adalah PUR, bukan NPR.")
+    return [configured]
+
+
+def _npr_safe_route(route: str) -> str:
+    route = str(route).strip().strip("/")
+    if not route or ":" in route or ".." in route or "?" in route or "#" in route:
+        raise ValueError("Route NPR harus relatif terhadap base URL khusus NPR.")
+    return route
+
+
+def _load_npr_user_lookup_api() -> dict:
+    """Lookup opsional di server NPR yang SAMA; pic dari API sudah berupa nama."""
+    endpoint = str(_npr_setting("users_endpoint", "SIBIMA_NPR_USERS_ENDPOINT", "")).strip()
+    if not endpoint:
+        return {}
+    config = _npr_api_config()
+    try:
+        users = _fetch_npr_header_rows_api(config["base_url"], config["token"], _npr_safe_route(endpoint))
+    except Exception:
+        return {}
+    lookup = {}
+    for row in users.to_dict("records"):
+        if _npr_text(_npr_pick(row, ("deleted_at",))):
+            continue
+        key = _npr_id(_npr_pick(row, ("id", "user_id")))
+        name = _npr_person_name(_npr_pick(row, ("name", "full_name", "display_name")))
+        if key and name:
+            lookup[key] = name
+    return lookup
+
+
+
+
+def _normalize_full_npr_api(raw: pd.DataFrame, endpoint: str, users: dict):
+    return normalize_npr_headers(raw, users=users, endpoint=endpoint, allow_input_date_preview=False)
+
+
+
+def load_full_npr_from_api(start_date=None, end_date=None):
+    """Send the main period using existing configured date parameter names.
+
+    Local canonical filtering remains authoritative. Sending parameters does NOT
+    prove the server implements them; a PostgreSQL export can verify the period.
+    Pin headers through the slow history cycle to avoid repeated HTTP requests.
+    """
+    config = _npr_api_config()
+    endpoint = _npr_endpoint_candidates()[0]
+    import time
+    import copy
+    pin_key = _npr_header_session_key_v11_2(config, start_date, end_date)
+    pinned = st.session_state.get(pin_key)
+    history_store = _npr_history_store_v5(_npr_history_settings())
+    completed = history_store.get("snapshot_completed_at")
+    if pinned is not None and (completed is None or time.time() - completed < NPR_PARITY_CACHE_TTL):
+        return copy.deepcopy(pinned)
+    raw = _fetch_npr_header_rows_api(config["base_url"], config["token"], endpoint,
+                                   start_date=start_date,
+                                   end_date=end_date,
+                                   end_date_param=config["end_date_param"])
+    diagnostic = dict(raw.attrs.get("npr_api_fetch_diagnostic", {}))
+    diagnostic["date_filter_policy"] = "EXPLICIT_REQUEST_DATES_AND_LOCAL_CANONICAL_FILTER"
+    diagnostic["server_date_contract"] = "PARAMETERS_SENT_SUPPORT_REQUIRES_REFERENCE_CHECK"
+    diagnostic["header_snapshot_policy"] = "PINNED_DURING_HISTORY_CYCLE"
+    out = _npr_empty_frame()
+    if not raw.empty:
+        try:
+            needs_users = bool({str(c).casefold() for c in raw.columns}.intersection({"pic_id", "created_by", "created_by_id"}))
+            users = _load_npr_user_lookup_api() if needs_users else {}
+            out = normalize_npr_headers(raw, users=users, endpoint=endpoint, allow_input_date_preview=False)
+        except Exception as exc:
+            diagnostic.update(state="NORMALIZATION_ERROR", error_type=type(exc).__name__)
+    out.attrs.update(npr_api_fetch_diagnostic=diagnostic, npr_api_base_url=config["base_url"],
+                     npr_api_fetch_start=str(start_date) if start_date is not None else None,
+                     npr_source_rows_complete=bool(diagnostic.get("pagination_complete", False)))
+    out.attrs["npr_date_field_profile"] = _npr_date_field_profile(raw)
+    if diagnostic.get("state") == "OK":
+        # Bound per-session memory. No credentials or data are persisted to disk.
+        old_keys = [k for k in st.session_state if str(k).startswith("_npr_pinned_headers_v11_2_")]
+        if pin_key not in old_keys and len(old_keys) >= 8:
+            st.session_state.pop(old_keys[0], None)
+        st.session_state[pin_key] = copy.deepcopy(out)
+    return out
+
+
+# =========================================================
+# NPR v4: koneksi riwayat terverifikasi, bukan tanggal perkiraan
+# =========================================================
+NPR_MILESTONE_CONTRACT = "npr_pg_first_milestones_v1"
+NPR_HISTORY_GOOD_STATES = {"API_HISTORY", "NESTED_HISTORY", "API_FIRST_MILESTONES"}
+NPR_HISTORY_BATCH_SIZE = 5
+
+
+def _npr_history_settings() -> dict:
+    """Opsi NPR saja. Kecepatan tidak termasuk key cache hasil riwayat."""
+    config = _npr_api_config()
+    default_route = "product-requests/history" if config["base_url"] == "https://erp.sibima.id/api/" else ""
+    config.update({
+        "history_endpoint": str(_npr_setting("history_endpoint", "SIBIMA_NPR_HISTORY_ENDPOINT", default_route)).strip(),
+        "discover_history": str(_npr_setting("discover_history", "SIBIMA_NPR_DISCOVER_HISTORY", "true")).casefold() in {"1", "true", "yes"},
+        "batch_size": NPR_HISTORY_BATCH_SIZE,
+        "success_ttl": float(NPR_PARITY_CACHE_TTL),
+    })
+    old = st.session_state.get("_npr_history_options_v4", {})
+    saved = st.session_state.get("_npr_history_options_v5", old)
+    if saved.get("base_url") == config["base_url"]:
+        config["history_endpoint"] = saved.get("history_endpoint", config["history_endpoint"])
+        config["discover_history"] = bool(saved.get("discover_history", config["discover_history"]))
+        config["batch_size"] = saved.get("batch_size", NPR_HISTORY_BATCH_SIZE)
+    try:
+        config["batch_size"] = max(1, min(100, int(config["batch_size"])))
+    except (TypeError, ValueError):
+        config["batch_size"] = NPR_HISTORY_BATCH_SIZE
+    config["min_request_interval"] = _npr_transport_policy_v5(config["base_url"])["interval"]
+    return config
+
+
+
+def _npr_history_scope_key(config: dict) -> str:
+    import hashlib
+    # Token hanya masuk hash privat, tidak ditulis ke file diagnostik.
+    value = (NPR_PARITY_VERSION, config["base_url"], config["token"], config["history_endpoint"], config["discover_history"])
+    return hashlib.sha256(repr(value).encode()).hexdigest()[:20]
+
+
+def _npr_clear_history_caches():
+    """Hapus hasil secara eksplisit; TIDAK membatalkan cooldown dari server."""
+    config = _npr_history_settings()
+    st.session_state.pop("_npr_history_store_v5_" + _npr_history_scope_key(config), None)
+    for key in list(st.session_state):
+        if str(key).startswith("_npr_history_limit_v4_"):
+            st.session_state.pop(key, None)
+
+
+
+def _render_npr_history_controls(df: pd.DataFrame):
+    config = _npr_history_settings()
+    with st.expander("🔗 Koneksi riwayat NPR", expanded=False):
+        st.caption("History diminta berurutan. Hasil sukses dipertahankan selama satu siklus pemuatan; masa cache 600 detik dimulai setelah seluruh history terpilih selesai. Status 429 tidak disimpan sebagai hasil sukses. Restart server atau refresh browser penuh dapat menghilangkan hasil sesi.")
+        with st.form("npr_history_form_v5"):
+            route = st.text_input("Endpoint riwayat", value=config["history_endpoint"],
+                                  help="Log pengujian server erp telah berhasil membaca product-requests/history. Route harus relatif dan tanpa token.")
+            discover = st.checkbox("Periksa kandidat route history otomatis", value=config["discover_history"])
+            interval = st.number_input("Jeda minimal antar-request NPR (detik)", min_value=1.0, max_value=60.0,
+                                       value=float(config["min_request_interval"]), step=0.5)
+            batch = st.number_input("Jumlah dokumen per batch", min_value=1, max_value=100,
+                                    value=int(config["batch_size"]), step=1)
+            submitted = st.form_submit_button("Terapkan pembacaan riwayat")
+        if submitted:
+            try:
+                clean_route = _npr_safe_route(route) if route.strip() else ""
+                if any(c in clean_route.replace("{id}", "").replace("{transaction_number}", "") for c in "{}"):
+                    raise ValueError("Placeholder history hanya {id} atau {transaction_number}.")
+            except ValueError as exc:
+                st.warning(str(exc))
+                return
+            st.session_state["_npr_history_options_v5"] = {
+                "base_url": config["base_url"], "history_endpoint": clean_route, "discover_history": discover,
+                "min_request_interval": float(interval), "batch_size": int(batch),
+            }
+            config = _npr_history_settings()
+            _npr_history_store_v5(config)["run"]["request"] = True
+        if st.button("Cek ulang koneksi tanpa menghapus hasil sukses", key="recheck_npr_history_v5"):
+            store = _npr_history_store_v5(config)
+            store["selection"] = None
+            store["run"]["request"] = True
+        if st.button("Hapus hasil riwayat sesi dan baca ulang", key="clear_npr_history_success_v5"):
+            _npr_clear_history_caches()
+        st.caption("date_inprogress/date_complete header tidak otomatis dianggap FIRST. Tidak ada penggantian tanggal kosong dengan nol/hari ini.")
+    store = _npr_history_store_v5(config)
+    wait = _npr_cooldown_status_v5(config["base_url"])["wait_seconds"]
+    if wait:
+        st.warning(f"Server meminta jeda. Tunggu sekitar {wait:,} detik sebelum melanjutkan. Tombol berikut tidak menghapus hasil sukses atau memotong jeda server.")
+    buttons = st.columns(3)
+    with buttons[0]:
+        if st.button(f"Lanjutkan {config['batch_size']} riwayat", key="npr_next_batch_v5", disabled=bool(wait)):
+            store["run"].update(request=True, auto=False)
+    with buttons[1]:
+        if st.button("Muat semua bertahap", key="npr_all_batches_v5", disabled=bool(wait)):
+            store["run"].update(request=True, auto=True, rate_limit_streak=0, pause_reason="")
+    with buttons[2]:
+        if st.button("Hentikan pemuatan", key="npr_stop_batches_v5"):
+            store["run"].update(request=False, auto=False, initial_attempted=True)
+    st.caption(f"Satu request aktif, jeda awal {config['min_request_interval']:g} detik, {config['batch_size']} NPR per batch. Jeda otomatis bertambah jika terkena 429. Muat semua bertahap melanjutkan hanya selama aplikasi ini terbuka; 429 menunggu Retry-After lalu melanjutkan otomatis (maksimal 6 kali beruntun tanpa kemajuan); error lain dijeda untuk ditinjau.")
+
+
+
+
+
+def _npr_extract_history_page(payload, *, history_endpoint: bool):
+    """Wrapper history/data/records; tidak masuk ke items milik produk.
+
+    Metadata header tidak disamakan dengan metadata daftar history. Penanda
+    __parent_number/__parent_id membuktikan history milik NPR yang diminta.
+    """
+    events, meta = [], {}
+    recognized = False
+    page_keys = ("current_page", "page", "last_page", "total_pages", "next_page_url", "has_more", "total")
+    def visit(obj, inside=False, number="", identifier="", depth=0):
+        nonlocal recognized
+        if depth > 10:
+            return
+        if isinstance(obj, list):
+            if inside:
+                recognized = True
+            for row in obj:
+                visit(row, inside, number, identifier, depth + 1)
+            return
+        if not isinstance(obj, dict):
+            return
+        lower = {str(k).casefold(): v for k, v in obj.items()}
+        explicit = [k for k in lower if k in NPR_HISTORY_KEYS]
+        parent_no = _npr_text(_npr_pick(obj, ("transaction_number", "npr_number", "no_npr"))) or number
+        # id pada EVENT adalah history id, bukan NPR id: dipakai hanya di wrapper.
+        parent_id = _npr_id(_npr_pick(obj, ("product_request_id", "product_requests_id", "npr_id"))) or identifier
+        if explicit:
+            meta["explicit_history_wrapper"] = True
+            # Pada endpoint history, pagination di sebelah data.history adalah
+            # pagination history, bukan diabaikan sebagai metadata header.
+            if inside or history_endpoint:
+                for field in page_keys:
+                    if field in lower:
+                        meta[field] = lower[field]
+                for key in ("meta", "pagination", "paginate"):
+                    if isinstance(lower.get(key), dict):
+                        for field in page_keys:
+                            if field in lower[key]:
+                                meta[field] = lower[key][field]
+            for key in ("history_meta", "history_pagination"):
+                if isinstance(lower.get(key), dict):
+                    for field in page_keys:
+                        if field in lower[key]:
+                            meta[field] = lower[key][field]
+            parent_id = _npr_id(_npr_pick(obj, ("product_request_id", "product_requests_id", "npr_id", "id"))) or identifier
+            if parent_no:
+                meta["document_number"] = parent_no
+            if parent_id:
+                meta["document_id"] = parent_id
+            for key in explicit:
+                if isinstance(lower[key], (dict, list)):
+                    recognized = True
+                    visit(lower[key], True, parent_no, parent_id, depth + 1)
+            return
+        if inside:
+            for key in page_keys:
+                if key in lower:
+                    meta[key] = lower[key]
+            for key in ("meta", "pagination", "paginate"):
+                if isinstance(lower.get(key), dict):
+                    for field in page_keys:
+                        if field in lower[key]:
+                            meta[field] = lower[key][field]
+        for key in ("data", "results", "records", "events"):
+            if isinstance(lower.get(key), (dict, list)):
+                if parent_no:
+                    meta["document_number"] = parent_no
+                if parent_id:
+                    meta["document_id"] = parent_id
+                visit(lower[key], inside or history_endpoint, parent_no, parent_id, depth + 1)
+                return
+        if inside and any(k in lower for k in ("status", "status_code", "status_id", "status_description", "status_name")):
+            if "items" in lower and not meta.get("explicit_history_wrapper"):
+                meta["header_payload_detected"] = True
+                return
+            recognized = True
+            wanted_keys = {
+                "status", "status_code", "status_id", "status_description", "status_name",
+                "updated_at", "created_at", "deleted_at", "transaction_number", "npr_number", "no_npr",
+                "product_request_id", "product_requests_id", "npr_id", "request_id", "__parent_number", "__parent_id", "id",
+            }
+            event = {k: v for k, v in lower.items() if k in wanted_keys}
+            if number:
+                event["__parent_number"] = number
+            if identifier:
+                event["__parent_id"] = identifier
+            events.append(event)
+    if isinstance(payload, dict) and str(payload.get("success", True)).casefold() in {"false", "0"}:
+        return [], {}, False
+    visit(payload, history_endpoint)
+    return events, meta, recognized
+
+
+def _npr_history_for_document(events: list, number: str, header_id: str):
+    wanted, kept, foreign = number.strip().upper(), [], 0
+    for event in events:
+        numbers = [_npr_text(_npr_pick(event, (key,))).upper() for key in ("transaction_number", "npr_number", "no_npr", "__parent_number")]
+        ids = [_npr_id(_npr_pick(event, (key,))) for key in ("product_request_id", "product_requests_id", "npr_id", "request_id", "__parent_id")]
+        if any(v and v != wanted for v in numbers) or (header_id and any(v and v != header_id for v in ids)):
+            foreign += 1
+        else:
+            kept.append(event)
+    return kept, foreign
+
+
+def _npr_history_identity_ok(events, meta, number, header_id, path_bound=False):
+    parent_no = _npr_text(meta.get("document_number")).upper()
+    parent_id = _npr_id(meta.get("document_id"))
+    if parent_no and parent_no != number.upper():
+        return False
+    if parent_id and header_id and parent_id != header_id:
+        return False
+    if path_bound or parent_no == number.upper() or (header_id and parent_id == header_id):
+        return True
+    if not events:
+        return False
+    for event in events:
+        no = _npr_text(_npr_pick(event, ("transaction_number", "npr_number", "no_npr", "__parent_number"))).upper()
+        key = _npr_id(_npr_pick(event, ("product_request_id", "product_requests_id", "npr_id", "request_id", "__parent_id")))
+        if no != number.upper() and not (header_id and key == header_id):
+            return False
+    return True
+
+
+
+
+def _npr_history_is_complete(meta: dict, page: int, rows: int, count: int):
+    terminal = _npr_terminal_page(meta, page, rows)
+    if terminal is None and meta.get("total") is not None:
+        try:
+            total = int(meta["total"])
+            return count >= total
+        except (TypeError, ValueError):
+            return None
+    return terminal
+
+
+def _fetch_npr_history_route_api(route: str, number: str, header_id: str, history_endpoint=True,
+                                  *, base_url: str, token: str, probe=False) -> dict:
+    """Read-only. Probe satu halaman; full fetch mengikuti pagination dan cek identitas.
+
+    Maksimum enam pemanggilan probe tingkat route pada auto-discovery. Transport
+    dapat melakukan retry/redirect aman. Tidak mengambil tanggal dari header.
+    """
+    import hashlib
+    import json
+    from urllib.parse import quote
+    template = route
+    if "{id}" in route and not header_id:
+        return {"state": "NO_ID", "events": []}
+    try:
+        route = _npr_safe_route(route)
+        route = route.replace("{id}", quote(header_id, safe="")).replace("{transaction_number}", quote(number, safe=""))
+    except ValueError:
+        return {"state": "INVALID_ROUTE", "events": []}
+    bound = "{id}" in template or "{transaction_number}" in template
+    session = _create_npr_session()
+    all_events, seen, last_meta = [], set(), {}
+    native_headers = []
+    diagnostic = {"endpoint": template}
+    try:
+        for page in range(1, 101):
+            params = {"token": token, "transaction_number": number}
+            if page > 1:
+                params["page"] = page
+            payload = _npr_request_json(session, base_url, route, params, diagnostic, read_timeout=12 if probe else 25)
+            events, meta, recognized = _npr_extract_history_page(payload, history_endpoint=history_endpoint)
+            if not recognized or meta.get("header_payload_detected"):
+                return {"state": "UNSUPPORTED_HISTORY_PAYLOAD", "events": [], "http_status": diagnostic.get("http_status")}
+            kept, foreign = _npr_history_for_document(events, number, header_id)
+            if foreign:
+                return {"state": "WRONG_DOCUMENT", "events": []}
+            if not _npr_history_identity_ok(kept, meta, number, header_id, bound):
+                return {"state": "HISTORY_IDENTITY_UNPROVEN", "events": []}
+            native_header = _npr_native_header_from_payload_v9(payload, number, header_id)
+            if native_header:
+                native_headers.append(native_header)
+            valid = [e for e in kept if not _npr_text(e.get("deleted_at")) and _npr_event_status(e) in NPR_VALID_STATUSES]
+            # Missing timestamps follow SQL MIN/COALESCE: ignored, never replaced with today.
+            signature = hashlib.sha256(json.dumps(events, sort_keys=True, default=str).encode()).hexdigest()
+            if events and signature in seen:
+                return {"state": "INCOMPLETE_PAGINATION", "events": []}
+            seen.add(signature)
+            all_events.extend(kept)
+            terminal = _npr_history_is_complete(meta, page, len(events), len(all_events))
+            if probe:
+                return {"state": "PROBE_OK" if valid else "PROBE_EMPTY", "events": [],
+                        "sample_rows": len(kept), "http_status": diagnostic.get("http_status"),
+                        "pagination": "EXPLICIT" if terminal is not None else "LIST_NO_METADATA",
+                        "identity_verified": True}
+            if not events and terminal is False:
+                return {"state": "INCOMPLETE_PAGINATION", "events": []}
+            if terminal is not False:
+                if meta.get("total") is not None:
+                    try:
+                        if len(all_events) != int(meta["total"]):
+                            return {"state": "TOTAL_MISMATCH", "events": []}
+                    except (ValueError, TypeError):
+                        return {"state": "INVALID_PAGINATION_META", "events": []}
+                created_values = {_npr_timestamp(h["created_at"]) for h in native_headers}
+                recovered = native_headers[0] if len(created_values) == 1 else {}
+                return {"state": "OK", "events": all_events, "native_header": recovered,
+                        "pagination": "METADATA_COMPLETE" if terminal is True else "LIST_NO_METADATA", "http_status": diagnostic.get("http_status")}
+        return {"state": "INCOMPLETE_PAGINATION", "events": []}
+    except NPRAPIFetchError as exc:
+        return {"state": exc.diagnostic.get("state", "FETCH_ERROR"), "events": [],
+                "http_status": exc.diagnostic.get("http_status"), "error_type": exc.diagnostic.get("error_type", ""),
+                "retry_after_seconds": exc.diagnostic.get("retry_after_seconds"),
+                "retry_after_source": exc.diagnostic.get("retry_after_source", "")}
+    except Exception as exc:
+        # Jangan ekspor str(exc), request URL, token, atau response headers.
+        return {"state": "FETCH_ERROR", "events": [], "error_type": type(exc).__name__}
+    finally:
+        session.close()
+
+
+
+def _npr_history_routes(endpoint: str, override: str):
+    if override:
+        return [(override, True)]
+    return [(f"{endpoint}/history", True), (f"{endpoint}/{{id}}/history", True), (f"{endpoint}/{{id}}", False)]
+
+
+def _discover_npr_history_route_api(endpoint: str, override: str, samples: tuple, *, base_url: str, token: str):
+    """One FULL read validates the route and seeds the first document's history.
+
+    Never promote a single page of paginated history to a complete history.
+    Prefetched content stays private and is removed from exported diagnostics.
+    """
+    attempts = []
+    stop_states = {"HTTP_401", "HTTP_403", "CONNECTION_ERROR", "SSL_ERROR", "TIMEOUT", "HTTP_429", "RATE_LIMIT_WAIT", "HTTP_500", "HTTP_502", "HTTP_503", "HTTP_504"}
+    for route, is_history in _npr_history_routes(endpoint, override):
+        for number, header_id in samples[:2]:
+            result = _fetch_npr_history_route_api(route, number, header_id, is_history,
+                                                 base_url=base_url, token=token, probe=False)
+            attempts.append({"Route": route, "No. NPR": number, "State": result["state"],
+                             "HTTP": result.get("http_status", 200 if result["state"] == "OK" else None),
+                             "Sample Rows": len(result.get("events", [])),
+                             "Retry After Seconds": result.get("retry_after_seconds")})
+            if result["state"] == "OK":
+                return {"route": route, "is_history": is_history, "state": "ROUTE_VERIFIED", "attempts": attempts,
+                        "_prefetched": {"number": number.upper(), "header_id": header_id, "result": result}}
+            if result["state"] in stop_states:
+                return {"route": "", "state": result["state"], "attempts": attempts,
+                        "retry_after_seconds": result.get("retry_after_seconds")}
+            if result["state"] in {"HTTP_404", "HTTP_405"} and "{id}" not in route:
+                break
+    return {"route": "", "state": "HISTORY_ROUTE_UNVERIFIED", "attempts": attempts}
+
+
+
+def _npr_declared_milestones(context: dict):
+    """Kontrak dari query referensi, BUKAN date_inprogress/date_complete biasa."""
+    data = context.get("declared_milestones", {})
+    if data.get("milestone_contract") != NPR_MILESTONE_CONTRACT:
+        return None
+    required = {"first_process_at", "first_complete_at", "history_count"}
+    if not required.issubset(data):
+        return {"state": "MILESTONE_FIELDS_MISSING"}
+    for key in ("first_process_at", "first_complete_at"):
+        if _npr_text(data[key]) and pd.isna(_npr_timestamp(data[key])):
+            return {"state": "MILESTONE_DATE_INVALID"}
+    try:
+        count = int(data["history_count"])
+        if count < 0 or float(data["history_count"]) != count:
+            raise ValueError
+        if int(data.get("history_key_variants", 1)) > 1:
+            return {"state": "AMBIGUOUS_HISTORY_KEY"}
+    except (ValueError, TypeError, OverflowError):
+        return {"state": "MILESTONE_COUNT_INVALID"}
+    p, c = _npr_timestamp(data["first_process_at"]), _npr_timestamp(data["first_complete_at"])
+    if count == 0 and (pd.notna(p) or pd.notna(c)):
+        return {"state": "MILESTONE_COUNT_CONFLICT"}
+    return {"state": "API_FIRST_MILESTONES", "process": p, "complete": c, "count": count}
+
+
+def load_npr_history_milestones_api(df: pd.DataFrame, *, allow_remote: bool = True, batch_limit=None) -> pd.DataFrame:
+    """FIRST/nested -> cache sukses -> batch berurutan pada endpoint terverifikasi.
+
+    429 menghentikan batch dan dilanjutkan hanya setelah Retry-After. Hasil
+    pengujian koneksi lengkap dipakai kembali; tidak ada request ganda ke NPR uji.
+    Maksimal 6 pembatasan beruntun tanpa kemajuan sebelum jeda manual.
+    """
+    import copy
+    import time
+    from datetime import timezone
+    columns = ["__npr_number", "__first_process_date", "__first_complete_date"]
+    if df is None or df.empty or "No. Transaksi" not in df:
+        return pd.DataFrame(columns=columns)
+    config = _npr_history_settings()
+    if batch_limit is not None:
+        config["batch_size"] = max(1, min(config["batch_size"], int(batch_limit)))
+    store = _npr_history_store_v5(config)
+    run = store["run"]
+    fetch_enabled = allow_remote and bool(run["request"] or run["auto"] or not run["initial_attempted"])
+    if allow_remote:
+        run.update(initial_attempted=True, request=False)
+    else:
+        # Pause does not count as a failed/empty history fetch. Preserve successes.
+        run.update(request=False, auto=False)
+    contexts = df.attrs.get("npr_api_context", {})
+    endpoint = df.attrs.get("npr_api_endpoint", _npr_endpoint_candidates()[0])
+    docs = df.drop_duplicates("No. Transaksi").copy()
+    docs["__rank"] = docs["Status"].map({"Process": 0, "Complete": 1, "Request": 2}).fillna(3)
+    docs = docs.sort_values(["__rank", "transaction_date"], ascending=[True, False], kind="stable")
+    resolved, pending, cached_count = {}, [], 0
+    now = time.time()
+    for row in docs.to_dict("records"):
+        # Do not copy the whole NPR attrs/history context for every Series row.
+        number = _npr_text(row["No. Transaksi"])
+        key = number.upper()
+        context = contexts.get(key, {})
+        fingerprint = _npr_header_fingerprint_v5(context, row.get("Status"), row.get("transaction_date"))
+        record = {"__npr_number": key, "__first_process_date": pd.NaT, "__first_complete_date": pd.NaT,
+                  "History State": "HISTORY_NOT_LOADED", "History Rows": 0,
+                  "Created Date Source": context.get("date_source", "UNKNOWN"),
+                  "Header date_inprogress (bukan acuan FIRST)": context.get("header_date_inprogress", pd.NaT),
+                  "Header date_complete (bukan acuan FIRST)": context.get("header_date_complete", pd.NaT),
+                  "History Pagination": "", "Milestone Source": "UNRESOLVED", "From Session Cache": False}
+        declared = _npr_declared_milestones(context)
+        if declared and declared["state"] == "API_FIRST_MILESTONES":
+            record.update({"__first_process_date": declared["process"], "__first_complete_date": declared["complete"],
+                           "History State": declared["state"], "History Rows": declared["count"], "Milestone Source": NPR_MILESTONE_CONTRACT})
+            resolved[key] = record
+            continue
+        embedded = context.get("embedded", {})
+        if embedded:
+            events, meta, recognized = _npr_extract_history_page(embedded, history_endpoint=False)
+            events, foreign = _npr_history_for_document(events, number, context.get("id", ""))
+            complete = _npr_history_is_complete(meta, 1, len(events), len(events))
+            valid_dates = all(pd.notna(_npr_date_from(e, ("updated_at", "created_at"))) for e in events
+                              if not _npr_text(e.get("deleted_at")) and _npr_event_status(e) in NPR_VALID_STATUSES)
+            total_ok = True
+            if meta.get("total") is not None:
+                try:
+                    total_ok = int(meta["total"]) == len(events)
+                except (TypeError, ValueError):
+                    total_ok = False
+            if recognized and not foreign and total_ok and complete is not False:
+                p, c = _npr_first_milestones(events)
+                record.update({"__first_process_date": p, "__first_complete_date": c, "History State": "NESTED_HISTORY",
+                               "History Rows": len(events), "Milestone Source": "EMBEDDED_HISTORY",
+                               "History Pagination": "METADATA_COMPLETE" if complete is True else "LIST_NO_METADATA"})
+                resolved[key] = record
+                continue
+        cached = store["success"].get(key)
+        if cached and cached["fingerprint"] == fingerprint:
+            record = copy.deepcopy(cached["record"])
+            record["From Session Cache"] = True
+            resolved[key] = record
+            cached_count += 1
+            continue
+        store["success"].pop(key, None)
+        error = store["errors"].get(key, {})
+        if error.get("fingerprint") == fingerprint:
+            record.update(error["fields"])
+        else:
+            store["errors"].pop(key, None)
+        pending.append((context.get("source_number") or number, context.get("id", ""), fingerprint, record))
+    prefetched = None
+    saved_selection = store.get("selection")
+    selection = {"route": "", "state": "NOT_NEEDED", "attempts": []}
+    if pending:
+        selection = {"route": "", "state": "HISTORY_NOT_LOADED", "attempts": []}
+        if saved_selection:
+            selection = copy.deepcopy(saved_selection["data"])
+        elif fetch_enabled and (config["history_endpoint"] or config["discover_history"]):
+            samples = tuple((n, identifier) for n, identifier, _, _ in pending[:2])
+            selection = _discover_npr_history_route_api(endpoint, config["history_endpoint"], samples,
+                                                        base_url=config["base_url"], token=config["token"])
+            prefetched = selection.pop("_prefetched", None)
+            if selection.get("state") == "ROUTE_VERIFIED":
+                store["selection"] = {"data": copy.deepcopy(selection), "fetched_at": time.time()}
+        elif not config["history_endpoint"] and not config["discover_history"]:
+            selection["state"] = "HISTORY_NOT_CONFIGURED"
+    route = selection.get("route", "")
+    seed_count = 0
+    if prefetched and prefetched.get("result", {}).get("state") == "OK":
+        still_pending = []
+        for number, identifier, fingerprint, record in pending:
+            key = number.upper()
+            if key != prefetched["number"] or identifier != prefetched["header_id"]:
+                still_pending.append((number, identifier, fingerprint, record))
+                continue
+            seed = prefetched["result"]
+            p, c = _npr_first_milestones(seed["events"])
+            for label in ("HTTP Status", "Retry After Seconds", "Retry After Source"):
+                record.pop(label, None)
+            record.update({"__first_process_date": p, "__first_complete_date": c,
+                           "History State": "API_HISTORY", "History Rows": len(seed["events"]),
+                           "Milestone Source": route, "History Pagination": seed.get("pagination", ""),
+                           "Reused Route Validation": True,
+                           "History Fetched At UTC": datetime.now(timezone.utc).isoformat()})
+            store["success"][key] = {"record": copy.deepcopy(record), "fingerprint": fingerprint, "fetched_at": time.time()}
+            store["errors"].pop(key, None)
+            resolved[key] = record
+            seed_count += 1
+        pending = still_pending
+    if not allow_remote:
+        for _, _, _, record in pending:
+            record["History State"] = "HISTORY_PAUSED_HEADER_CHECK"
+    attempted, fresh_success, batch_state = 0, seed_count, ("IDLE" if allow_remote else "HEADER_CHECK_PAUSED")
+    wait = _npr_cooldown_status_v5(config["base_url"])["wait_seconds"]
+    eligible = []
+    if fetch_enabled and pending:
+        if wait:
+            # Preserve a real 429/503 from discovery so the retry bound counts it.
+            batch_state = (selection.get("state") if saved_selection is None and
+                           selection.get("state") in {"HTTP_429", "HTTP_503"} else "RATE_LIMIT_WAIT")
+        elif not route:
+            batch_state = selection.get("state", "HISTORY_ROUTE_UNVERIFIED")
+            if batch_state not in {"HTTP_429", "RATE_LIMIT_WAIT", "HTTP_503"}:
+                run["auto"] = False
+        else:
+            eligible = pending[:max(0, config["batch_size"] - seed_count)]
+            batch_state = "BATCH_COMPLETE"
+    if seed_count and batch_state == "IDLE" and pending and fetch_enabled:
+        batch_state = "BATCH_COMPLETE"
+    if eligible:
+        progress = st.progress(0.0, text="Membaca history NPR berurutan...")
+        try:
+            for number, identifier, fingerprint, record in eligible:
+                key = number.upper()
+                result = _fetch_npr_history_route_api(route, number, identifier, selection.get("is_history", True),
+                                                       base_url=config["base_url"], token=config["token"])
+                attempted += 1
+                if result["state"] == "OK":
+                    for label in ("HTTP Status", "Retry After Seconds", "Retry After Source"):
+                        record.pop(label, None)
+                    p, c = _npr_first_milestones(result["events"])
+                    record.update({"__first_process_date": p, "__first_complete_date": c,
+                                   "History State": "API_HISTORY", "History Rows": len(result["events"]),
+                                   "Recovered Header Created At": result.get("native_header", {}).get("created_at", pd.NaT),
+                                   "Milestone Source": route, "History Pagination": result.get("pagination", ""),
+                                   "History Fetched At UTC": datetime.fromtimestamp(time.time(), tz=timezone.utc).isoformat()})
+                    store["success"][key] = {"record": copy.deepcopy(record), "fingerprint": fingerprint, "fetched_at": time.time()}
+                    store["errors"].pop(key, None)
+                    fresh_success += 1
+                else:
+                    error_fields = {"History State": result["state"], "HTTP Status": result.get("http_status"),
+                                    "Retry After Seconds": result.get("retry_after_seconds"),
+                                    "Retry After Source": result.get("retry_after_source", "")}
+                    record.update(error_fields)
+                    # Error adalah diagnostik antrean, TIDAK cache respons; percobaan
+                    # berikutnya tetap memanggil endpoint setelah cooldown berakhir.
+                    store["errors"][key] = {"fingerprint": fingerprint, "fields": error_fields}
+                    batch_state = result["state"]
+                    if result["state"] not in {"HTTP_429", "RATE_LIMIT_WAIT", "HTTP_503"}:
+                        run["auto"] = False
+                progress.progress(attempted / len(eligible), text=f"Batch: {attempted:,}/{len(eligible):,} | sukses baru: {fresh_success:,}")
+                if result["state"] != "OK":
+                    break
+        finally:
+            progress.empty()
+    for number, identifier, fingerprint, record in pending:
+        resolved[number.upper()] = record
+    result = pd.DataFrame(list(resolved.values()))
+    for col in columns[1:]:
+        result[col] = pd.to_datetime(result[col], errors="coerce")
+    output = result[columns].copy()
+    good_count = int(result["History State"].isin(NPR_HISTORY_GOOD_STATES).sum())
+    remaining = len(result) - good_count
+    if not remaining:
+        batch_state = "COMPLETE"
+        run["auto"] = False
+        if store.get("snapshot_completed_at") is None:
+            store["snapshot_completed_at"] = time.time()
+    _npr_resume_plan_v11_2(store, config, batch_state, fresh_success)
+    selection.update({"batch_state": batch_state, "batch_attempted": attempted, "new_success": fresh_success,
+                      "from_session_cache": cached_count, "route_validation_reused_documents": seed_count,
+                      "consecutive_rate_limits": int(run.get("rate_limit_streak", 0)),
+                      "pause_reason": run.get("pause_reason", ""), "resolved_documents": good_count,
+                      "unresolved_documents": remaining, "batch_size": config["batch_size"],
+                      "auto_continue": bool(run["auto"]), "cooldown": _npr_cooldown_status_v5(config["base_url"])})
+    output.attrs["npr_history_diagnostic"] = result.to_dict("records")
+    output.attrs["npr_history_connection"] = selection
+    return output
+
+
+
+def load_npr_first_process_history(df: pd.DataFrame) -> pd.DataFrame:
+    return load_npr_history_milestones_api(df)[["__npr_number", "__first_process_date"]]
+
+
+def load_npr_first_complete_history(df: pd.DataFrame) -> pd.DataFrame:
+    return load_npr_history_milestones_api(df)[["__npr_number", "__first_complete_date"]]
 
 
 # =========================================================
@@ -3109,9 +5669,416 @@ def render_sla_trend(df: pd.DataFrame, threshold: int = 5, date_col: str = "tran
     st.plotly_chart(fig, use_container_width=True)
 
 
+
+
+
+
+
+
+
+
+
 # =========================================================
 # 9) MAIN APP
 # =========================================================
+
+
+
+def _npr_audit_rows_v4(df: pd.DataFrame, history: pd.DataFrame) -> pd.DataFrame:
+    """Ekspor satu baris per NPR; tidak mengandung token atau payload produk."""
+    aging = build_npr_aging_first_process(df, history[["__npr_number", "__first_process_date"]])
+    complete = build_npr_aging_first_complete(df, history[["__npr_number", "__first_complete_date"]])
+    if aging.empty:
+        return pd.DataFrame()
+    out = aging[["No. Transaksi", "Status", "Sales", "transaction_date", "First Process Date", "Aging NPR"]].copy()
+    out = out.merge(complete[["No. Transaksi", "First Complete Date", "Aging NPR Complete"]], on="No. Transaksi", how="left", validate="one_to_one")
+    out = out.rename(columns={"No. Transaksi": "transaction_number", "Status": "status_description", "Sales": "pic",
+                              "transaction_date": "created_at_used", "First Process Date": "first_process_at",
+                              "Aging NPR": "aging_process_days", "First Complete Date": "first_complete_at",
+                              "Aging NPR Complete": "aging_complete_days"})
+    details = {r["__npr_number"]: r for r in history.attrs.get("npr_history_diagnostic", [])}
+    mapping = {"created_source": "Created Date Source", "history_state": "History State", "history_rows": "History Rows",
+               "milestone_source": "Milestone Source", "history_pagination": "History Pagination",
+               "header_process_unverified": "Header date_inprogress (bukan acuan FIRST)",
+               "header_complete_unverified": "Header date_complete (bukan acuan FIRST)"}
+    for new, old in mapping.items():
+        values = []
+        for n in out["transaction_number"]:
+            key = str(n).strip().upper()
+            fallback = {
+                "Created Date Source": df.attrs.get("npr_api_context", {}).get(key, {}).get("date_source", "UNKNOWN"),
+                "History State": "HISTORY_NOT_LOADED", "History Rows": 0,
+                "Milestone Source": "UNRESOLVED",
+            }
+            values.append(details.get(key, {}).get(old, fallback.get(old, "")))
+        out[new] = values
+    values = pd.to_numeric(out["aging_process_days"], errors="coerce")
+    out["sla_eligible"] = values.notna() & values.ge(0)
+    out["sla_met"] = pd.Series(pd.NA, index=out.index, dtype="boolean")
+    out.loc[out["sla_eligible"], "sla_met"] = values.loc[out["sla_eligible"]].le(2)
+    return out
+
+
+def _npr_reference_audit_v4(raw: pd.DataFrame, start_date, end_date) -> pd.DataFrame:
+    """Terima HANYA ekspor dari SQL referensi yang disertakan, bukan field tebakan."""
+    required = {"transaction_number", "created_at", "status_code", "pic", "first_process_at", "first_complete_at", "history_count", "milestone_contract", "reference_source_start", "reference_report_end"}
+    if not required.issubset(raw.columns):
+        missing = ", ".join(sorted(required - set(raw.columns)))
+        raise ValueError("CSV PostgreSQL tidak sesuai query referensi. Kolom belum ada: " + missing)
+    if not raw["milestone_contract"].eq(NPR_MILESTONE_CONTRACT).all():
+        raise ValueError("CSV harus berasal dari Query_NPR_Referensi_PostgreSQL.sql (kontrak milestone tidak sesuai).")
+    if not raw.empty:
+        source_dates = raw["reference_source_start"].map(_npr_timestamp)
+        end_dates = raw["reference_report_end"].map(_npr_timestamp)
+        if (source_dates.isna().any() or end_dates.isna().any()
+                or source_dates.nunique() != 1 or end_dates.nunique() != 1
+                or source_dates.iloc[0].normalize() > pd.Timestamp(start_date).normalize()
+                or end_dates.iloc[0].normalize() < pd.Timestamp(end_date).normalize()):
+            raise ValueError("Periode CSV PostgreSQL tidak mencakup horizon API. Sesuaikan tanggal query referensi lalu ekspor ulang.")
+    normalized = raw["transaction_number"].fillna("").astype(str).str.strip().str.upper()
+    if normalized.duplicated().any():
+        raise ValueError("Ekspor PostgreSQL mempunyai nomor NPR ganda setelah normalisasi. Periksa duplikasi sebelum membandingkan.")
+    frame = _normalize_full_npr_api(raw, "POSTGRESQL_CSV", {})
+    frame = assign_unassigned(frame, "Sales")
+    frame["Sales"] = frame["Sales"].replace({"UNASSIGNED": "Unassigned"})
+    invalid = len(raw) - len(frame)
+    if invalid or frame["transaction_date"].isna().any():
+        raise ValueError("Ekspor PostgreSQL mengandung nomor/status/tanggal yang tidak valid. Periksa sumber sebelum membandingkan.")
+    # Batasi periode pembanding sama dengan horizon sumber API, bukan tanggal awal picker.
+    frame = apply_cumulative_filter(frame, end_date)
+    frame = frame.loc[frame["transaction_date"].ge(pd.Timestamp(start_date).normalize())].copy()
+    rows = []
+    for number in frame["No. Transaksi"]:
+        ctx = frame.attrs["npr_api_context"][number.upper()]
+        result = _npr_declared_milestones(ctx)
+        if not result or result["state"] != "API_FIRST_MILESTONES":
+            raise ValueError("Milestone ekspor PostgreSQL tidak valid/ambigu pada salah satu NPR. Periksa hasil query referensi.")
+        rows.append({"__npr_number": number.upper(), "__first_process_date": result["process"], "__first_complete_date": result["complete"],
+                     "History State": "API_FIRST_MILESTONES", "History Rows": result["count"], "Created Date Source": "created_at",
+                     "Milestone Source": "POSTGRESQL_CSV", "History Pagination": "SQL_AGGREGATE"})
+    history = pd.DataFrame(rows, columns=["__npr_number", "__first_process_date", "__first_complete_date", "History State", "History Rows", "Created Date Source", "Milestone Source", "History Pagination"])
+    for col in ("__first_process_date", "__first_complete_date"):
+        history[col] = pd.to_datetime(history[col], errors="coerce")
+    history.attrs["npr_history_diagnostic"] = rows
+    return _npr_audit_rows_v4(frame, history)
+
+
+def _npr_compare_audits_v4(api: pd.DataFrame, pg: pd.DataFrame) -> pd.DataFrame:
+    """Outer join dokumen; nilai belum terbaca berbeda dari nol/no milestone yang sah."""
+    fields = ["transaction_number", "status_description", "pic", "created_at_used", "first_process_at", "first_complete_at",
+              "aging_process_days", "aging_complete_days", "sla_eligible", "sla_met", "history_state", "created_source"]
+    frames = []
+    for name, source in (("API", api), ("PG", pg)):
+        frame = source.reindex(columns=fields).copy()
+        frame["key"] = frame["transaction_number"].fillna("").astype(str).str.strip().str.upper()
+        if frame["key"].duplicated().any():
+            raise ValueError(name + " memiliki nomor NPR ganda. Hasil tidak boleh dibandingkan dengan menghapus baris diam-diam.")
+        frames.append(frame.add_prefix(name + "_"))
+    result = frames[0].merge(frames[1], how="outer", left_on="API_key", right_on="PG_key", indicator=True, validate="one_to_one")
+    result["No. NPR"] = result["API_key"].combine_first(result["PG_key"])
+    state, causes = [], []
+    for _, row in result.iterrows():
+        if row["_merge"] != "both":
+            state.append("BERBEDA")
+            causes.append("HANYA_API" if row["_merge"] == "left_only" else "HANYA_POSTGRESQL")
+            continue
+        differences = []
+        for field in ("status_description", "pic"):
+            if _npr_text(row["API_" + field]).casefold() != _npr_text(row["PG_" + field]).casefold():
+                differences.append(field.upper())
+        date_verified = row["API_created_source"] == "created_at"
+        history_verified = row["API_history_state"] in NPR_HISTORY_GOOD_STATES
+        for field in ("created_at_used", "first_process_at", "first_complete_at"):
+            if field != "created_at_used" and not history_verified:
+                continue
+            a, b = _npr_timestamp(row["API_" + field]), _npr_timestamp(row["PG_" + field])
+            # Banding tanggal kalender karena rumus acuan memakai normalize().
+            a = a.normalize() if pd.notna(a) else pd.NaT
+            b = b.normalize() if pd.notna(b) else pd.NaT
+            if (pd.isna(a) != pd.isna(b)) or (pd.notna(a) and pd.notna(b) and a != b):
+                differences.append(field.upper())
+        if history_verified and date_verified:
+            for field in ("aging_process_days", "aging_complete_days", "sla_eligible", "sla_met"):
+                a, b = row["API_" + field], row["PG_" + field]
+                if (pd.isna(a) != pd.isna(b)) or (pd.notna(a) and pd.notna(b) and a != b):
+                    differences.append(field.upper())
+        unresolved = []
+        if not date_verified:
+            unresolved.append("SUMBER_CREATED_BELUM_TERVERIFIKASI")
+        if not history_verified:
+            unresolved.append("RIWAYAT_BELUM_TERVERIFIKASI")
+        state.append("BERBEDA" if differences else ("BELUM_TERVERIFIKASI" if unresolved else "COCOK"))
+        causes.append(" | ".join(differences + unresolved) or "COCOK_PADA_FIELD_DAN_TANGGAL_KALENDER")
+    result["Hasil"] = state
+    result["Penyebab"] = causes
+    first = ["No. NPR", "Hasil", "Penyebab"]
+    return result[first + [c for c in result if c not in first and c != "_merge"]]
+
+
+def _render_npr_audit_v4(df, history, end_date):
+    import json
+    audit = _npr_audit_rows_v4(df, history)
+    with st.expander("🧪 Cocokkan NPR API dengan PostgreSQL", expanded=False):
+        st.caption("Perbandingan hanya berjalan setelah CSV PostgreSQL diunggah. File ini tidak membuka koneksi database. Gunakan database/lingkungan dan waktu pengambilan yang sama; server uji belum tentu berisi data produksi yang sama.")
+        st.download_button("⬇️ Unduh data pembanding NPR API.csv", data=audit.to_csv(index=False).encode("utf-8-sig"),
+                           file_name="NPR_API_Pembanding.csv", mime="text/csv", key="npr_api_audit_v4")
+        upload = st.file_uploader("CSV dari Query_NPR_Referensi_PostgreSQL.sql", type=["csv"], key="npr_pg_audit_upload_v4")
+        if upload is not None:
+            try:
+                if upload.size > 25 * 1024 * 1024:
+                    raise ValueError("Ukuran CSV pembanding maksimal 25 MB.")
+                raw = pd.read_csv(upload, dtype=str, keep_default_na=False, encoding="utf-8-sig")
+                config = _npr_api_config()
+                reference = _npr_reference_audit_v4(raw, config["fetch_start_date"], end_date)
+                if reference.empty:
+                    st.warning("CSV PostgreSQL tidak mempunyai NPR dalam horizon sumber yang sama. Belum ada pembanding yang layak.")
+                    return
+                compare = _npr_compare_audits_v4(audit, reference)
+                counts = compare["Hasil"].value_counts().to_dict()
+                st.write({"Cocok": counts.get("COCOK", 0), "Berbeda": counts.get("BERBEDA", 0), "Belum terverifikasi": counts.get("BELUM_TERVERIFIKASI", 0)})
+                st.caption("Perbandingan memakai seluruh NPR yang lolos cutoff sebelum pencarian/PIC. Created/First Process/First Complete dibandingkan pada tanggal kalender, sesuai rumus aging; ini bukan pemeriksaan kesamaan seluruh tabel DB.")
+                st.dataframe(compare, use_container_width=True, hide_index=True)
+                st.download_button("⬇️ Unduh perbedaan NPR API–PostgreSQL.csv", data=compare.to_csv(index=False).encode("utf-8-sig"),
+                                   file_name="Perbandingan_NPR_API_PostgreSQL.csv", mime="text/csv", key="npr_compare_export_v4")
+            except (ValueError, KeyError, pd.errors.ParserError, UnicodeError) as exc:
+                st.warning(_npr_safe_message(str(exc)))
+
+
+def _render_npr_history_summary_v4(df, history, sla):
+    diag = pd.DataFrame(history.attrs.get("npr_history_diagnostic", []))
+    if diag.empty:
+        return
+    good = diag["History State"].isin(NPR_HISTORY_GOOD_STATES)
+    count, total = int(good.sum()), len(diag)
+    valid_p = int(pd.to_datetime(history["__first_process_date"], errors="coerce").notna().sum())
+    valid_c = int(pd.to_datetime(history["__first_complete_date"], errors="coerce").notna().sum())
+    empty = int((good & pd.to_numeric(diag["History Rows"], errors="coerce").eq(0)).sum())
+    st.caption(f"Riwayat berhasil diperiksa: {count:,}/{total:,} NPR | Respons history kosong: {empty:,} | First Process terisi: {valid_p:,} | First Complete terisi: {valid_c:,} | SLA dinilai: {len(sla):,}.")
+    connection = history.attrs.get("npr_history_connection", {})
+    if count < total:
+        st.warning(f"HASIL AGING/SLA MASIH PARSIAL: {total - count:,} NPR belum berhasil diperiksa. Persentase SLA di bawah hanya berlaku untuk {len(sla):,} NPR dengan tanggal valid yang sudah terbaca, BUKAN SLA keseluruhan periode. Jumlah/status/PIC tidak terpotong oleh antrean history.")
+        wait = connection.get("cooldown", {}).get("wait_seconds", 0)
+        if wait:
+            st.info(f"Pemuatan dijeda karena pembatasan server. Tunggu sekitar {wait:,} detik, lalu klik Lanjutkan riwayat atau Muat semua bertahap. Hasil sukses tetap tersimpan dalam sesi.")
+        elif connection.get("batch_state") not in {"IDLE", "BATCH_COMPLETE", "COMPLETE"}:
+            st.info(f"Status pemuatan: {connection.get('batch_state')}. Periksa Informasi Teknis Dashboard; percobaan berikutnya tidak mengulang hasil sukses.")
+        else:
+            st.caption("Klik Lanjutkan riwayat untuk satu batch atau Muat semua bertahap untuk meneruskan batch berikutnya secara otomatis selama aplikasi terbuka.")
+    else:
+        st.caption("Semua dokumen terpilih telah diperiksa melalui sumber yang dapat dibaca. History kosong tetap kosong. Tanpa metadata total/pagination atau CSV PostgreSQL, kelengkapan seluruh DB dan kesamaan sumber belum terbukti.")
+    alternate = ~diag["Created Date Source"].eq("created_at")
+    if alternate.any():
+        st.caption(f"Sumber tanggal dibuat {int(alternate.sum()):,} NPR masih memakai alias input_date/transaction_date. Kesetaraannya dengan created_at PostgreSQL belum terverifikasi.")
+
+
+
+def _run_npr_dashboard_v3(end_date, search_number, search_status, pic_column, *, start_date=None):
+    return run_npr_dashboard_v7(end_date, search_number, search_status, pic_column, start_date=start_date)
+
+
+
+def _npr_native_header_from_payload_v9(payload, number, header_id=""):
+    """Extract HEADER created_at only; never traverse history/events/product items.
+
+    On a history route, an explicit history wrapper or a named header container
+    establishes header context. A bare status event is not a document header.
+    Identity conflicts or different header creation timestamps are rejected.
+    """
+    wanted, identifier = _npr_text(number).upper(), _npr_id(header_id)
+    found = []
+    named_headers = {"product_request", "productrequest", "header", "document"}
+    wrappers = {"data", "result", "results", "record", "records", "product_requests"} | named_headers
+    conflict = False
+
+    def visit(obj, named=False, depth=0):
+        nonlocal conflict
+        if depth > 8:
+            return
+        if isinstance(obj, list):
+            for value in obj:
+                visit(value, named, depth + 1)
+            return
+        if not isinstance(obj, dict):
+            return
+        lower = {str(k).casefold(): v for k, v in obj.items()}
+        explicit_history = any(k in lower and isinstance(lower[k], (dict, list)) for k in NPR_HISTORY_KEYS)
+        if explicit_history or named:
+            no = _npr_text(_npr_pick(obj, ("transaction_number", "npr_number", "no_npr"))).upper()
+            key = _npr_id(_npr_pick(obj, ("product_request_id", "product_requests_id", "npr_id", "id")))
+            matches = bool((no and no == wanted) or (identifier and key == identifier))
+            mismatches = bool((no and no != wanted) or (identifier and key and key != identifier))
+            if matches and mismatches:
+                conflict = True
+            if matches and not mismatches:
+                created = _npr_date_from(obj, ("created_at",))
+                if pd.notna(created):
+                    found.append({"transaction_number": wanted, "id": identifier or key,
+                                  "created_at": created, "source": "API_HEADER.created_at"})
+        # A field called created_at inside history remains an event date, not creation.
+        for k, value in lower.items():
+            if k in wrappers and isinstance(value, (dict, list)):
+                visit(value, k in named_headers, depth + 1)
+
+    visit(payload)
+    unique = {row["created_at"] for row in found}
+    return found[0] if found and len(unique) == 1 and not conflict else {}
+
+
+def _npr_apply_recovered_created_dates_v9(df, store):
+    """Fill missing native dates only from identity-checked, matching-source cache."""
+    import copy
+    out = df.copy()
+    out.attrs = copy.deepcopy(df.attrs)
+    contexts = out.attrs.get("npr_api_context", {})
+    filled = 0
+    created_headers = store.setdefault("created_headers", {})
+    # Records avoid repeated deep copies of DataFrame.attrs for each iterrows Series.
+    for idx, row in zip(out.index, out.to_dict("records")):
+        if pd.notna(_npr_timestamp(row.get("Created At NPR"))):
+            continue
+        number = _npr_text(row.get("No. Transaksi")).upper()
+        context = contexts.get(number, {})
+        cached = store.get("success", {}).get(number)
+        current_fingerprint = _npr_header_fingerprint_v5(context, row.get("Status"), row.get("transaction_date"))
+        accepted = {cached.get("fingerprint"), cached.get("header_recovery_input_fingerprint")} if cached else set()
+        cached_matches = bool(cached and current_fingerprint in accepted)
+        recovered = _npr_timestamp(cached.get("record", {}).get("Recovered Header Created At")) if cached_matches else pd.NaT
+        saved = created_headers.get(number, {})
+        saved_matches = current_fingerprint in {saved.get("input_fingerprint"), saved.get("enriched_fingerprint")}
+        if pd.isna(recovered) and saved_matches:
+            recovered = _npr_timestamp(saved.get("created_at"))
+        if pd.isna(recovered):
+            if saved and not saved_matches:
+                created_headers.pop(number, None)
+            continue
+        if cached_matches:
+            cached.setdefault("header_recovery_input_fingerprint", current_fingerprint)
+        out.at[idx, "Created At NPR"] = recovered
+        out.at[idx, "transaction_date"] = recovered
+        out.at[idx, "Date Source NPR"] = "created_at"
+        context.update(native_created_at=recovered, date_source="created_at",
+                       native_created_at_source="API_HISTORY_HEADER.created_at", record_created_date=recovered)
+        contexts[number] = context
+        # Recovery is the same document read, not a new server update: keep its history.
+        enriched_fingerprint = _npr_header_fingerprint_v5(context, row.get("Status"), recovered)
+        if cached_matches:
+            cached["fingerprint"] = enriched_fingerprint
+            cached["record"]["Created Date Source"] = "created_at"
+        # Preserve native header creation through a history-TTL refresh. This cache
+        # is identity/fingerprint bound and does NOT count as successful history.
+        created_headers[number] = {"input_fingerprint": current_fingerprint,
+                                   "enriched_fingerprint": enriched_fingerprint, "created_at": recovered}
+        filled += 1
+    out.attrs["npr_api_context"] = contexts
+    out.attrs["npr_created_recovery"] = {"filled_this_pass": filled,
+                                       "missing_after_recovery": int(out["Created At NPR"].isna().sum()),
+                                       "source_documents_with_recovered_created_at": sum(
+                                           c.get("native_created_at_source") == "API_HISTORY_HEADER.created_at"
+                                           for c in contexts.values()),
+                                       "source": "API_HEADER.created_at_ONLY"}
+    return out
+
+
+def _npr_source_prepare_headers_v9(df):
+    """v10: no created_at recovery gate.
+
+    Production API exposes input_date as the shared canonical NPR date. History is
+    reserved for FIRST Process/Complete milestones and is never used to fabricate
+    the document date.
+    """
+    return df
+
+def _npr_source_after_headers_v9(df):
+    return None
+
+
+def _npr_source_label():
+    return "API"
+
+
+def _npr_source_clear():
+    _clear_npr_caches()
+    _npr_clear_history_caches()
+    for key in list(st.session_state):
+        if str(key).startswith(("_npr_v9_recovery_auto_", "_npr_pinned_headers_v11_2_")):
+            st.session_state.pop(key, None)
+
+
+def _npr_source_controls(end_date, source_start):
+    """Headless NPR connection check. No per-page source/settings form."""
+    try:
+        config = _npr_api_config()
+    except ValueError as exc:
+        st.error(str(exc))
+        return False
+    if config.get("token_config_error"):
+        st.error(config["token_config_error"])
+        return False
+    if not config["token"]:
+        st.error(
+            "Token NPR belum tersedia. Isi SIBIMA_NPR_API_TOKEN pada environment "
+            "atau token pada [npr_api] di .streamlit/secrets.toml, kemudian restart. "
+            "Token ERP existing hanya dipakai otomatis untuk host/path ERP yang sama."
+        )
+        return False
+    return True
+
+
+def _npr_source_headers(source_start, end_date):
+    out = load_full_npr_from_api(start_date=source_start, end_date=end_date)
+    diagnostic = out.attrs.get("npr_api_fetch_diagnostic", {})
+    out.attrs["npr_source_state"] = diagnostic.get("state", "NOT_FETCHED")
+    out.attrs["npr_report_end"] = str(end_date)
+    if diagnostic.get("state") != "OK":
+        message = _npr_failure_message(diagnostic)
+        if diagnostic.get("state") in {"HTTP_400", "HTTP_422", "API_REJECTED"}:
+            message += (" Periode NPR sekarang dikirim ke API. Periksa date_start dan nama parameter akhir yang "
+                        "didukung server; filter tanggal lokal tetap dijalankan.")
+        out.attrs["npr_source_message"] = message
+    return out
+
+
+def _npr_prepare_history_cycle(df):
+    import time
+    import hashlib
+    config = _npr_history_settings()
+    store = _npr_history_store_v5(config)
+    completed = store.get("snapshot_completed_at")
+    if completed is not None and time.time() - completed >= NPR_PARITY_CACHE_TTL:
+        store.update(success={}, errors={}, selection=None, snapshot_completed_at=None)
+        store["run"].update(initial_attempted=False, request=True, auto=True)
+    keys = tuple(sorted(df["No. Transaksi"].tolist())) if not df.empty else ()
+    scope = hashlib.sha256(repr(keys).encode()).hexdigest()
+    if store.get("last_document_scope") != scope:
+        store.update(last_document_scope=scope, snapshot_completed_at=None)
+        store["run"].update(initial_attempted=False, request=True, auto=True)
+    return store
+
+
+def _npr_source_history_controls(df):
+    if df.empty:
+        return
+    _npr_prepare_history_cycle(df)
+    _render_npr_history_controls(df)
+
+
+def _npr_source_history(df):
+    if df.empty:
+        out = pd.DataFrame(columns=["__npr_number", "__first_process_date", "__first_complete_date"])
+        out.attrs["npr_history_diagnostic"] = []
+        return out
+    _npr_prepare_history_cycle(df)
+    # CSV comparison is optional and NEVER gates reading source history.
+    return load_npr_history_milestones_api(df, allow_remote=True)
+
+
+def _npr_source_after_render(history):
+    _npr_continue_auto_v5(history)
+
+
+def _npr_source_diagnostics(df, history):
+    _render_npr_diagnostics(df, df.attrs.get("npr_report_end", ""), history=history)
+
 
 def main():
     st.title("SIBIMA Performance Dashboard - PROCUREMENT")
@@ -3144,6 +6111,15 @@ def main():
         start_date, end_date = selected_date_range
     else:
         start_date, end_date = default_start, today
+
+    if selected_doc_type == "NPR":
+        # Do not silently use the default month while the user is still picking
+        # the second date. Other document types keep their existing behavior.
+        if not isinstance(selected_date_range, (tuple, list)) or len(selected_date_range) != 2:
+            st.info("Lengkapi tanggal awal dan akhir pada Select Date Range untuk NPR.")
+            return
+        _run_npr_dashboard_v3(end_date, search_number, search_status, col_head5, start_date=start_date)
+        return
 
     with st.spinner("Mengambil data dashboard..."):
         # =========================================================
@@ -3212,11 +6188,11 @@ def main():
             )
 
         elif selected_doc_type == "NPR":
-            # Full NPR saja.
-            df_npr = load_full_npr_from_api(
-                start_date=start_date,
-                end_date=end_date,
-            )
+            # Kompatibilitas: jalur aktif NPR sudah ditangani _run_npr_dashboard_v3.
+            # date_start berasal dari batas sumber, bukan tanggal awal picker.
+            df_npr = load_full_npr_from_api(end_date=end_date)
+            df_npr = assign_unassigned(df_npr, "Sales")
+            df_npr["Sales"] = df_npr["Sales"].replace({"UNASSIGNED": "Unassigned"})
 
         else:
             # PUR belum memiliki source aktif pada script existing.
@@ -3274,7 +6250,9 @@ def main():
         # ---------- EXTRACT UNIQUE PIC LIST ----------
     # Ambil list PIC Procurement unik dari df_pr_final (dan dataframe lain jika perlu)
     pic_list = []
-    if "PIC Procurement" in df_pr_final.columns:
+    if selected_doc_type == "NPR" and "Sales" in df_npr.columns:
+        pic_list = sorted(df_npr["Sales"].dropna().unique().tolist())
+    elif "PIC Procurement" in df_pr_final.columns:
         pic_list = df_pr_final["PIC Procurement"].dropna().astype(str).str.strip()
         pic_list = [pic for pic in pic_list.unique() if pic != "" and pic.lower() != "nan"]
         pic_list.sort()
@@ -3302,6 +6280,9 @@ def main():
     #df_npr_final_f = df_pr_final.copy()
 
     # ---------- DATE FILTER ----------
+    if selected_doc_type == "NPR":
+        # Saat pemilihan rentang belum lengkap, tetap gunakan default tanggal yang valid.
+        df_npr_f = apply_cumulative_filter(df_npr_f, end_date)
     if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) == 2:
         report_start_date, report_end_date = selected_date_range
         df_pr_f = apply_cumulative_filter(df_pr_f, report_end_date)
@@ -3350,7 +6331,7 @@ def main():
     #df_pr_final_real = safe_to_numeric(df_pr_final_real, ["price", "discount", "quantity", "tax1_percentage", "tax2_percentage"])
     df_pr_final_real= safe_to_numeric(df_pr_final_real, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
     df_do_final_real= safe_to_numeric(df_do_final_real, ["item_price", "item_discount", "item_quantity", "item_tax1_percentage", "item_tax2_percentage"])
-    
+
     # ---------- METRICS ----------
     total_pr_unpr = safe_sum(df_pr_f, "Nominal")
     total_po_unpr = safe_sum(df_po_f, "Nominal")
@@ -3523,7 +6504,7 @@ def main():
     ~df_do_final_valid["Status"].str.contains("Draft", case=False, na=False)
     ].copy()
 
-    
+
     # =====================================================
     # LEFT - PR
     # =====================================================
@@ -4140,167 +7121,6 @@ def main():
                     st.info("Data tidak tersedia untuk fitur download DO Balance per PIC.")
 
 
-    # =====================================================
-    # LEFT - NPR
-    # =====================================================
-    if selected_doc_type == "NPR":
-        with col_kiri:
-            with st.container(border=True):
-                st.subheader("📊 Detail NPR per Status")
-
-                if df_npr_f.empty:
-                    st.info("Data NPR tidak tersedia.")
-                else:
-                    status_summary = (
-                        df_npr_f.groupby("Status")["No. Transaksi"]
-                        .nunique()
-                        .reset_index(name="Jumlah_Doc")
-                    )
-
-                    # Warna status konsisten dengan PR
-                    STATUS_COLORS = {
-                        "Complete": "#00CC96",
-                        "In Progress": "#F2C94C",
-                        "Approved": "#F2994A",
-                        "Need Approve": "#EB5757",
-                        "Request": "#56CCF2"  # tambahan untuk NPR
-                    }
-
-                    # Pie chart berdasarkan jumlah dokumen
-                    fig = px.pie(
-                        status_summary,
-                        values="Jumlah_Doc",
-                        names="Status",
-                        color="Status",
-                        color_discrete_map=STATUS_COLORS,
-                        hole=0.45,
-                        title="Proporsi Jumlah NPR per Status"
-                    )
-
-                    # Tampilkan persentase dan jumlah
-                    fig.update_traces(
-                        textinfo="percent+value",
-                        texttemplate="%{percent:.1%}<br>(%{value} dokumen)"
-                    )
-
-                    st.plotly_chart(fig, use_container_width=True)
-
-
-
-
-    # =====================================================
-    # MID NPR
-    # =====================================================
-
-        with col_tengah:
-            with st.container(border=True):
-                st.subheader("👥 Analisis Aktivitas NPR per Sales & per Status")
-
-                if df_npr_f.empty:
-                    st.info("Data NPR tidak tersedia.")
-                else:
-                    # Pastikan kolom Status dan Sales ada
-                    df_npr_f = assign_unassigned(df_npr_f, "Sales")
-                    df_npr_f = assign_unassigned(df_npr_f, "Status")
-
-                    # Ringkas jumlah NPR per Sales dan Status
-                    sales_summary = (
-                        df_npr_f.groupby(["Sales", "Status"])
-                        .agg(Jumlah_Doc=("No. Transaksi", "nunique"))
-                        .reset_index()
-                        .sort_values(by="Jumlah_Doc", ascending=False)
-                    )
-
-                    # Warna status sama seperti PR
-                    STATUS_COLORS = {
-                        "Complete": "#00CC96",
-                        "Process": "#F2C94C",
-                        "Approved": "#F2994A",
-                        "Need Approve": "#EB5757",
-                        "Request": "#56CCF2"  # tambahan untuk NPR
-                    }
-
-                    # Buat stacked bar chart
-                    fig = px.bar(
-                        sales_summary,
-                        x="Sales",
-                        y="Jumlah_Doc",
-                        color="Status",
-                        color_discrete_map=STATUS_COLORS,
-                        text="Jumlah_Doc",
-                        title="Analisis Transaksi NPR per Sales & per Status"
-                    )
-
-                    # Tambahkan label total di atas tiap Sales
-                    totals = sales_summary.groupby("Sales")["Jumlah_Doc"].sum().reset_index()
-                    for _, row in totals.iterrows():
-                        fig.add_annotation(
-                            x=row["Sales"],
-                            y=row["Jumlah_Doc"],
-                            text=f"{row['Jumlah_Doc']}",
-                            showarrow=False,
-                            font=dict(size=12, color="black"),
-                            yshift=10
-                        )
-
-                    fig.update_traces(
-                        textposition="inside",
-                        textfont=dict(size=10, color="white")
-                    )
-                    fig.update_layout(
-                        uniformtext_mode="hide",
-                        yaxis_title="Jumlah NPR",
-                        xaxis_title="Sales",
-                        margin=dict(l=40, r=40, t=60, b=80)
-                    )
-
-                    st.plotly_chart(fig, use_container_width=True)
-
-
-    # =====================================================
-    # 📈 RIGHT - NPR Timeline
-    # =====================================================
-        with col_kanan:
-            with st.container(border=True):
-                st.subheader("📈 Timeline NPR per Tanggal Transaksi")
-
-                if df_npr_f.empty:
-                    st.info("Data NPR tidak tersedia.")
-                else:
-                    # Pastikan kolom tanggal valid
-                    df_npr_f['transaction_date'] = pd.to_datetime(df_npr_f['transaction_date'], errors='coerce')
-
-                    # Hitung jumlah NPR unik per tanggal
-                    timeline = (
-                        df_npr_f.groupby(df_npr_f['transaction_date'].dt.date)['No. Transaksi']
-                        .nunique()
-                        .reset_index(name='Jumlah_Doc')
-                    )
-
-                    # Line chart timeline NPR
-                    fig = px.line(
-                        timeline,
-                        x='transaction_date',
-                        y='Jumlah_Doc',
-                        markers=True,
-                        title='Timeline NPR (Jumlah NPR Unik per Hari)',
-                        line_shape='linear',
-                        color_discrete_sequence=['#56CCF2']
-                    )
-
-                    fig.update_traces(
-                        textposition="top center",
-                        textfont=dict(size=10, color="black")
-                    )
-                    fig.update_layout(
-                        yaxis_title="Jumlah NPR",
-                        xaxis_title="Tanggal Transaksi",
-                        margin=dict(l=40, r=40, t=60, b=80)
-                    )
-
-                    st.plotly_chart(fig, use_container_width=True)
-
-
     # ---------- FOOTER INFO ----------
     with st.expander("ℹ️ Informasi Teknis Dashboard"):
         selected_report_date = (
@@ -4318,6 +7138,558 @@ def main():
 - **Cache API:** 600 detik
             """
         )
+
+
+
+
+# NPR v5 helpers (transport gate / resumable state)
+@st.cache_resource(show_spinner=False)
+def _npr_transport_registry_v5():
+    """Gate per origin, bersama semua sesi NPR pada satu proses Streamlit."""
+    import threading
+    return {"lock": threading.RLock(), "origins": {}}
+
+
+
+def _npr_transport_gate_v5(base_url):
+    from urllib.parse import urlsplit
+    import threading
+    parsed = urlsplit(base_url)
+    origin = (parsed.scheme, parsed.hostname, parsed.port or 443)
+    registry = _npr_transport_registry_v5()
+    with registry["lock"]:
+        if origin not in registry["origins"]:
+            registry["origins"][origin] = {
+                "lock": threading.RLock(), "next_at": 0.0, "cooldown_until": 0.0,
+                "adaptive_interval": 0.0, "rate_limit_count": 0,
+            }
+        return registry["origins"][origin]
+
+
+
+def _npr_transport_policy_v5(base_url):
+    """Nilai awal konservatif, BUKAN pernyataan kuota resmi server."""
+    import math
+    values = {
+        "interval": _npr_setting("min_request_interval", "SIBIMA_NPR_MIN_REQUEST_INTERVAL", "10"),
+        "fallback_cooldown": _npr_setting("rate_limit_cooldown", "SIBIMA_NPR_RATE_LIMIT_COOLDOWN", "60"),
+    }
+    saved = st.session_state.get("_npr_history_options_v5", {})
+    if saved.get("base_url") == base_url:
+        values["interval"] = saved.get("min_request_interval", values["interval"])
+    def bounded(value, default, lower, upper):
+        try:
+            n = float(value)
+            return min(upper, max(lower, n)) if math.isfinite(n) else default
+        except (ValueError, TypeError):
+            return default
+    return {"interval": bounded(values["interval"], 10.0, 1.0, 60.0),
+            "fallback_cooldown": bounded(values["fallback_cooldown"], 60.0, 1.0, 3600.0)}
+
+
+
+def _npr_retry_after_seconds_v5(headers, fallback=60.0, now=None):
+    """Retry-After berupa detik atau HTTP-date; nilai sah tidak dipotong lebih pendek."""
+    import math
+    import time
+    from email.utils import parsedate_to_datetime
+    raw = str(headers.get("Retry-After", "")).strip()
+    if raw.isdigit():
+        return max(0, int(raw)), "RETRY_AFTER_SECONDS"
+    if raw:
+        try:
+            target = parsedate_to_datetime(raw)
+            if target.tzinfo is None:
+                from datetime import timezone
+                target = target.replace(tzinfo=timezone.utc)
+            reference = time.time() if now is None else float(now)
+            # Date server dipakai bila tersedia, mengurangi dampak beda jam komputer.
+            if headers.get("Date"):
+                try:
+                    server_date = parsedate_to_datetime(str(headers["Date"]))
+                    if server_date.tzinfo is not None:
+                        reference = server_date.timestamp()
+                except (ValueError, TypeError, OverflowError):
+                    pass
+            return max(0, math.ceil(target.timestamp() - reference)), "RETRY_AFTER_HTTP_DATE"
+        except (ValueError, TypeError, OverflowError):
+            pass
+    return max(1, math.ceil(fallback)), "CLIENT_FALLBACK"
+
+
+
+def _npr_cooldown_status_v5(base_url):
+    import math
+    import time
+    gate = _npr_transport_gate_v5(base_url)
+    with gate["lock"]:
+        seconds = max(0, math.ceil(gate["cooldown_until"] - time.monotonic()))
+        return {"wait_seconds": seconds, "adaptive_interval": gate["adaptive_interval"],
+                "rate_limit_count": gate["rate_limit_count"]}
+
+
+
+def _npr_get_response_v5(session, url, params, base_url, diagnostic, read_timeout):
+    """Satu request aktif per origin. HTTP 429 langsung menjeda SEMUA request NPR."""
+    import math
+    import time
+    from datetime import timezone
+    gate = _npr_transport_gate_v5(base_url)
+    policy = _npr_transport_policy_v5(base_url)
+    # Lock tetap dipegang sampai status dibaca: sesi lain tidak menyalip respons 429.
+    with gate["lock"]:
+        remaining = gate["cooldown_until"] - time.monotonic()
+        if remaining > 0:
+            diagnostic.update(state="RATE_LIMIT_WAIT", retry_after_seconds=math.ceil(remaining),
+                              request_sent=False)
+            raise NPRAPIFetchError(diagnostic)
+        delay = max(0.0, gate["next_at"] - time.monotonic())
+        if delay:
+            time.sleep(delay)
+        diagnostic["request_attempts"] = diagnostic.get("request_attempts", 0) + 1
+        diagnostic["request_sent"] = True
+        response = None
+        try:
+            response = session.get(url, params=params, timeout=(10, max(1, read_timeout)), allow_redirects=False)
+        except requests.exceptions.SSLError:
+            diagnostic.update(state="SSL_ERROR", error_type="SSLError")
+            raise NPRAPIFetchError(diagnostic) from None
+        except requests.exceptions.Timeout:
+            diagnostic.update(state="TIMEOUT", error_type="Timeout")
+            raise NPRAPIFetchError(diagnostic) from None
+        except requests.exceptions.ConnectionError:
+            diagnostic.update(state="CONNECTION_ERROR", error_type="ConnectionError")
+            raise NPRAPIFetchError(diagnostic) from None
+        except requests.exceptions.RequestException as exc:
+            diagnostic.update(state="FETCH_ERROR", error_type=type(exc).__name__)
+            raise NPRAPIFetchError(diagnostic) from None
+        finally:
+            # Jeda setelah respons, bukan hanya jarak start antar thread.
+            gate["next_at"] = time.monotonic() + max(policy["interval"], gate["adaptive_interval"])
+        diagnostic["http_status"] = response.status_code
+        if response.status_code == 429 or (response.status_code == 503 and response.headers.get("Retry-After")):
+            if response.status_code == 429:
+                gate["rate_limit_count"] += 1
+                gate["adaptive_interval"] = min(60.0, max(policy["interval"], gate["adaptive_interval"]) * 1.5)
+            fallback = min(3600.0, policy["fallback_cooldown"] * (2 ** min(5, max(0, gate["rate_limit_count"] - 1))))
+            wait, wait_source = _npr_retry_after_seconds_v5(response.headers, fallback)
+            gate["cooldown_until"] = time.monotonic() + wait
+            gate["next_at"] = max(gate["next_at"], gate["cooldown_until"])
+            diagnostic.update(state=f"HTTP_{response.status_code}", retry_after_seconds=wait,
+                              retry_after_source=wait_source,
+                              retry_at_utc=datetime.fromtimestamp(time.time() + wait, tz=timezone.utc).isoformat())
+            response.close()
+            raise NPRAPIFetchError(diagnostic)
+        return response
+
+
+
+def _npr_history_store_v5(config):
+    scope = _npr_history_scope_key(config)
+    key = "_npr_history_store_v5_" + scope
+    if key not in st.session_state:
+        st.session_state[key] = {"success": {}, "errors": {}, "selection": None,
+            "snapshot_completed_at": None, "last_document_scope": None,
+            "run": {"initial_attempted": False, "request": False, "auto": True}}
+    return st.session_state[key]
+
+
+
+def _npr_header_fingerprint_v5(context, status, created_date):
+    import hashlib
+    # Context perubahan header membatalkan snapshot tersimpan. TTL tetap berlaku
+    # untuk perubahan history yang tidak ikut memperbarui header.
+    parts = [context.get("id"), status, str(created_date), context.get("date_source"),
+             str(context.get("header_updated_at")), str(context.get("header_date_inprogress")),
+             str(context.get("header_date_complete"))]
+    return hashlib.sha256(repr(parts).encode()).hexdigest()
+
+
+
+def _npr_continue_auto_v5(history):
+    """Resume successful batches or server cooldowns while the browser session stays active."""
+    import time
+    connection = history.attrs.get("npr_history_connection", {})
+    config = _npr_history_settings()
+    store = _npr_history_store_v5(config)
+    state = connection.get("batch_state")
+    progress = state == "BATCH_COMPLETE" and connection.get("new_success", 0) > 0
+    waiting = state in {"HTTP_429", "RATE_LIMIT_WAIT", "HTTP_503"}
+    enabled = bool(store["run"].get("auto") and connection.get("auto_continue")
+                   and connection.get("unresolved_documents", 0) > 0 and (progress or waiting))
+    store["resume_pending_v11_2"] = enabled
+    if not enabled:
+        return
+    scope = _npr_history_scope_key(config)
+    fragment = getattr(st, "fragment", None)
+    if callable(fragment):
+        fragment(run_every=1.0)(_npr_resume_tick_v11_2)(scope)
+        return
+    wait = _npr_auto_wait_seconds_v11_2(config, store)
+    if wait:
+        st.info(f"Menunggu jeda {wait:,} detik; pemuatan akan lanjut di halaman ini. Hasil sukses tetap disimpan.")
+        time.sleep(min(5.0, wait))
+        st.rerun()
+    _npr_resume_tick_v11_2(scope)
+
+
+
+# =========================================================
+# NPR v6: periksa header sebelum mengambil ribuan history.
+# CSV PostgreSQL hanya pembanding, tidak pernah menjadi sumber grafik API.
+# =========================================================
+
+def _npr_validate_base_v6(value: str) -> str:
+    from urllib.parse import urlsplit, unquote
+    base = str(value or '').strip().rstrip('/') + '/'
+    try:
+        parsed = urlsplit(base)
+        valid = (parsed.scheme == 'https' and parsed.hostname and not parsed.username
+                 and not parsed.password and not parsed.query and not parsed.fragment
+                 and '..' not in unquote(parsed.path).split('/')
+                 and not any(ch.isspace() for ch in base))
+        _ = parsed.port
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError('Base URL NPR harus HTTPS tanpa token, query, username, atau password.')
+    return base
+
+
+def _npr_apply_connection_v6(config, base, raw_token, fetch_start, approved_host=False):
+    """Token lama tidak boleh ikut ketika berpindah host/base URL."""
+    new_base = _npr_validate_base_v6(base)
+    changed = new_base != config['base_url']
+    if changed and not approved_host:
+        raise ValueError('Konfirmasi bahwa base URL baru berasal dari developer dan token memang untuk server tersebut.')
+    if changed and not str(raw_token).strip():
+        raise ValueError('Masukkan token khusus server baru. Token server lama tidak dipindahkan otomatis.')
+    token = _npr_clean_token(raw_token, new_base) if str(raw_token).strip() else config['token']
+    if not token:
+        raise ValueError('Token NPR belum diisi.')
+    # Semua validasi dilakukan sebelum menyimpan perubahan konfigurasi.
+    st.session_state['_npr_api_base_v6'] = new_base
+    st.session_state['_npr_api_credentials'] = {'base_url': new_base, 'token': token}
+    st.session_state.pop('_npr_api_period', None)  # Horizon is managed by shared controls.
+    if changed:
+        st.session_state['_npr_history_options_v5'] = {
+            'base_url': new_base, 'history_endpoint': '', 'discover_history': False,
+            'batch_size': NPR_HISTORY_BATCH_SIZE,
+        }
+    _clear_npr_caches()
+    return changed
+
+
+def _npr_csv_bytes_v6(frame):
+    """CSV unduhan aman saat dibuka Excel; tidak mengubah dataframe kalkulasi."""
+    out = frame.copy()
+    for col in out.select_dtypes(include=['object', 'string']).columns:
+        out[col] = out[col].map(lambda value: "'" + value if isinstance(value, str)
+                               and value.lstrip().startswith(('=', '+', '-', '@')) else value)
+    return out.to_csv(index=False).encode('utf-8-sig')
+
+
+def _npr_pg_reference_from_audit_v6(raw, reference_end):
+    """Terima hasil audit Python milik pengguna; jangan pakai kolom status_api.
+
+    Memeriksa kontrol total agar ekspor sebagian tidak tampak sebagai acuan penuh.
+    Tidak memotong referensi pada date_start API: selisih sebelum 2026 tetap terlihat.
+    """
+    required = {
+        'transaction_number', 'membership', 'status_pg', 'pic_pg', 'created_pg',
+        'first_process_pg', 'first_complete_pg', 'history_rows_pg',
+        'pg_header_duplicates', 'history_key_variants_pg', 'total_pg_dalam_query',
+        'total_api_snapshot', 'jumlah_pg_only', 'jumlah_api_only',
+        'database_pg', 'waktu_ekspor_pg',
+    }
+    missing = required - set(raw.columns)
+    if missing:
+        raise ValueError('Unggah CSV Hasil_Audit_NPR_PostgreSQL, bukan script/CSV API. Kolom kurang: '
+                         + ', '.join(sorted(missing)))
+    if raw.empty:
+        raise ValueError('CSV audit tidak memiliki baris hasil.')
+    work = raw.copy()
+    membership = work['membership'].fillna('').astype(str).str.strip()
+    if not membership.isin(['BOTH', 'PG_ONLY', 'API_ONLY']).all():
+        raise ValueError('Kolom membership CSV audit tidak valid.')
+    numbers = work['transaction_number'].fillna('').astype(str).str.strip()
+    if numbers.eq('').any() or numbers.str.upper().duplicated().any():
+        raise ValueError('Nomor NPR kosong/ganda dalam CSV. Periksa ekspor, jangan hapus duplikat diam-diam.')
+    actual = {
+        'total_pg_dalam_query': int(membership.ne('API_ONLY').sum()),
+        'total_api_snapshot': int(membership.ne('PG_ONLY').sum()),
+        'jumlah_pg_only': int(membership.eq('PG_ONLY').sum()),
+        'jumlah_api_only': int(membership.eq('API_ONLY').sum()),
+    }
+    for col, count in actual.items():
+        values = pd.to_numeric(work[col], errors='coerce')
+        if values.isna().any() or values.nunique() != 1 or values.iloc[0] != count:
+            raise ValueError('CSV audit tidak lengkap atau kontrol total tidak sesuai: ' + col)
+    pg = work.loc[membership.ne('API_ONLY')].copy()
+    if pg.empty:
+        raise ValueError('Hasil audit tidak mempunyai dokumen PostgreSQL.')
+    duplicates = pd.to_numeric(pg['pg_header_duplicates'], errors='coerce')
+    variants = pd.to_numeric(pg['history_key_variants_pg'], errors='coerce')
+    if duplicates.isna().any() or duplicates.ne(1).any() or variants.isna().any() or variants.gt(1).any():
+        raise ValueError('Acuan memiliki duplikat/variasi nomor ambigu; hasil belum dapat dipakai untuk pemeriksaan otomatis.')
+    out = pd.DataFrame({
+        'No. Transaksi': pg['transaction_number'].fillna('').astype(str).str.strip(),
+        'Status': pg['status_pg'].map(_normalize_npr_text_status),
+        'Sales': pg['pic_pg'].fillna(''),
+        'transaction_date': pd.to_datetime(pg['created_pg'].map(_npr_timestamp)),
+        '__pg_id': pg.get('pg_id', pd.Series('', index=pg.index)).map(_npr_id),
+        '__pg_pic_id': pg.get('pic_id_pg', pd.Series('', index=pg.index)).map(_npr_id),
+        '__first_process_date': pd.to_datetime(pg['first_process_pg'].map(_npr_timestamp)),
+        '__first_complete_date': pd.to_datetime(pg['first_complete_pg'].map(_npr_timestamp)),
+        '__history_rows': pd.to_numeric(pg['history_rows_pg'], errors='coerce'),
+    }).reset_index(drop=True)
+    if (not out['Status'].isin(NPR_VALID_STATUSES).all() or out['transaction_date'].isna().any()
+            or out['__history_rows'].isna().any() or out['__history_rows'].lt(0).any()):
+        raise ValueError('Status, tanggal dibuat, atau jumlah history pada referensi tidak valid.')
+    for old, new in [('first_process_pg', '__first_process_date'), ('first_complete_pg', '__first_complete_date')]:
+        invalid_date = pg[old].map(_npr_text).ne('').to_numpy() & out[new].isna().to_numpy()
+        if invalid_date.any():
+            raise ValueError('Tanggal milestone pada CSV referensi tidak dapat dibaca: ' + old)
+    out = assign_unassigned(out, 'Sales')
+    out['Sales'] = out['Sales'].replace({'UNASSIGNED': 'Unassigned'})
+    cutoff = _npr_timestamp(reference_end)
+    if pd.isna(cutoff):
+        raise ValueError('Tanggal akhir referensi tidak valid.')
+    if out['transaction_date'].gt(cutoff.normalize() + pd.Timedelta(hours=23, minutes=59, seconds=59)).any():
+        raise ValueError('CSV memuat tanggal dibuat setelah tanggal akhir referensi yang Anda pilih.')
+    for col in ['database_pg', 'waktu_ekspor_pg']:
+        if pg[col].fillna('').astype(str).nunique() != 1:
+            raise ValueError('CSV menggabungkan beberapa database/waktu ekspor: ' + col)
+    out.attrs['pg_reference_meta'] = {
+        'kind': 'CSV_HASIL_AUDIT_POSTGRESQL',
+        'database': _npr_text(pg['database_pg'].iloc[0]),
+        'extracted_at': _npr_text(pg['waktu_ekspor_pg'].iloc[0]),
+        'report_end_confirmed_by_user': cutoff.date().isoformat(),
+        'documents': len(out),
+        'earliest_created_date': out['transaction_date'].min().date().isoformat(),
+        'scope': 'Kumulatif tanpa batas awal; status pada saat ekstraksi, bukan snapshot historis.',
+    }
+    return out
+
+
+def _npr_compare_headers_v6(api, reference, fetch_start):
+    """Outer join pemeriksaan saja; tidak menulis balik nilai PG ke API."""
+    source_frames = []
+    for prefix, source in [('API', api), ('PG', reference)]:
+        frame = source.reindex(columns=['No. Transaksi', 'Status', 'Sales', 'transaction_date']).copy()
+        frame['key'] = frame['No. Transaksi'].fillna('').astype(str).str.strip().str.upper()
+        if frame['key'].eq('').any() or frame['key'].duplicated().any():
+            raise ValueError(prefix + ': nomor kosong/ganda setelah normalisasi, pemeriksaan dihentikan.')
+        frame['transaction_date'] = pd.to_datetime(frame['transaction_date'].map(_npr_timestamp))
+        source_frames.append(frame.add_prefix(prefix + '_'))
+    out = source_frames[0].merge(source_frames[1], how='outer', left_on='API_key', right_on='PG_key',
+                                 indicator=True, validate='one_to_one')
+    out['No. NPR'] = out['API_key'].combine_first(out['PG_key'])
+    out['membership'] = out['_merge'].map({'left_only': 'API_ONLY', 'right_only': 'PG_ONLY', 'both': 'BOTH'}).astype(str)
+    both = out['membership'].eq('BOTH')
+    for field, target in [('Status', 'status_berbeda'), ('Sales', 'pic_berbeda')]:
+        a = out['API_' + field].fillna('').astype(str).str.strip().str.casefold()
+        b = out['PG_' + field].fillna('').astype(str).str.strip().str.casefold()
+        out[target] = both & a.ne(b)
+    a, b = out['API_transaction_date'], out['PG_transaction_date']
+    out['tanggal_dibuat_berbeda'] = both & (a.isna() ^ b.isna() | (a.notna() & b.notna() & a.dt.normalize().ne(b.dt.normalize())))
+    out['tanggal_api_tidak_valid'] = out['membership'].ne('PG_ONLY') & a.isna()
+    out['pg_sebelum_batas_api'] = out['membership'].eq('PG_ONLY') & b.lt(pd.Timestamp(fetch_start).normalize())
+    reasons = []
+    for row in out.to_dict('records'):
+        if row['membership'] == 'PG_ONLY':
+            reasons.append('PG_ONLY_SEBELUM_BATAS_API' if row['pg_sebelum_batas_api'] else 'PG_ONLY_DALAM_RENTANG_API')
+        elif row['membership'] == 'API_ONLY':
+            reasons.append('API_ONLY_PADA_HASIL_YANG_DIBANDINGKAN')
+        else:
+            labels = [label for column, label in [('status_berbeda', 'STATUS_BERBEDA'), ('pic_berbeda', 'PIC_BERBEDA'),
+                       ('tanggal_dibuat_berbeda', 'TANGGAL_DIBUAT_BERBEDA')] if row[column]]
+            reasons.append('; '.join(labels) or 'FIELD_DASAR_COCOK')
+    out['pemeriksaan_dokumen'] = reasons
+    difference = ~out['pemeriksaan_dokumen'].eq('FIELD_DASAR_COCOK')
+    summary = {
+        'api_documents': int(out['membership'].ne('PG_ONLY').sum()),
+        'pg_reference_documents': int(out['membership'].ne('API_ONLY').sum()),
+        'both': int(both.sum()), 'pg_only': int(out['membership'].eq('PG_ONLY').sum()),
+        'api_only': int(out['membership'].eq('API_ONLY').sum()),
+        'pg_only_before_api_start': int(out['pg_sebelum_batas_api'].sum()),
+        'status_different': int(out['status_berbeda'].sum()), 'pic_different': int(out['pic_berbeda'].sum()),
+        'created_date_different': int(out['tanggal_dibuat_berbeda'].sum()),
+        'invalid_api_created_date': int(out['tanggal_api_tidak_valid'].sum()),
+        'both_with_differences': int((both & difference).sum()),
+        'headers_match_in_compared_snapshots': not bool(difference.any()) and not bool(out['tanggal_api_tidak_valid'].any()),
+    }
+    context = api.attrs.get('npr_api_context', {})
+    out['API_created_source'] = out['API_No. Transaksi'].map(lambda n: context.get(_npr_text(n).upper(), {}).get('date_source', ''))
+    out['API_pic_id'] = out['API_No. Transaksi'].map(lambda n: context.get(_npr_text(n).upper(), {}).get('api_pic_id', ''))
+    first = ['No. NPR', 'membership', 'pemeriksaan_dokumen', 'API_Status', 'PG_Status', 'API_Sales', 'PG_Sales',
+             'API_transaction_date', 'PG_transaction_date', 'API_created_source', 'API_pic_id']
+    out = out[first + [c for c in out if c not in first and c != '_merge']]
+    return out, summary
+
+
+def _render_npr_header_gate_v6(api, end_date):
+    import hashlib
+    config = _npr_api_config()
+    gate = {'allow_remote': False, 'state': 'REFERENSI_BELUM_DIUNGGAH', 'summary': {}, 'reference': None}
+    with st.expander('🧪 Periksa dokumen utama sebelum memuat history', expanded=True):
+        st.caption('CSV hanya pembanding. Seluruh grafik tetap memakai dokumen dari API; tidak ada data PG yang disisipkan.')
+        upload = st.file_uploader('Unggah Hasil_Audit_NPR_PostgreSQL*.csv yang sudah Anda unduh', type=['csv'], key='npr_header_reference_v6')
+        reference_end = st.date_input('Tanggal akhir laporan pada CSV PostgreSQL', value=date(2026, 10, 14),
+                                      key='npr_reference_end_v6', help='Ini tanggal cutoff query pada CSV, bukan waktu mengunduh file.')
+        if upload is not None:
+            try:
+                content = upload.getvalue()
+                if len(content) > 25 * 1024 * 1024:
+                    raise ValueError('Ukuran CSV referensi maksimal 25 MB.')
+                raw = pd.read_csv(BytesIO(content), dtype=str, keep_default_na=False, encoding='utf-8-sig')
+                reference = _npr_pg_reference_from_audit_v6(raw, reference_end)
+                gate['reference_sha256'] = hashlib.sha256(content).hexdigest()
+                gate['reference_meta'] = reference.attrs['pg_reference_meta']
+                meta = gate['reference_meta']
+                st.caption(f"Referensi: {meta['documents']:,} NPR | Database: {meta['database']} | Ekstraksi: {meta['extracted_at']}")
+                if pd.Timestamp(end_date).date() != pd.Timestamp(reference_end).date():
+                    gate['state'] = 'PERIODE_REFERENSI_BERBEDA'
+                    st.warning('Tanggal akhir dashboard berbeda dari cutoff CSV. Samakan tanggal atau gunakan CSV PG baru; hasil tidak dipaksakan cocok.')
+                else:
+                    compare, summary = _npr_compare_headers_v6(api, reference, config['fetch_start_date'])
+                    gate.update(reference=reference, compare=compare, summary=summary,
+                                state='HEADER_COCOK_PADA_SNAPSHOT' if summary['headers_match_in_compared_snapshots'] else 'HEADER_BERBEDA')
+                    st.write({
+                        'NPR API sekarang': summary['api_documents'], 'NPR referensi PG': summary['pg_reference_documents'],
+                        'Hanya PG': summary['pg_only'], 'Hanya API': summary['api_only'],
+                        'Status berbeda': summary['status_different'], 'PIC berbeda': summary['pic_different'],
+                        'Tanggal berbeda': summary['created_date_different'],
+                    })
+                    if summary['headers_match_in_compared_snapshots']:
+                        st.success('Nomor, status, PIC, dan tanggal kalender dibuat cocok pada dua hasil ini. Ini belum membuktikan seluruh history atau asal database identik.')
+                        gate['allow_remote'] = True
+                    else:
+                        st.warning('DATA DOKUMEN UTAMA BELUM COCOK. Request history terpisah dijeda agar tidak mengambil ribuan riwayat dari sumber yang belum setara.')
+                    if summary['pg_only_before_api_start']:
+                        earliest = meta['earliest_created_date']
+                        st.info(f"{summary['pg_only_before_api_start']:,} NPR referensi dibuat sebelum batas awal API. Tanggal tertua pada CSV: {earliest}.")
+                        if st.button('Gunakan batas awal dari CSV PostgreSQL', key='npr_extend_start_v6'):
+                            st.session_state['_npr_api_period'] = {'base_url': config['base_url'], 'start_date': earliest}
+                            st.session_state['_npr_connection_form_revision_v6'] = st.session_state.get('_npr_connection_form_revision_v6', 0) + 1
+                            _clear_npr_caches()
+                            st.rerun()
+                    differences = compare.loc[~compare['pemeriksaan_dokumen'].eq('FIELD_DASAR_COCOK')]
+                    st.dataframe(differences, use_container_width=True, hide_index=True, height=260)
+                    st.download_button('⬇️ Unduh pemeriksaan dokumen utama.csv', _npr_csv_bytes_v6(compare),
+                                       'Pemeriksaan_Header_NPR_v6.csv', 'text/csv', key='npr_headers_export_v6')
+            except (ValueError, KeyError, pd.errors.ParserError, UnicodeError) as exc:
+                gate['state'] = 'REFERENSI_TIDAK_VALID'
+                st.warning(_npr_safe_message(str(exc)))
+        else:
+            st.info('Unggah CSV hasil audit yang sudah ada. Tanpa referensi, history terpisah tidak dimuat otomatis; grafik dokumen utama tetap tersedia.')
+        normal = api.attrs.get('npr_normalization_diagnostic', {})
+        invalid_keys = ('removed_missing_number', 'removed_invalid_status', 'duplicates_removed', 'invalid_created_date')
+        if gate['allow_remote'] and any(normal.get(k, 0) for k in invalid_keys):
+            gate.update(allow_remote=False, state='NORMALISASI_PERLU_DIPERIKSA')
+            st.warning('Baris yang ditolak/duplikat/tanggal invalid pada normalisasi perlu diperiksa sebelum history dimuat otomatis.')
+        if not gate['allow_remote']:
+            # Persetujuan diikat pada server, token, periode, referensi, dan isi header API.
+            # Berpindah sumber tidak membawa persetujuan lama.
+            scope = repr((config['base_url'], config['token'], config['fetch_start_date'], str(end_date),
+                          gate.get('reference_sha256'), gate['state'],
+                          api.reindex(columns=['No. Transaksi', 'Status', 'Sales', 'transaction_date']).astype(str).to_csv(index=False)))
+            checkbox_key = 'npr_allow_unverified_v6_' + hashlib.sha256(scope.encode()).hexdigest()[:16]
+            gate['allow_remote'] = st.checkbox('Tetap muat history untuk pemeriksaan, meskipun dokumen utama belum terverifikasi cocok',
+                                              value=False, key=checkbox_key)
+            if gate['allow_remote']:
+                st.caption('Pemuatan hanya untuk pemeriksaan. Izin ini tidak berarti sumber sudah sama dan tidak mengubah status hasil perbandingan.')
+    return gate
+
+
+def _npr_pg_reference_audit_rows_v6(reference):
+    """Bentuk pembanding history lokal. Tidak dipanggil sebagai source dashboard."""
+    history = reference[['No. Transaksi', '__first_process_date', '__first_complete_date']].copy()
+    history = history.rename(columns={'No. Transaksi': '__npr_number'})
+    history['__npr_number'] = history['__npr_number'].str.upper()
+    history.attrs['npr_history_diagnostic'] = [
+        {'__npr_number': row['No. Transaksi'].upper(), 'History State': 'API_FIRST_MILESTONES',
+         'History Rows': row['__history_rows'], 'Created Date Source': 'created_at',
+         'Milestone Source': 'CSV_POSTGRESQL_REFERENCE_ONLY', 'History Pagination': 'SQL_AGGREGATE'}
+        for row in reference.to_dict('records')
+    ]
+    return _npr_audit_rows_v4(reference[['No. Transaksi', 'Status', 'Sales', 'transaction_date']].copy(), history)
+
+
+def _render_npr_full_comparison_v6(api, history, gate):
+    audit = _npr_audit_rows_v4(api, history)
+    if audit.empty:
+        return
+    with st.expander('📥 Data pembanding NPR dan pemeriksaan milestone'):
+        st.download_button('⬇️ Unduh data NPR API pembanding.csv', _npr_csv_bytes_v6(audit),
+                           'NPR_API_Pembanding.csv', 'text/csv', key='npr_api_snapshot_v6')
+        reference = gate.get('reference')
+        if reference is not None:
+            compare = _npr_compare_audits_v4(audit, _npr_pg_reference_audit_rows_v6(reference))
+            st.caption('Riwayat belum dibaca tidak dianggap nol. SUMBER_CREATED_BELUM_TERVERIFIKASI berarti API masih memakai alias tanggal, meski tanggal kalender bisa cocok.')
+            st.dataframe(compare, use_container_width=True, hide_index=True, height=300)
+            st.download_button('⬇️ Unduh perbandingan lengkap NPR.csv', _npr_csv_bytes_v6(compare),
+                               'Perbandingan_Lengkap_NPR_v6.csv', 'text/csv', key='npr_full_comparison_v6')
+
+
+
+def _npr_resume_plan_v11_2(store, config, batch_state, fresh_success=0):
+    """Bounded automatic retry; RATE_LIMIT_WAIT sends no new request and costs no retry."""
+    import time
+    run = store["run"]
+    if fresh_success:
+        run["rate_limit_streak"] = 0
+    if batch_state in {"HTTP_429", "HTTP_503"}:
+        run["rate_limit_streak"] = int(run.get("rate_limit_streak", 0)) + 1
+    if batch_state in {"HTTP_429", "RATE_LIMIT_WAIT", "HTTP_503"}:
+        wait = _npr_cooldown_status_v5(config["base_url"])["wait_seconds"]
+        # An upstream 503 without Retry-After does not authorize an endless retry.
+        retryable = batch_state != "HTTP_503" or wait > 0
+        if int(run.get("rate_limit_streak", 0)) >= 6 or not retryable:
+            run.update(auto=False, request=False, pause_reason="AUTO_RETRY_LIMIT_OR_NONRETRYABLE_503")
+        elif run.get("auto"):
+            # Extra delay can lengthen, but NEVER shorten, the server's cooldown.
+            run["resume_not_before"] = max(float(run.get("resume_not_before", 0)), time.monotonic() + wait + 1.0)
+    elif batch_state in {"BATCH_COMPLETE", "COMPLETE", "IDLE"}:
+        if batch_state == "COMPLETE":
+            run.update(auto=False, resume_not_before=0.0, rate_limit_streak=0)
+    else:
+        run.update(auto=False, request=False, pause_reason=batch_state)
+
+
+def _npr_auto_wait_seconds_v11_2(config, store):
+    import time
+    import math
+    gate = _npr_transport_gate_v5(config["base_url"])
+    with gate["lock"]:
+        target = max(gate["cooldown_until"], gate["next_at"],
+                     float(store["run"].get("resume_not_before", 0)))
+    return max(0, math.ceil(target - time.monotonic()))
+
+
+def _npr_resume_tick_v11_2(scope):
+    """Only schedules a foreground app rerun. No network request happens here."""
+    config = _npr_history_settings()
+    if _npr_history_scope_key(config) != scope:
+        return
+    store = _npr_history_store_v5(config)
+    run = store["run"]
+    if not run.get("auto") or not store.get("resume_pending_v11_2", False):
+        return
+    wait = _npr_auto_wait_seconds_v11_2(config, store)
+    if wait:
+        st.info(f"Menunggu {wait:,} detik sebelum lanjut otomatis. Hasil sukses tetap disimpan; tidak ada request saat jeda.")
+        return
+    store["resume_pending_v11_2"] = False
+    run.update(request=True, resume_not_before=0.0)
+    st.rerun()
+
+
+def _npr_header_session_key_v11_2(config, start_date, end_date):
+    import hashlib
+    value = (NPR_PARITY_VERSION, config["base_url"], config["token"], _npr_endpoint_candidates()[0],
+             config["end_date_param"], str(start_date), str(end_date))
+    return "_npr_pinned_headers_v11_2_" + hashlib.sha256(repr(value).encode()).hexdigest()
 
 
 if __name__ == "__main__":
