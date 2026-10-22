@@ -2819,7 +2819,7 @@ def render_npr_outstanding_heatmap(df: pd.DataFrame):
         )
 
 
-def render_npr_aging_first_process(df: pd.DataFrame):
+def render_npr_aging_first_process(df: pd.DataFrame, *, provisional: bool = False):
     """Grafik distribusi waktu NPR Created -> First Process."""
     if (
         df is None
@@ -2860,7 +2860,7 @@ def render_npr_aging_first_process(df: pd.DataFrame):
         y="Jumlah NPR",
         color="Aging Category NPR",
         text="Jumlah NPR",
-        title="Distribusi Aging NPR — Created ke First Process",
+        title=("SEMENTARA — " if provisional else "") + "Distribusi Aging NPR — Created ke First Process",
         category_orders={"Aging Category NPR": category_order},
     )
 
@@ -2879,7 +2879,7 @@ def render_npr_aging_first_process(df: pd.DataFrame):
     )
 
 
-def render_npr_aging_first_complete(df: pd.DataFrame):
+def render_npr_aging_first_complete(df: pd.DataFrame, *, provisional: bool = False):
     """Grafik distribusi waktu NPR Created -> First Complete."""
     if (
         df is None
@@ -2920,7 +2920,7 @@ def render_npr_aging_first_complete(df: pd.DataFrame):
         y="Jumlah NPR",
         color="Aging Category NPR Complete",
         text="Jumlah NPR",
-        title="Distribusi Aging NPR — Created ke First Complete",
+        title=("SEMENTARA — " if provisional else "") + "Distribusi Aging NPR — Created ke First Complete",
         category_orders={
             "Aging Category NPR Complete": category_order
         },
@@ -2941,6 +2941,35 @@ def render_npr_aging_first_complete(df: pd.DataFrame):
     )
 
 
+def _npr_valid_aging_preview_rows(df: pd.DataFrame, milestone: str) -> pd.DataFrame:
+    """Select valid existing metrics only; never supply dates or override source proof.
+
+    The input is produced by _npr_build_aging(), which excludes unreadable history.
+    Preview selection is separate from the unchanged final assessment gates.
+    """
+    working = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    suffix = "" if milestone == "Process" else " Complete"
+    first_date = "First " + milestone + " Date"
+    aging_col = "Aging NPR" + suffix
+    category_col = "Aging Category NPR" + suffix
+    required = {"No. Transaksi", first_date, aging_col, category_col}
+    if working.empty or not required.issubset(working.columns):
+        return working.iloc[0:0].copy()
+    numbers = working["No. Transaksi"].map(_npr_text).str.upper()
+    aging = pd.to_numeric(working[aging_col], errors="coerce")
+    valid = (
+        numbers.ne("")
+        & _npr_native_created_dates(working).notna()
+        & _npr_date_series(working[first_date]).notna()
+        & aging.notna()
+        & aging.ge(0)
+        & working[category_col].notna()
+    )
+    selected = working.loc[valid].copy()
+    selected["No. Transaksi"] = numbers.loc[valid]
+    return selected.drop_duplicates("No. Transaksi", keep="first").copy()
+
+
 def render_npr_dashboard(
     df_npr_f: pd.DataFrame,
     df_npr_aging: pd.DataFrame,
@@ -2949,10 +2978,13 @@ def render_npr_dashboard(
     history_ready: bool = True,
     dates_ready: bool = True,
 ):
-    """Seven shared panels; no final aging/SLA for partial history or unverified dates."""
+    """Shared panels with labelled previews; final assessment gates remain unchanged."""
+    # Rendering may format dates for the timeline; keep caller data unchanged.
+    df_npr_f = df_npr_f.copy()
     date_checks = _npr_date_coverage(df_npr_f)
     dates_ready = dates_ready and (date_checks["dates_ready"] or df_npr_f.empty)
     source_ready = date_checks["source_rows_complete"]
+    selected_total = _npr_unique(df_npr_f, "No. Transaksi")
     col_kiri, col_tengah, col_kanan = st.columns([1, 1, 1], gap="small")
     with col_kiri:
         with st.container(border=True):
@@ -3101,12 +3133,28 @@ def render_npr_dashboard(
             st.subheader("⏳ Aging NPR — Created ke First Process")
             st.caption(
                 "Aging dihitung dari selisih tanggal NPR pertama kali berstatus Process "
-                "dikurangi tanggal NPR dibuat. NPR yang belum pernah Process belum dihitung."
+                "dikurangi tanggal NPR dibuat. NPR tanpa tanggal First Process yang valid "
+                "pada riwayat terbaca belum dapat dinilai."
             )
             if history_ready and dates_ready and source_ready:
                 render_npr_aging_first_process(df_npr_aging)
             else:
                 st.info(_npr_assessment_message_v11_1(df_npr_f, history_ready, dates_ready, "Aging"))
+                preview_process = _npr_valid_aging_preview_rows(df_npr_aging, "Process")
+                preview_total = len(preview_process)
+                if preview_total:
+                    st.warning(
+                        "SEMENTARA — Distribusi hanya dari NPR dengan tanggal dan riwayat "
+                        "First Process valid yang sudah terbaca. Hasil dapat berubah setelah pemuatan "
+                        "dan verifikasi selesai; belum mewakili seluruh periode."
+                    )
+                    st.caption(
+                        f"Basis grafik sementara: {preview_total:,} dari {selected_total:,} NPR "
+                        f"terbaca setelah filter. Belum dinilai: {max(0, selected_total-preview_total):,} NPR."
+                    )
+                    render_npr_aging_first_process(preview_process, provisional=True)
+                else:
+                    st.info("Pratinjau belum tersedia: belum ada tanggal First Process dan durasi yang valid.")
 
 
 
@@ -3142,18 +3190,55 @@ def render_npr_dashboard(
                 )
             else:
                 st.info(_npr_assessment_message_v11_1(df_npr_f, history_ready, dates_ready, "SLA"))
+                # Reuse the existing SLA eligibility rule and denominator unchanged.
+                preview_sla = build_npr_sla_first_process(df_npr_sla)
+                preview_total = len(preview_sla)
+                if preview_total:
+                    preview_met = int(preview_sla["Aging"].le(2).sum())
+                    st.warning(
+                        "SEMENTARA — Persentase hanya berlaku untuk NPR dengan tanggal First Process "
+                        "dan aging valid yang sudah terbaca. Ini belum merupakan SLA seluruh periode."
+                    )
+                    _npr_render_sla_gauge(
+                        preview_sla, threshold=2, title="SLA Compliance NPR — SEMENTARA",
+                    )
+                    st.caption(
+                        f"Penyebut SLA sementara: {preview_total:,} NPR | "
+                        f"Memenuhi SLA ≤2 hari kalender: {preview_met:,} NPR | "
+                        f"Dokumen terbaca setelah filter: {selected_total:,} NPR | "
+                        f"Belum dinilai: {max(0, selected_total-preview_total):,} NPR."
+                    )
+                    st.caption("NPR yang belum dapat dinilai tidak dihitung sebagai memenuhi atau gagal SLA.")
+                else:
+                    st.info("SLA sementara belum tersedia: tidak ada NPR dengan First Process dan aging valid.")
 
 
         with st.container(border=True):
             st.subheader("⏳ Aging NPR — Created ke First Complete")
             st.caption(
                 "Aging dihitung dari selisih tanggal NPR pertama kali berstatus Complete "
-                "dikurangi tanggal NPR dibuat. NPR yang belum pernah Complete belum dihitung."
+                "dikurangi tanggal NPR dibuat. NPR tanpa tanggal First Complete yang valid "
+                "pada riwayat terbaca belum dapat dinilai."
             )
             if history_ready and dates_ready and source_ready:
                 render_npr_aging_first_complete(df_npr_aging_complete)
             else:
                 st.info(_npr_assessment_message_v11_1(df_npr_f, history_ready, dates_ready, "Aging"))
+                preview_complete = _npr_valid_aging_preview_rows(df_npr_aging_complete, "Complete")
+                preview_total = len(preview_complete)
+                if preview_total:
+                    st.warning(
+                        "SEMENTARA — Distribusi hanya dari NPR dengan tanggal dan riwayat "
+                        "First Complete valid yang sudah terbaca. Hasil dapat berubah setelah pemuatan "
+                        "dan verifikasi selesai; belum mewakili seluruh periode."
+                    )
+                    st.caption(
+                        f"Basis grafik sementara: {preview_total:,} dari {selected_total:,} NPR "
+                        f"terbaca setelah filter. Belum dinilai: {max(0, selected_total-preview_total):,} NPR."
+                    )
+                    render_npr_aging_first_complete(preview_complete, provisional=True)
+                else:
+                    st.info("Pratinjau belum tersedia: belum ada tanggal First Complete dan durasi yang valid.")
 
         with st.container(border=True):
             st.subheader("📈 Timeline NPR per Tanggal Transaksi")
@@ -3453,7 +3538,8 @@ def run_npr_dashboard_v7(end_date, search_number, search_status, pic_column, *, 
                "History berhasil dibaca tanpa milestone dibedakan dari history belum/gagal dibaca.")
     if load_history and not coverage["ready"]:
         st.warning(f"History {coverage['unresolved']:,} NPR belum selesai diperiksa. "
-                   "Grafik dokumen tetap tampil; aging/SLA final tidak memakai subset parsial.")
+                   "Grafik dokumen tetap tampil. Aging/SLA yang sudah memiliki data valid ditampilkan "
+                   "sebagai SEMENTARA dengan jumlah NPR yang dinilai; verifikasi hasil final tetap menunggu.")
     df.attrs["npr_validation_v11_1"] = {
         "selected_documents": len(filtered),
         "selected_canonical_dates_valid": date_coverage["canonical_dates_valid"],
@@ -4300,7 +4386,7 @@ def load_full_npr_from_api(start_date=None, end_date=None):
 # =========================================================
 NPR_MILESTONE_CONTRACT = "npr_pg_first_milestones_v1"
 NPR_HISTORY_GOOD_STATES = {"API_HISTORY", "NESTED_HISTORY", "API_FIRST_MILESTONES"}
-NPR_HISTORY_BATCH_SIZE = 5
+NPR_HISTORY_BATCH_SIZE = 20
 
 
 def _npr_history_settings() -> dict:
@@ -4338,6 +4424,7 @@ def _npr_history_scope_key(config: dict) -> str:
 def _npr_clear_history_caches():
     """Hapus hasil secara eksplisit; TIDAK membatalkan cooldown dari server."""
     config = _npr_history_settings()
+    _npr_shared_history_clear_v12(config)
     st.session_state.pop("_npr_history_store_v5_" + _npr_history_scope_key(config), None)
     for key in list(st.session_state):
         if str(key).startswith("_npr_history_limit_v4_"):
@@ -4347,17 +4434,20 @@ def _npr_clear_history_caches():
 
 def _render_npr_history_controls(df: pd.DataFrame):
     config = _npr_history_settings()
-    with st.expander("🔗 Koneksi riwayat NPR", expanded=False):
-        st.caption("History diminta berurutan. Hasil sukses dipertahankan selama satu siklus pemuatan; masa cache 600 detik dimulai setelah seluruh history terpilih selesai. Status 429 tidak disimpan sebagai hasil sukses. Restart server atau refresh browser penuh dapat menghilangkan hasil sesi.")
+    with st.expander("🔗 Pengaturan koneksi riwayat NPR", expanded=False):
+        st.caption(
+            "Riwayat seluruh NPR terpilih dimuat otomatis dalam satu proses. Koneksi HTTP dipakai ulang "
+            "dan hasil sukses disimpan per dokumen. Snapshot sesi dipertahankan selama pemuatan. "
+            "Salinan riwayat di memori aplikasi dapat dipakai ulang sampai 10 menit sejak tiap NPR dibaca, "
+            "termasuk setelah refresh browser selama proses aplikasi masih aktif. Restart aplikasi menghapus cache memori."
+        )
         with st.form("npr_history_form_v5"):
             route = st.text_input("Endpoint riwayat", value=config["history_endpoint"],
-                                  help="Log pengujian server erp telah berhasil membaca product-requests/history. Route harus relatif dan tanpa token.")
+                                  help="Route relatif terhadap API NPR, tanpa token.")
             discover = st.checkbox("Periksa kandidat route history otomatis", value=config["discover_history"])
             interval = st.number_input("Jeda minimal antar-request NPR (detik)", min_value=1.0, max_value=60.0,
                                        value=float(config["min_request_interval"]), step=0.5)
-            batch = st.number_input("Jumlah dokumen per batch", min_value=1, max_value=100,
-                                    value=int(config["batch_size"]), step=1)
-            submitted = st.form_submit_button("Terapkan pembacaan riwayat")
+            submitted = st.form_submit_button("Terapkan dan lanjutkan pemuatan")
         if submitted:
             try:
                 clean_route = _npr_safe_route(route) if route.strip() else ""
@@ -4368,34 +4458,44 @@ def _render_npr_history_controls(df: pd.DataFrame):
                 return
             st.session_state["_npr_history_options_v5"] = {
                 "base_url": config["base_url"], "history_endpoint": clean_route, "discover_history": discover,
-                "min_request_interval": float(interval), "batch_size": int(batch),
+                "min_request_interval": float(interval), "batch_size": int(config["batch_size"]),
             }
             config = _npr_history_settings()
-            _npr_history_store_v5(config)["run"]["request"] = True
+            _npr_history_store_v5(config)["run"].update(
+                request=True, auto=True, rate_limit_streak=0, pause_reason="",
+            )
         if st.button("Cek ulang koneksi tanpa menghapus hasil sukses", key="recheck_npr_history_v5"):
             store = _npr_history_store_v5(config)
             store["selection"] = None
-            store["run"]["request"] = True
-        if st.button("Hapus hasil riwayat sesi dan baca ulang", key="clear_npr_history_success_v5"):
+            store["run"].update(request=True, auto=True, rate_limit_streak=0, pause_reason="")
+        if st.button("Perbarui riwayat dari API", key="clear_npr_history_success_v5"):
             _npr_clear_history_caches()
-        st.caption("date_inprogress/date_complete header tidak otomatis dianggap FIRST. Tidak ada penggantian tanggal kosong dengan nol/hari ini.")
+        st.caption("date_inprogress/date_complete header tidak otomatis dianggap FIRST. Tanggal kosong tetap tidak dinilai.")
     store = _npr_history_store_v5(config)
     wait = _npr_cooldown_status_v5(config["base_url"])["wait_seconds"]
     if wait:
-        st.warning(f"Server meminta jeda. Tunggu sekitar {wait:,} detik sebelum melanjutkan. Tombol berikut tidak menghapus hasil sukses atau memotong jeda server.")
-    buttons = st.columns(3)
+        st.warning(
+            f"Server meminta jeda sekitar {wait:,} detik. Pemuatan otomatis melanjutkan setelah jeda "
+            "jika belum dijeda pengguna; hasil sukses tetap tersimpan."
+        )
+    buttons = st.columns(2)
     with buttons[0]:
-        if st.button(f"Lanjutkan {config['batch_size']} riwayat", key="npr_next_batch_v5", disabled=bool(wait)):
-            store["run"].update(request=True, auto=False)
+        if st.button("Jeda pemuatan", key="npr_stop_batches_v5"):
+            store["run"].update(request=False, auto=False, initial_attempted=True, pause_reason="USER_PAUSED")
     with buttons[1]:
-        if st.button("Muat semua bertahap", key="npr_all_batches_v5", disabled=bool(wait)):
+        if st.button("Lanjutkan pemuatan", key="npr_all_batches_v5", disabled=bool(wait)):
             store["run"].update(request=True, auto=True, rate_limit_streak=0, pause_reason="")
-    with buttons[2]:
-        if st.button("Hentikan pemuatan", key="npr_stop_batches_v5"):
-            store["run"].update(request=False, auto=False, initial_attempted=True)
-    st.caption(f"Satu request aktif, jeda awal {config['min_request_interval']:g} detik, {config['batch_size']} NPR per batch. Jeda otomatis bertambah jika terkena 429. Muat semua bertahap melanjutkan hanya selama aplikasi ini terbuka; 429 menunggu Retry-After lalu melanjutkan otomatis (maksimal 6 kali beruntun tanpa kemajuan); error lain dijeda untuk ditinjau.")
-
-
+    transport_status = _npr_cooldown_status_v5(config["base_url"])
+    configured_interval = float(config["min_request_interval"])
+    adaptive_interval = float(transport_status.get("adaptive_interval", configured_interval))
+    effective_interval = max(configured_interval, adaptive_interval)
+    st.caption(
+        f"Pemuatan otomatis seluruh NPR terpilih | Jeda pengaturan: {configured_interval:g} detik | "
+        f"Jeda efektif saat ini: {effective_interval:g} detik. "
+        "Koneksi HTTP dipakai ulang. Jika server membatasi request, jeda efektif bertambah dan "
+        "Retry-After tetap dipatuhi. Hasil sukses tidak diulang saat melanjutkan "
+        "(maksimal 6 pembatasan beruntun tanpa kemajuan sebelum perlu dilanjutkan kembali)."
+    )
 
 
 
@@ -4537,7 +4637,7 @@ def _npr_history_is_complete(meta: dict, page: int, rows: int, count: int):
 
 
 def _fetch_npr_history_route_api(route: str, number: str, header_id: str, history_endpoint=True,
-                                  *, base_url: str, token: str, probe=False) -> dict:
+                                  *, base_url: str, token: str, probe=False, http_session=None) -> dict:
     """Read-only. Probe satu halaman; full fetch mengikuti pagination dan cek identitas.
 
     Maksimum enam pemanggilan probe tingkat route pada auto-discovery. Transport
@@ -4555,7 +4655,8 @@ def _fetch_npr_history_route_api(route: str, number: str, header_id: str, histor
     except ValueError:
         return {"state": "INVALID_ROUTE", "events": []}
     bound = "{id}" in template or "{transaction_number}" in template
-    session = _create_npr_session()
+    owns_session = http_session is None
+    session = _create_npr_session() if owns_session else http_session
     all_events, seen, last_meta = [], set(), {}
     native_headers = []
     diagnostic = {"endpoint": template}
@@ -4612,7 +4713,8 @@ def _fetch_npr_history_route_api(route: str, number: str, header_id: str, histor
         # Jangan ekspor str(exc), request URL, token, atau response headers.
         return {"state": "FETCH_ERROR", "events": [], "error_type": type(exc).__name__}
     finally:
-        session.close()
+        if owns_session:
+            session.close()
 
 
 
@@ -4622,7 +4724,7 @@ def _npr_history_routes(endpoint: str, override: str):
     return [(f"{endpoint}/history", True), (f"{endpoint}/{{id}}/history", True), (f"{endpoint}/{{id}}", False)]
 
 
-def _discover_npr_history_route_api(endpoint: str, override: str, samples: tuple, *, base_url: str, token: str):
+def _discover_npr_history_route_api(endpoint: str, override: str, samples: tuple, *, base_url: str, token: str, http_session=None):
     """One FULL read validates the route and seeds the first document's history.
 
     Never promote a single page of paginated history to a complete history.
@@ -4633,7 +4735,7 @@ def _discover_npr_history_route_api(endpoint: str, override: str, samples: tuple
     for route, is_history in _npr_history_routes(endpoint, override):
         for number, header_id in samples[:2]:
             result = _fetch_npr_history_route_api(route, number, header_id, is_history,
-                                                 base_url=base_url, token=token, probe=False)
+                                                 base_url=base_url, token=token, probe=False, http_session=http_session)
             attempts.append({"Route": route, "No. NPR": number, "State": result["state"],
                              "HTTP": result.get("http_status", 200 if result["state"] == "OK" else None),
                              "Sample Rows": len(result.get("events", [])),
@@ -4675,8 +4777,12 @@ def _npr_declared_milestones(context: dict):
     return {"state": "API_FIRST_MILESTONES", "process": p, "complete": c, "count": count}
 
 
-def load_npr_history_milestones_api(df: pd.DataFrame, *, allow_remote: bool = True, batch_limit=None) -> pd.DataFrame:
-    """FIRST/nested -> cache sukses -> batch berurutan pada endpoint terverifikasi.
+def load_npr_history_milestones_api(df: pd.DataFrame, *, allow_remote: bool = True, batch_limit=None, load_all: bool = False) -> pd.DataFrame:
+    """FIRST/nested -> cache -> one continuous read of pending selected histories.
+
+    load_all reads every pending document in this run; an explicit batch_limit
+    keeps the legacy bounded-call contract. Success is saved after each document.
+    One creator-owned HTTP session serves discovery and all history pages.
 
     429 menghentikan batch dan dilanjutkan hanya setelah Retry-After. Hasil
     pengujian koneksi lengkap dipakai kembali; tidak ada request ganda ke NPR uji.
@@ -4689,9 +4795,12 @@ def load_npr_history_milestones_api(df: pd.DataFrame, *, allow_remote: bool = Tr
     if df is None or df.empty or "No. Transaksi" not in df:
         return pd.DataFrame(columns=columns)
     config = _npr_history_settings()
+    continuous = bool(load_all and batch_limit is None)
     if batch_limit is not None:
         config["batch_size"] = max(1, min(config["batch_size"], int(batch_limit)))
     store = _npr_history_store_v5(config)
+    shared_generation = _npr_shared_history_generation_v12(config)
+    started_at = time.monotonic()
     run = store["run"]
     fetch_enabled = allow_remote and bool(run["request"] or run["auto"] or not run["initial_attempted"])
     if allow_remote:
@@ -4704,7 +4813,7 @@ def load_npr_history_milestones_api(df: pd.DataFrame, *, allow_remote: bool = Tr
     docs = df.drop_duplicates("No. Transaksi").copy()
     docs["__rank"] = docs["Status"].map({"Process": 0, "Complete": 1, "Request": 2}).fillna(3)
     docs = docs.sort_values(["__rank", "transaction_date"], ascending=[True, False], kind="stable")
-    resolved, pending, cached_count = {}, [], 0
+    resolved, pending, cached_count, shared_cached_count = {}, [], 0, 0
     now = time.time()
     for row in docs.to_dict("records"):
         # Do not copy the whole NPR attrs/history context for every Series row.
@@ -4752,78 +4861,100 @@ def load_npr_history_milestones_api(df: pd.DataFrame, *, allow_remote: bool = Tr
             cached_count += 1
             continue
         store["success"].pop(key, None)
+        shared = _npr_shared_history_get_v12(config, key, fingerprint)
+        if shared is not None:
+            # Preserve the original fetched_at: a cache read never renews freshness.
+            store["success"][key] = shared
+            record = copy.deepcopy(shared["record"])
+            record["From Session Cache"] = False
+            record["From Shared Cache"] = True
+            resolved[key] = record
+            store["errors"].pop(key, None)
+            shared_cached_count += 1
+            continue
         error = store["errors"].get(key, {})
         if error.get("fingerprint") == fingerprint:
             record.update(error["fields"])
         else:
             store["errors"].pop(key, None)
         pending.append((context.get("source_number") or number, context.get("id", ""), fingerprint, record))
-    prefetched = None
-    saved_selection = store.get("selection")
-    selection = {"route": "", "state": "NOT_NEEDED", "attempts": []}
-    if pending:
-        selection = {"route": "", "state": "HISTORY_NOT_LOADED", "attempts": []}
-        if saved_selection:
-            selection = copy.deepcopy(saved_selection["data"])
-        elif fetch_enabled and (config["history_endpoint"] or config["discover_history"]):
-            samples = tuple((n, identifier) for n, identifier, _, _ in pending[:2])
-            selection = _discover_npr_history_route_api(endpoint, config["history_endpoint"], samples,
-                                                        base_url=config["base_url"], token=config["token"])
-            prefetched = selection.pop("_prefetched", None)
-            if selection.get("state") == "ROUTE_VERIFIED":
-                store["selection"] = {"data": copy.deepcopy(selection), "fetched_at": time.time()}
-        elif not config["history_endpoint"] and not config["discover_history"]:
-            selection["state"] = "HISTORY_NOT_CONFIGURED"
-    route = selection.get("route", "")
-    seed_count = 0
-    if prefetched and prefetched.get("result", {}).get("state") == "OK":
-        still_pending = []
-        for number, identifier, fingerprint, record in pending:
-            key = number.upper()
-            if key != prefetched["number"] or identifier != prefetched["header_id"]:
-                still_pending.append((number, identifier, fingerprint, record))
-                continue
-            seed = prefetched["result"]
-            p, c = _npr_first_milestones(seed["events"])
-            for label in ("HTTP Status", "Retry After Seconds", "Retry After Source"):
-                record.pop(label, None)
-            record.update({"__first_process_date": p, "__first_complete_date": c,
-                           "History State": "API_HISTORY", "History Rows": len(seed["events"]),
-                           "Milestone Source": route, "History Pagination": seed.get("pagination", ""),
-                           "Reused Route Validation": True,
-                           "History Fetched At UTC": datetime.now(timezone.utc).isoformat()})
-            store["success"][key] = {"record": copy.deepcopy(record), "fingerprint": fingerprint, "fetched_at": time.time()}
-            store["errors"].pop(key, None)
-            resolved[key] = record
-            seed_count += 1
-        pending = still_pending
-    if not allow_remote:
-        for _, _, _, record in pending:
-            record["History State"] = "HISTORY_PAUSED_HEADER_CHECK"
-    attempted, fresh_success, batch_state = 0, seed_count, ("IDLE" if allow_remote else "HEADER_CHECK_PAUSED")
-    wait = _npr_cooldown_status_v5(config["base_url"])["wait_seconds"]
-    eligible = []
-    if fetch_enabled and pending:
-        if wait:
-            # Preserve a real 429/503 from discovery so the retry bound counts it.
-            batch_state = (selection.get("state") if saved_selection is None and
-                           selection.get("state") in {"HTTP_429", "HTTP_503"} else "RATE_LIMIT_WAIT")
-        elif not route:
-            batch_state = selection.get("state", "HISTORY_ROUTE_UNVERIFIED")
-            if batch_state not in {"HTTP_429", "RATE_LIMIT_WAIT", "HTTP_503"}:
-                run["auto"] = False
-        else:
-            eligible = pending[:max(0, config["batch_size"] - seed_count)]
+    http_session = None
+    try:
+        if pending and fetch_enabled:
+            http_session = _create_npr_session()
+        prefetched = None
+        saved_selection = store.get("selection")
+        selection = {"route": "", "state": "NOT_NEEDED", "attempts": []}
+        if pending:
+            selection = {"route": "", "state": "HISTORY_NOT_LOADED", "attempts": []}
+            if saved_selection:
+                selection = copy.deepcopy(saved_selection["data"])
+            elif fetch_enabled and (config["history_endpoint"] or config["discover_history"]):
+                samples = tuple((n, identifier) for n, identifier, _, _ in pending[:2])
+                selection = _discover_npr_history_route_api(endpoint, config["history_endpoint"], samples,
+                                                            base_url=config["base_url"], token=config["token"], http_session=http_session)
+                prefetched = selection.pop("_prefetched", None)
+                if selection.get("state") == "ROUTE_VERIFIED":
+                    store["selection"] = {"data": copy.deepcopy(selection), "fetched_at": time.time()}
+            elif not config["history_endpoint"] and not config["discover_history"]:
+                selection["state"] = "HISTORY_NOT_CONFIGURED"
+        route = selection.get("route", "")
+        seed_count = 0
+        if prefetched and prefetched.get("result", {}).get("state") == "OK":
+            still_pending = []
+            for number, identifier, fingerprint, record in pending:
+                key = number.upper()
+                if key != prefetched["number"] or identifier != prefetched["header_id"]:
+                    still_pending.append((number, identifier, fingerprint, record))
+                    continue
+                seed = prefetched["result"]
+                p, c = _npr_first_milestones(seed["events"])
+                for label in ("HTTP Status", "Retry After Seconds", "Retry After Source"):
+                    record.pop(label, None)
+                record.update({"__first_process_date": p, "__first_complete_date": c,
+                               "History State": "API_HISTORY", "History Rows": len(seed["events"]),
+                               "Milestone Source": route, "History Pagination": seed.get("pagination", ""),
+                               "Reused Route Validation": True,
+                               "History Fetched At UTC": datetime.now(timezone.utc).isoformat()})
+                store["success"][key] = {"record": copy.deepcopy(record), "fingerprint": fingerprint, "fetched_at": time.time()}
+                _npr_shared_history_put_v12(config, key, store["success"][key], shared_generation)
+                store["errors"].pop(key, None)
+                resolved[key] = record
+                seed_count += 1
+            pending = still_pending
+        if not allow_remote:
+            for _, _, _, record in pending:
+                record["History State"] = "HISTORY_PAUSED_HEADER_CHECK"
+        attempted, fresh_success, batch_state = 0, seed_count, ("IDLE" if allow_remote else "HEADER_CHECK_PAUSED")
+        wait = _npr_cooldown_status_v5(config["base_url"])["wait_seconds"]
+        eligible = []
+        if fetch_enabled and pending:
+            if wait:
+                # Preserve a real 429/503 from discovery so the retry bound counts it.
+                batch_state = (selection.get("state") if saved_selection is None and
+                               selection.get("state") in {"HTTP_429", "HTTP_503"} else "RATE_LIMIT_WAIT")
+            elif not route:
+                batch_state = selection.get("state", "HISTORY_ROUTE_UNVERIFIED")
+                if batch_state not in {"HTTP_429", "RATE_LIMIT_WAIT", "HTTP_503"}:
+                    run["auto"] = False
+            else:
+                eligible = pending if continuous else pending[:max(0, config["batch_size"] - seed_count)]
+                batch_state = "BATCH_COMPLETE"
+        if seed_count and batch_state == "IDLE" and pending and fetch_enabled:
             batch_state = "BATCH_COMPLETE"
-    if seed_count and batch_state == "IDLE" and pending and fetch_enabled:
-        batch_state = "BATCH_COMPLETE"
-    if eligible:
-        progress = st.progress(0.0, text="Membaca history NPR berurutan...")
-        try:
+        total_documents = len(docs)
+        completed_before_requests = sum(
+            record.get("History State") in NPR_HISTORY_GOOD_STATES for record in resolved.values()
+        )
+        progress = st.progress(
+            completed_before_requests / total_documents,
+            text=f"Riwayat NPR: {completed_before_requests:,}/{total_documents:,} selesai diperiksa; melanjutkan dokumen yang belum terbaca.",
+        )
+        if eligible:
             for number, identifier, fingerprint, record in eligible:
                 key = number.upper()
                 result = _fetch_npr_history_route_api(route, number, identifier, selection.get("is_history", True),
-                                                       base_url=config["base_url"], token=config["token"])
+                                                       base_url=config["base_url"], token=config["token"], http_session=http_session)
                 attempted += 1
                 if result["state"] == "OK":
                     for label in ("HTTP Status", "Retry After Seconds", "Retry After Source"):
@@ -4835,6 +4966,7 @@ def load_npr_history_milestones_api(df: pd.DataFrame, *, allow_remote: bool = Tr
                                    "Milestone Source": route, "History Pagination": result.get("pagination", ""),
                                    "History Fetched At UTC": datetime.fromtimestamp(time.time(), tz=timezone.utc).isoformat()})
                     store["success"][key] = {"record": copy.deepcopy(record), "fingerprint": fingerprint, "fetched_at": time.time()}
+                    _npr_shared_history_put_v12(config, key, store["success"][key], shared_generation)
                     store["errors"].pop(key, None)
                     fresh_success += 1
                 else:
@@ -4848,35 +4980,52 @@ def load_npr_history_milestones_api(df: pd.DataFrame, *, allow_remote: bool = Tr
                     batch_state = result["state"]
                     if result["state"] not in {"HTTP_429", "RATE_LIMIT_WAIT", "HTTP_503"}:
                         run["auto"] = False
-                progress.progress(attempted / len(eligible), text=f"Batch: {attempted:,}/{len(eligible):,} | sukses baru: {fresh_success:,}")
+                completed_now = completed_before_requests + fresh_success - seed_count
+                progress.progress(
+                    completed_now / total_documents,
+                    text=f"Riwayat NPR: {completed_now:,}/{total_documents:,} selesai diperiksa | tersisa: {total_documents-completed_now:,}.",
+                )
                 if result["state"] != "OK":
                     break
-        finally:
-            progress.empty()
-    for number, identifier, fingerprint, record in pending:
-        resolved[number.upper()] = record
-    result = pd.DataFrame(list(resolved.values()))
-    for col in columns[1:]:
-        result[col] = pd.to_datetime(result[col], errors="coerce")
-    output = result[columns].copy()
-    good_count = int(result["History State"].isin(NPR_HISTORY_GOOD_STATES).sum())
-    remaining = len(result) - good_count
-    if not remaining:
-        batch_state = "COMPLETE"
-        run["auto"] = False
-        if store.get("snapshot_completed_at") is None:
-            store["snapshot_completed_at"] = time.time()
-    _npr_resume_plan_v11_2(store, config, batch_state, fresh_success)
-    selection.update({"batch_state": batch_state, "batch_attempted": attempted, "new_success": fresh_success,
-                      "from_session_cache": cached_count, "route_validation_reused_documents": seed_count,
-                      "consecutive_rate_limits": int(run.get("rate_limit_streak", 0)),
-                      "pause_reason": run.get("pause_reason", ""), "resolved_documents": good_count,
-                      "unresolved_documents": remaining, "batch_size": config["batch_size"],
-                      "auto_continue": bool(run["auto"]), "cooldown": _npr_cooldown_status_v5(config["base_url"])})
-    output.attrs["npr_history_diagnostic"] = result.to_dict("records")
-    output.attrs["npr_history_connection"] = selection
-    return output
+        for number, identifier, fingerprint, record in pending:
+            resolved[number.upper()] = record
+        result = pd.DataFrame(list(resolved.values()))
+        for col in columns[1:]:
+            result[col] = pd.to_datetime(result[col], errors="coerce")
+        output = result[columns].copy()
+        good_count = int(result["History State"].isin(NPR_HISTORY_GOOD_STATES).sum())
+        remaining = len(result) - good_count
+        if not remaining:
+            batch_state = "COMPLETE"
+            run["auto"] = False
+            if store.get("snapshot_completed_at") is None:
+                store["snapshot_completed_at"] = time.time()
+        _npr_resume_plan_v11_2(store, config, batch_state, fresh_success)
+        progress.progress(
+            good_count / total_documents,
+            text=(f"Selesai: {good_count:,}/{total_documents:,} riwayat NPR diperiksa."
+                  if not remaining else f"Riwayat NPR: {good_count:,}/{total_documents:,} selesai diperiksa; {remaining:,} belum selesai."),
+        )
+        selection.update({"loading_mode": "ALL_PENDING" if continuous else "BATCH_COMPAT",
+                          "progress_resolved": good_count, "progress_total": total_documents,
+                          "batch_state": batch_state, "batch_attempted": attempted, "new_success": fresh_success,
+                          "from_session_cache": cached_count, "from_shared_cache": shared_cached_count,
+                          "shared_cache_ttl_seconds": NPR_PARITY_CACHE_TTL,
+                          "http_sessions_created": int(http_session is not None),
+                          "load_elapsed_seconds": round(time.monotonic() - started_at, 3),
+                          "route_validation_reused_documents": seed_count,
+                          "consecutive_rate_limits": int(run.get("rate_limit_streak", 0)),
+                          "pause_reason": run.get("pause_reason", ""), "resolved_documents": good_count,
+                          "unresolved_documents": remaining, "batch_size": config["batch_size"],
+                          "auto_continue": bool(run["auto"]), "cooldown": _npr_cooldown_status_v5(config["base_url"])})
+        output.attrs["npr_history_diagnostic"] = result.to_dict("records")
+        output.attrs["npr_history_connection"] = selection
+        return output
 
+
+    finally:
+        if http_session is not None:
+            http_session.close()
 
 
 def load_npr_first_process_history(df: pd.DataFrame) -> pd.DataFrame:
@@ -5859,11 +6008,11 @@ def _render_npr_history_summary_v4(df, history, sla):
         st.warning(f"HASIL AGING/SLA MASIH PARSIAL: {total - count:,} NPR belum berhasil diperiksa. Persentase SLA di bawah hanya berlaku untuk {len(sla):,} NPR dengan tanggal valid yang sudah terbaca, BUKAN SLA keseluruhan periode. Jumlah/status/PIC tidak terpotong oleh antrean history.")
         wait = connection.get("cooldown", {}).get("wait_seconds", 0)
         if wait:
-            st.info(f"Pemuatan dijeda karena pembatasan server. Tunggu sekitar {wait:,} detik, lalu klik Lanjutkan riwayat atau Muat semua bertahap. Hasil sukses tetap tersimpan dalam sesi.")
+            st.info(f"Pemuatan dijeda karena pembatasan server. Tunggu sekitar {wait:,} detik, lalu klik Lanjutkan pemuatan jika proses telah dijeda. Hasil sukses tetap tersimpan dalam sesi.")
         elif connection.get("batch_state") not in {"IDLE", "BATCH_COMPLETE", "COMPLETE"}:
             st.info(f"Status pemuatan: {connection.get('batch_state')}. Periksa Informasi Teknis Dashboard; percobaan berikutnya tidak mengulang hasil sukses.")
         else:
-            st.caption("Klik Lanjutkan riwayat untuk satu batch atau Muat semua bertahap untuk meneruskan batch berikutnya secara otomatis selama aplikasi terbuka.")
+            st.caption("Klik Lanjutkan pemuatan untuk meneruskan seluruh riwayat yang belum terbaca selama aplikasi terbuka.")
     else:
         st.caption("Semua dokumen terpilih telah diperiksa melalui sumber yang dapat dibaca. History kosong tetap kosong. Tanpa metadata total/pagination atau CSV PostgreSQL, kelengkapan seluruh DB dan kesamaan sumber belum terbukti.")
     alternate = ~diag["Created Date Source"].eq("created_at")
@@ -6069,7 +6218,7 @@ def _npr_source_history(df):
         return out
     _npr_prepare_history_cycle(df)
     # CSV comparison is optional and NEVER gates reading source history.
-    return load_npr_history_milestones_api(df, allow_remote=True)
+    return load_npr_history_milestones_api(df, allow_remote=True, load_all=True)
 
 
 def _npr_source_after_render(history):
@@ -7171,7 +7320,7 @@ def _npr_transport_policy_v5(base_url):
     """Nilai awal konservatif, BUKAN pernyataan kuota resmi server."""
     import math
     values = {
-        "interval": _npr_setting("min_request_interval", "SIBIMA_NPR_MIN_REQUEST_INTERVAL", "10"),
+        "interval": _npr_setting("min_request_interval", "SIBIMA_NPR_MIN_REQUEST_INTERVAL", "2"),
         "fallback_cooldown": _npr_setting("rate_limit_cooldown", "SIBIMA_NPR_RATE_LIMIT_COOLDOWN", "60"),
     }
     saved = st.session_state.get("_npr_history_options_v5", {})
@@ -7183,7 +7332,7 @@ def _npr_transport_policy_v5(base_url):
             return min(upper, max(lower, n)) if math.isfinite(n) else default
         except (ValueError, TypeError):
             return default
-    return {"interval": bounded(values["interval"], 10.0, 1.0, 60.0),
+    return {"interval": bounded(values["interval"], 2.0, 1.0, 60.0),
             "fallback_cooldown": bounded(values["fallback_cooldown"], 60.0, 1.0, 3600.0)}
 
 
@@ -7284,6 +7433,150 @@ def _npr_get_response_v5(session, url, params, base_url, diagnostic, read_timeou
 
 
 
+NPR_SHARED_HISTORY_MAX_ENTRIES_V12 = 10000
+
+
+@st.cache_resource(show_spinner=False)
+def _npr_shared_history_cache_v12():
+    from collections import OrderedDict
+    import threading
+    return {"lock": threading.RLock(), "entries": OrderedDict(), "generations": {}}
+
+
+def _npr_shared_history_scope_v12(config):
+    import hashlib
+    value = (_npr_history_scope_key(config), NPR_READER_VERSION,
+             _npr_endpoint_candidates()[0])
+    return hashlib.sha256(repr(value).encode()).hexdigest()
+
+
+def _npr_shared_history_key_v12(config, number, fingerprint):
+    number = str(number or "").strip().upper()
+    fingerprint = str(fingerprint or "").strip()
+    if number in {"", "NAN", "NONE", "NULL", "<NA>", "NAT"} or not fingerprint:
+        return None
+    return (_npr_shared_history_scope_v12(config), number, fingerprint)
+
+
+def _npr_shared_history_route_ok_v12(config, record):
+    # Validate the resolved route/template against the current route policy.
+    # Route provenance is retained in the cached record, never guessed on read.
+    route = str(record.get("Milestone Source", "")).strip().strip("/")
+    if not route or any(part in route for part in (":", "..", "?", "#")):
+        return False
+    override = str(config.get("history_endpoint", "")).strip().strip("/")
+    if override:
+        allowed = {override}
+    elif config.get("discover_history"):
+        endpoint = str(_npr_endpoint_candidates()[0]).strip().strip("/")
+        allowed = {endpoint + "/history", endpoint + "/{id}/history", endpoint + "/{id}"}
+    else:
+        allowed = set()
+    return route in allowed
+
+
+def _npr_shared_history_fresh_v12(entry, now):
+    import math
+    try:
+        fetched_at = float(entry["fetched_at"])
+        ttl = float(NPR_PARITY_CACHE_TTL)
+    except (KeyError, ValueError, TypeError, OverflowError):
+        return False
+    # A read does not renew freshness. Reject future timestamps/clock rollback.
+    return (math.isfinite(fetched_at) and math.isfinite(ttl) and ttl > 0
+            and 0 <= now - fetched_at < ttl)
+
+
+def _npr_shared_history_generation_v12(config):
+    scope = _npr_shared_history_scope_v12(config)
+    cache = _npr_shared_history_cache_v12()
+    with cache["lock"]:
+        return cache["generations"].get(scope, 0)
+
+
+def _npr_shared_history_get_v12(config, number, fingerprint):
+    import copy
+    import time
+    key = _npr_shared_history_key_v12(config, number, fingerprint)
+    if key is None:
+        return None
+    cache = _npr_shared_history_cache_v12()
+    with cache["lock"]:
+        entry = cache["entries"].get(key)
+        if entry is None:
+            return None
+        record = entry.get("record", {})
+        if (not _npr_shared_history_fresh_v12(entry, time.time())
+                or record.get("History State") != "API_HISTORY"
+                or not _npr_shared_history_route_ok_v12(config, record)):
+            cache["entries"].pop(key, None)
+            return None
+        cache["entries"].move_to_end(key)
+        return copy.deepcopy(entry)
+
+
+def _npr_shared_history_put_v12(config, number, entry, generation):
+    import copy
+    import math
+    import time
+    if not isinstance(entry, dict) or not isinstance(entry.get("record"), dict):
+        return False
+    key = _npr_shared_history_key_v12(config, number, entry.get("fingerprint"))
+    if key is None:
+        return False
+    record = entry["record"]
+    if (record.get("History State") != "API_HISTORY"
+            or str(record.get("__npr_number", "")).strip().upper() != key[1]
+            or not _npr_shared_history_route_ok_v12(config, record)
+            or record.get("History Pagination") not in {"METADATA_COMPLETE", "LIST_NO_METADATA"}
+            or not _npr_shared_history_fresh_v12(entry, time.time())):
+        return False
+    try:
+        rows = float(record["History Rows"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    if not math.isfinite(rows) or rows < 0 or not rows.is_integer():
+        return False
+    # Only known, credential-free diagnostic/milestone fields may be retained.
+    # Do not cache arbitrary request objects, tokens, headers, or raw payloads.
+    fields = {
+        "__npr_number", "__first_process_date", "__first_complete_date",
+        "History State", "History Rows", "Created Date Source",
+        "Header date_inprogress (bukan acuan FIRST)",
+        "Header date_complete (bukan acuan FIRST)", "History Pagination",
+        "Milestone Source", "From Session Cache", "Reused Route Validation",
+        "History Fetched At UTC", "Recovered Header Created At",
+    }
+    safe_record = copy.deepcopy({k: v for k, v in record.items() if k in fields})
+    safe_record["__npr_number"] = key[1]
+    safe_record["History Rows"] = int(rows)
+    stored = {"record": safe_record, "fingerprint": key[2],
+              "fetched_at": float(entry["fetched_at"])}
+    cache = _npr_shared_history_cache_v12()
+    with cache["lock"]:
+        if generation != cache["generations"].get(key[0], 0):
+            return False
+        previous = cache["entries"].get(key)
+        if previous is not None and previous["fetched_at"] > stored["fetched_at"]:
+            return False  # A delayed older write cannot replace fresher data.
+        cache["entries"][key] = stored
+        cache["entries"].move_to_end(key)
+        while len(cache["entries"]) > NPR_SHARED_HISTORY_MAX_ENTRIES_V12:
+            cache["entries"].popitem(last=False)
+        return True
+
+
+def _npr_shared_history_clear_v12(config):
+    scope = _npr_shared_history_scope_v12(config)
+    cache = _npr_shared_history_cache_v12()
+    with cache["lock"]:
+        cache["generations"][scope] = cache["generations"].get(scope, 0) + 1
+        for key in list(cache["entries"]):
+            if key[0] == scope:
+                cache["entries"].pop(key, None)
+    # The independent transport registry/cooldown is deliberately untouched.
+
+
 def _npr_history_store_v5(config):
     scope = _npr_history_scope_key(config)
     key = "_npr_history_store_v5_" + scope
@@ -7307,7 +7600,7 @@ def _npr_header_fingerprint_v5(context, status, created_date):
 
 
 def _npr_continue_auto_v5(history):
-    """Resume successful batches or server cooldowns while the browser session stays active."""
+    """Resume a server cooldown; legacy bounded calls may also request a foreground continuation."""
     import time
     connection = history.attrs.get("npr_history_connection", {})
     config = _npr_history_settings()
