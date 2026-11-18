@@ -1,3 +1,4 @@
+import re
 import os
 import logging
 from io import BytesIO
@@ -51,13 +52,20 @@ BASE_URL = {
 }
 
 # v11.2: use existing environment/secrets, never embed an API credential.
-API_TOKEN = os.getenv("SIBIMA_API_TOKEN", "").strip()
-if not API_TOKEN:
+# API key disimpan pada environment atau Streamlit Secrets.
+API_KEY = os.getenv("SIBIMA_API_KEY", "").strip()
+if not API_KEY:
     try:
-        API_TOKEN = str(st.secrets.get("SIBIMA_API_TOKEN", "") or
-                        st.secrets.get("api", {}).get("token", "") or "").strip()
+        API_KEY = str(st.secrets.get("SIBIMA_API_KEY", "") or st.secrets.get("api", {}).get("key", "") or "").strip()
     except Exception:
-        API_TOKEN = ""
+        API_KEY = ""
+
+
+def api_headers(api_key=None):
+    key = API_KEY if api_key is None else str(api_key or "").strip()
+    if not key:
+        raise ValueError("SIBIMA_API_KEY belum dikonfigurasi")
+    return {"x-api-key": key, "Accept": "application/json"}
 
 # Pastikan setiap URL diakhiri dengan "/"
 for key in BASE_URL:
@@ -314,6 +322,115 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Data") -> bytes:
     return output.getvalue()
 
 
+# =========================================================
+# DOWNLOAD DATA SESUAI MASING-MASING GRAFIK
+# =========================================================
+@st.cache_data(ttl=600, max_entries=64, show_spinner=False)
+def _chart_export_excel_bytes(sheets: dict) -> bytes:
+    """Build an Excel workbook from the exact chart inputs, without reloading data."""
+    output = BytesIO()
+    with pd.ExcelWriter(
+        output,
+        engine="xlsxwriter",
+        datetime_format="dd-mm-yyyy hh:mm:ss",
+        date_format="dd-mm-yyyy",
+        engine_kwargs={"options": {
+            "strings_to_formulas": False,
+            "strings_to_urls": False,
+        }},
+    ) as writer:
+        for sheet_name, source_df in sheets.items():
+            frame = source_df.copy()
+            frame.attrs = {}
+            cleaned_columns = []
+            for position, column_name in enumerate(frame.columns):
+                series = frame.iloc[:, position].copy()
+                series.attrs = {}
+                if isinstance(series.dtype, pd.DatetimeTZDtype):
+                    series = series.dt.tz_convert(TIMEZONE).dt.tz_localize(None)
+                elif series.dtype == "object":
+                    series = series.map(
+                        lambda value: pd.Timestamp(value).tz_convert(TIMEZONE).tz_localize(None)
+                        if isinstance(value, (datetime, pd.Timestamp))
+                        and getattr(value, "tzinfo", None) is not None
+                        else value
+                    )
+                series.name = column_name
+                cleaned_columns.append(series)
+            if cleaned_columns:
+                frame = pd.concat(cleaned_columns, axis=1)
+            frame.to_excel(writer, index=False, sheet_name=sheet_name)
+            worksheet = writer.sheets[sheet_name]
+            worksheet.freeze_panes(1, 0)
+            if len(frame.columns):
+                worksheet.set_column(0, len(frame.columns) - 1, 22)
+                if not frame.empty:
+                    worksheet.autofilter(0, 0, len(frame), len(frame.columns) - 1)
+    return output.getvalue()
+
+
+def render_chart_data_download(
+    chart_key: str,
+    title: str,
+    summary: pd.DataFrame,
+    detail: pd.DataFrame = None,
+    notes: str = "",
+):
+    """Render immediately below a chart, using its computed summary and source rows."""
+    if not isinstance(summary, pd.DataFrame):
+        return
+    context = dict(st.session_state.get("_procurement_chart_export_context", {}))
+    chart_titles = CHART_DOWNLOAD_TITLES
+    chart_title = chart_titles.get(chart_key, title)
+    provisional = "SEMENTARA" in title.upper()
+    if provisional and "SEMENTARA" not in chart_title.upper():
+        chart_title += " — SEMENTARA"
+    sheets = {"Ringkasan Grafik": summary.copy()}
+    if isinstance(detail, pd.DataFrame):
+        sheets["Detail Data"] = detail.copy()
+    information = [
+        ("Grafik", chart_title),
+        ("Identitas grafik", chart_key),
+        *context.items(),
+        ("Jumlah baris ringkasan", len(summary)),
+        ("Jumlah baris detail", len(detail) if isinstance(detail, pd.DataFrame) else 0),
+        ("Penjelasan", notes or "Menggunakan ringkasan dan data sumber yang sama dengan grafik."),
+        ("Cakupan", "Dataset mengikuti grafik terkait. Nilai kosong dipertahankan; baris detail dapat berulang per dokumen bila sumbernya adalah item."),
+    ]
+    if provisional:
+        information.append(("Status hasil", "SEMENTARA — mengikuti subset grafik yang sedang ditampilkan."))
+    sheets["Info Grafik"] = pd.DataFrame(information, columns=["Keterangan", "Nilai"])
+    for frame in sheets.values():
+        frame.attrs = {}
+
+    period = "_".join(
+        str(context.get(key, "")).replace("-", "")
+        for key in ("Tanggal awal pilihan", "Tanggal akhir pilihan")
+        if context.get(key)
+    )
+    file_name = "Data_" + chart_key + ("_" + period if period else "")
+    if provisional:
+        file_name += "_SEMENTARA"
+    file_name += ".xlsx"
+    download_options = {}
+    version = re.match(r"^(\d+)\.(\d+)", getattr(st, "__version__", ""))
+    if version and tuple(map(int, version.groups())) >= (1, 44):
+        download_options["on_click"] = "ignore"
+    st.download_button(
+        label="⬇️ Download Data Grafik (.xlsx)",
+        data=_chart_export_excel_bytes(sheets),
+        file_name=file_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_chart_" + chart_key,
+        help="Ringkasan dan rincian data untuk " + chart_title,
+        use_container_width=True,
+        **download_options,
+    )
+
+
+CHART_DOWNLOAD_TITLES = {'pr_balance_status': 'Proporsi Nominal PR Balance per Status', 'pr_balance_pic_status': 'Analisis Transaksi PR Balance per PIC Procurement & per Status', 'pr_balance_pic_heatmap': 'Heatmap PR Balance - Aktivitas PIC Procurement', 'aging_pr': 'Distribusi Aging PR', 'pr_average_aging_pic': 'Rata-rata Proses PR', 'pr_balance_aging_per_pic': 'PR Balance Aging per PIC Procurement', 'pr_sla': 'SLA Compliance PR', 'pr_sla_pic': 'SLA Compliance per PIC Procurement', 'pr_sla_trend': 'Trend SLA', 'do_balance_status': 'Proporsi Nominal DO Balance per Status', 'do_balance_pic_status': 'Analisis Transaksi DO Balance per PIC Procurement & per Status', 'do_balance_pic_heatmap': 'Heatmap DO Balance - Aktivitas PIC Procurement', 'aging_do': 'Distribusi Aging DO', 'aging_do_outstanding': 'Distribusi Aging DO Balance', 'do_average_aging_pic': 'Rata-rata Proses DO', 'do_balance_average_aging_pic': 'Rata-rata Proses DO Balance', 'do_sla': 'SLA Compliance DO', 'do_balance_sla': 'SLA Compliance DO Balance', 'do_sla_pic': 'SLA Compliance per PIC Procurement', 'do_sla_trend': 'Trend SLA', 'npr_status_distribution': 'Proporsi Jumlah NPR per Status', 'npr_outstanding_heatmap': 'Heatmap NPR Outstanding per PIC Procurement', 'npr_outstanding_by_pic': 'NPR Outstanding per PIC - Request dan Process', 'npr_aging_first_process': 'Aging NPR - Created ke First Process', 'npr_aging_first_complete': 'Aging NPR - Created ke First Complete', 'npr_sla_first_process': 'SLA Compliance NPR - First Process', 'npr_document_timeline': 'Timeline NPR per Tanggal Transaksi'}
+
+
 def calculate_total_pr_strict(df: pd.DataFrame) -> tuple[pd.DataFrame, float]:
     """Canonical Total PR used by BOTH API and PostgreSQL dashboards.
 
@@ -418,7 +535,7 @@ def get_api_data_old(endpoint: str, source: str = "outstanding", start_date=None
 
         # 🔹 Gunakan session dengan retry
         session = create_session()
-        response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        response = session.get(url, params=params, headers=api_headers(), timeout=REQUEST_TIMEOUT)
 
         response.raise_for_status()
         payload = response.json()
@@ -515,8 +632,7 @@ def get_api_data_new(
             params = {
                 "date_start": start_date,
                 "date_end": end_date,
-                "token": API_TOKEN,
-                "page": page,
+                                "page": page,
                 "per_page": per_page,
             }
             # Buang None agar API tidak menerima string/null yang tidak perlu.
@@ -528,7 +644,7 @@ def get_api_data_new(
                 {k: v for k, v in params.items() if k != "token"},
             )
 
-            response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            response = session.get(url, params=params, headers=api_headers(), timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             payload = response.json()
 
@@ -598,13 +714,23 @@ def get_api_data_new(
             getattr(e.response, "status_code", "-"),
         )
         if not silent:
-            st.warning(f"Gagal mengambil data dari endpoint {endpoint} ({source}).")
+            status = getattr(e.response, "status_code", "unknown")
+            st.error(f"API {endpoint} ({source}) gagal: HTTP {status}.")
+            if status in (401, 403):
+                st.info("Periksa SIBIMA_API_KEY di Streamlit Secrets dan izin akses key pada ERP.")
+            elif status == 422:
+                st.info("Parameter tanggal/pagination ditolak server. Periksa kontrak endpoint.")
+            elif status == 429:
+                st.info("Rate limit API tercapai. Tunggu sebelum mencoba kembali.")
         return pd.DataFrame()
 
-    except Exception:
+    except Exception as exc:
         logger.exception("Gagal mengambil endpoint=%s source=%s", endpoint, source)
         if not silent:
-            st.warning(f"Gagal mengambil data dari endpoint {endpoint} ({source}).")
+            if isinstance(exc, ValueError) and "SIBIMA_API_KEY belum dikonfigurasi" in str(exc):
+                st.error("SIBIMA_API_KEY tidak terbaca. Simpan pada .streamlit/secrets.toml di root project, lalu restart Streamlit.")
+            else:
+                st.error(f"API {endpoint} ({source}) gagal: {type(exc).__name__}. Lihat terminal Streamlit untuk detail.")
         return pd.DataFrame()
 
 
@@ -840,12 +966,10 @@ def _fetch_pr_history_cached(pr_no: str) -> dict:
 
     base_url = f"{BASE_URL['erp']}purchase-requests/history"
     params = {"transaction_number": pr_no}
-    if API_TOKEN:
-        params["token"] = API_TOKEN
-
+    
     try:
         session = create_session()
-        response = session.get(base_url, params=params, timeout=REQUEST_TIMEOUT)
+        response = session.get(base_url, params=params, headers=api_headers(), timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         payload = response.json()
         data = payload.get("data", {}) if isinstance(payload, dict) else {}
@@ -1491,10 +1615,10 @@ def _fetch_sales_order_by_id_api(so_id) -> pd.DataFrame:
         return pd.DataFrame()
 
     url = f"{BASE_URL['erp']}sales-orders/{key}"
-    params = {"token": API_TOKEN} if API_TOKEN else {}
+    params = {}
     try:
         session = create_session()
-        response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        response = session.get(url, params=params, headers=api_headers(), timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         return _flatten_sales_order_payload_api(response.json())
     except Exception as exc:
@@ -1549,11 +1673,9 @@ def _fetch_sales_order_targeted_api(so_id="", so_number="", so_detail_id="") -> 
 
     for url, extra_params in attempts:
         params = dict(extra_params)
-        if API_TOKEN:
-            params["token"] = API_TOKEN
-
+        
         try:
-            response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            response = session.get(url, params=params, headers=api_headers(), timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             frame = _flatten_sales_order_payload_api(response.json())
 
@@ -2706,7 +2828,27 @@ def _npr_render_sla_gauge(df: pd.DataFrame, threshold: int = 5, title: str = "SL
             ]
         }
     ))
+    sla_results = df["Aging"] <= threshold
+    sla_detail = df.copy()
+    sla_detail["Batas SLA (hari)"] = threshold
+    sla_detail["Hasil SLA"] = sla_results.map(
+        {True: "Memenuhi SLA", False: "Tidak Memenuhi SLA"}
+    ).fillna("Tidak dinilai")
+    sla_summary = pd.DataFrame([{
+        "Batas SLA (hari)": threshold,
+        "Jumlah NPR Dinilai": int(sla_results.count()),
+        "Memenuhi SLA": int(sla_results.sum()),
+        "Tidak Memenuhi SLA": int((~sla_results).sum()),
+        "SLA Compliance (%)": sla_compliance,
+    }])
     st.plotly_chart(fig, use_container_width=True)
+    render_chart_data_download(
+        "npr_sla_first_process", title, sla_summary, sla_detail,
+        notes=("SEMENTARA — hanya subset NPR dengan First Process dan aging valid yang sudah terbaca; "
+               "belum merupakan SLA seluruh periode. " if "SEMENTARA" in title.upper() else "")
+              + "Ringkasan menggunakan nilai dan denominator yang sama dengan gauge. "
+                "Dokumen di luar subset gauge tidak ditambahkan ke denominator atau detail unduhan.",
+    )
 
 
 def render_npr_outstanding_heatmap(df: pd.DataFrame):
@@ -2802,6 +2944,15 @@ def render_npr_outstanding_heatmap(df: pd.DataFrame):
     st.plotly_chart(
         fig, use_container_width=True, key="heatmap_npr_outstanding"
     )
+    render_chart_data_download(
+        "npr_outstanding_heatmap",
+        "Heatmap NPR Outstanding per PIC Procurement",
+        matrix.rename(columns=dict(zip(months, month_labels))).reset_index(),
+        working.assign(Bulan=working["Bulan"].astype(str)),
+        notes="Ringkasan berisi matriks yang sama dengan heatmap, termasuk sel bernilai nol. "
+              "Detail hanya memuat NPR Request/Process dengan nomor dan tanggal valid yang digunakan grafik. "
+              "Cakupan mengikuti dokumen sumber yang telah terbaca.",
+    )
     st.caption(
         "Angka menunjukkan jumlah NPR unik berstatus Request atau Process. "
         "Semakin merah, semakin banyak outstanding pada sel tersebut."
@@ -2877,6 +3028,15 @@ def render_npr_aging_first_process(df: pd.DataFrame, *, provisional: bool = Fals
         use_container_width=True,
         key="aging_npr_first_process",
     )
+    render_chart_data_download(
+        "npr_aging_first_process",
+        ("SEMENTARA — " if provisional else "")
+        + "Distribusi Aging NPR - Created ke First Process",
+        summary, valid,
+        notes=("SEMENTARA — hanya subset NPR dengan tanggal dan riwayat First Process valid yang sudah terbaca; "
+               "belum mewakili seluruh periode dan dapat berubah setelah pemuatan selesai. " if provisional else "")
+              + "Detail hanya memuat NPR dengan Aging NPR dan kategori aging valid yang digunakan grafik.",
+    )
 
 
 def render_npr_aging_first_complete(df: pd.DataFrame, *, provisional: bool = False):
@@ -2938,6 +3098,15 @@ def render_npr_aging_first_complete(df: pd.DataFrame, *, provisional: bool = Fal
         fig,
         use_container_width=True,
         key="aging_npr_first_complete",
+    )
+    render_chart_data_download(
+        "npr_aging_first_complete",
+        ("SEMENTARA — " if provisional else "")
+        + "Distribusi Aging NPR - Created ke First Complete",
+        summary, valid,
+        notes=("SEMENTARA — hanya subset NPR dengan tanggal dan riwayat First Complete valid yang sudah terbaca; "
+               "belum mewakili seluruh periode dan dapat berubah setelah pemuatan selesai. " if provisional else "")
+              + "Detail hanya memuat NPR dengan Aging NPR Complete dan kategori aging valid yang digunakan grafik.",
     )
 
 
@@ -3027,6 +3196,13 @@ def render_npr_dashboard(
                 )
 
                 st.plotly_chart(fig, use_container_width=True)
+                render_chart_data_download(
+                    "npr_status_distribution", "Proporsi Jumlah NPR per Status",
+                    status_summary, df_npr_f,
+                    notes="Ringkasan menghitung jumlah nomor NPR unik per status sesuai pie chart. "
+                          + ("Daftar NPR dari sumber belum terverifikasi lengkap; angka mengikuti dokumen yang terbaca. "
+                             if not source_ready else ""),
+                )
 
 
         with st.container(border=True):
@@ -3127,6 +3303,14 @@ def render_npr_dashboard(
                     )
 
                     st.plotly_chart(fig, use_container_width=True)
+                    render_chart_data_download(
+                        "npr_outstanding_by_pic", "NPR Outstanding per PIC - Request dan Process",
+                        sales_summary, npr_active,
+                        notes="Detail hanya memuat NPR Request/Process yang digunakan stacked bar. "
+                              "Ringkasan berisi jumlah NPR unik per PIC dan status. "
+                              + ("Daftar NPR dari sumber belum terverifikasi lengkap; angka mengikuti dokumen yang terbaca. "
+                                 if not source_ready else ""),
+                    )
 
 
         with st.container(border=True):
@@ -3280,6 +3464,14 @@ def render_npr_dashboard(
                 )
 
                 st.plotly_chart(fig, use_container_width=True)
+                render_chart_data_download(
+                    "npr_document_timeline", "Timeline NPR per Tanggal Transaksi",
+                    timeline, df_npr_f.loc[df_npr_f["transaction_date"].notna()].copy(),
+                    notes="Ringkasan dan detail memakai tanggal valid yang sama dengan timeline, "
+                          "dengan jumlah nomor NPR unik per hari. "
+                          + ("Daftar NPR dari sumber belum terverifikasi lengkap; angka mengikuti dokumen yang terbaca. "
+                             if not source_ready else ""),
+                )
 
 
 def _npr_default_source_start():
@@ -3556,6 +3748,19 @@ def run_npr_dashboard_v7(end_date, search_number, search_status, pic_column, *, 
     process = build_npr_aging_first_process(filtered, history)
     complete = build_npr_aging_first_complete(filtered, history)
     sla = build_npr_sla_first_process(process)
+    st.session_state["_procurement_chart_export_context"] = {
+        "Jenis dokumen": "NPR",
+        "Tanggal awal pilihan": str(source_start),
+        "Tanggal akhir pilihan": str(end_date),
+        "Pencarian pada halaman": search_number or "Semua",
+        "Status pada halaman": search_status or "Semua Status",
+        "PIC pada halaman": selected_pic,
+        "Sumber": _npr_source_label(),
+        "Dokumen setelah filter": len(filtered),
+        "Kelengkapan daftar sumber": bool(date_coverage["source_rows_complete"]),
+        "History diperiksa": f"{coverage['resolved']}/{coverage['total']}",
+        "Penilaian Aging/SLA final": bool(date_coverage["ready"] and coverage["ready"]),
+    }
     render_npr_dashboard(filtered, process, sla, complete,
                          history_ready=coverage["ready"], dates_ready=date_coverage["dates_ready"])
     _npr_render_export(filtered, history, end_date, source_start, search_number, search_status, selected_pic)
@@ -3895,7 +4100,7 @@ def _npr_api_config() -> dict:
         valid = False
     if not valid:
         raise ValueError("Base URL NPR harus HTTPS tanpa token, query, username, atau password.")
-    token_value = _npr_setting("token", "SIBIMA_NPR_API_TOKEN", "")
+    token_value = _npr_setting("token", "SIBIMA_NPR_API_KEY", "")
     fetch_start = _npr_default_source_start()
     # Preserve an existing session credential only on its original host/path.
     saved = st.session_state.get("_npr_api_credentials", {})
@@ -3915,11 +4120,11 @@ def _npr_api_config() -> dict:
         except ValueError:
             same_erp = False
         if same_erp:
-            token_value = str(API_TOKEN or "").strip()
+            token_value = str(API_KEY or "").strip()
             if not token_value:
                 try:
-                    token_value = str(st.secrets.get("SIBIMA_API_TOKEN", "") or
-                                      st.secrets.get("api", {}).get("token", "") or "").strip()
+                    token_value = str(st.secrets.get("SIBIMA_API_KEY", "") or
+                                      st.secrets.get("api", {}).get("key", "") or "").strip()
                 except Exception:
                     token_value = ""
     token_error = ""
@@ -4009,7 +4214,7 @@ def _npr_request_json(session, base_url, endpoint, params, diagnostic, read_time
     from urllib.parse import urlsplit, urljoin, parse_qsl, unquote, urlunsplit
     base = urlsplit(base_url)
     url, request_params = base_url + endpoint, dict(params)
-    token = str(params.get("token", ""))
+    token = ""
     timeout = REQUEST_TIMEOUT if read_timeout is None else read_timeout
     for redirect_count in range(4):
         response = _npr_get_response_v5(session, url, request_params, base_url, diagnostic, timeout)
@@ -4082,9 +4287,10 @@ def _cached_npr_header_rows_v3(base_url: str, token: str, endpoint: str,
         "pagination": "UNKNOWN", "pagination_complete": False, "request_attempts": 0,
     }
     session = _create_npr_session()
+    session._sibima_api_key = token
     all_rows, signatures = [], set()
     base_params = {k: v for k, v in {
-        "date_start": start_date, end_date_param: end_date, "token": token
+        "date_start": start_date, end_date_param: end_date, 
     }.items() if v is not None and v != ""}
     per_page = 200
 
@@ -4209,7 +4415,7 @@ def _render_npr_connection_controls(end_date):
 def _npr_failure_message(diagnostic):
     state = str(diagnostic.get("state", "UNKNOWN"))
     messages = {
-        "TOKEN_MISSING": "Token API NPR belum diisi.",
+        "TOKEN_MISSING": "API key NPR belum diisi.",
         "HTTP_401": "Server menolak autentikasi (HTTP 401). Periksa/ganti token NPR.",
         "HTTP_403": "Akses NPR ditolak (HTTP 403). Periksa izin token atau pembatasan akses server.",
         "HTTP_404": "Endpoint NPR tidak ditemukan (HTTP 404). Periksa base URL dan route product-requests.",
@@ -4657,12 +4863,13 @@ def _fetch_npr_history_route_api(route: str, number: str, header_id: str, histor
     bound = "{id}" in template or "{transaction_number}" in template
     owns_session = http_session is None
     session = _create_npr_session() if owns_session else http_session
+    session._sibima_api_key = token
     all_events, seen, last_meta = [], set(), {}
     native_headers = []
     diagnostic = {"endpoint": template}
     try:
         for page in range(1, 101):
-            params = {"token": token, "transaction_number": number}
+            params = {"transaction_number": number}
             if page > 1:
                 params["page"] = page
             payload = _npr_request_json(session, base_url, route, params, diagnostic, read_timeout=12 if probe else 25)
@@ -4882,6 +5089,7 @@ def load_npr_history_milestones_api(df: pd.DataFrame, *, allow_remote: bool = Tr
     try:
         if pending and fetch_enabled:
             http_session = _create_npr_session()
+            http_session._sibima_api_key = config["token"]
         prefetched = None
         saved_selection = store.get("selection")
         selection = {"route": "", "state": "NOT_NEEDED", "attempts": []}
@@ -5292,7 +5500,7 @@ STATUS_COLORS = {
     "Pending": "#56CCF2",
 }
 
-def render_status_pie(summary_df: pd.DataFrame, title: str):
+def render_status_pie(summary_df: pd.DataFrame, title: str, *, detail_df: pd.DataFrame = None, chart_key: str = "status_pie"):
     if summary_df.empty:
         st.info("Data status tidak tersedia.")
         return
@@ -5311,10 +5519,16 @@ def render_status_pie(summary_df: pd.DataFrame, title: str):
         textinfo="percent+value",
         texttemplate="%{percent:.1%}<br>(Rp %{value:,.0f})"
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
+    render_chart_data_download(
+        chart_key, title,
+        summary_df[["Status", "Total_Amount"]].copy(),
+        detail=detail_df,
+        notes="Nominal per status memakai hasil agregasi yang sama persis dengan diagram. Persentase irisan dihitung dari Total_Amount per status terhadap totalnya.",
+    )
 
 
-def render_status_bar(summary_df: pd.DataFrame, title: str):
+def render_status_bar(summary_df: pd.DataFrame, title: str, *, detail_df: pd.DataFrame = None, chart_key: str = "status_bar"):
     if summary_df.empty:
         st.info("Data status tidak tersedia.")
         return
@@ -5339,10 +5553,16 @@ def render_status_bar(summary_df: pd.DataFrame, title: str):
             title="Total Nominal (Rp)"
         )
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
+    render_chart_data_download(
+        chart_key, title,
+        summary_df[["Status", "Total_Amount"]].copy(),
+        detail=detail_df,
+        notes="Total_Amount adalah nominal setiap status yang ditampilkan pada grafik.",
+    )
 
 
-def render_pic_bar(summary_df: pd.DataFrame, x_col: str, y_col: str, color_col: str | None):
+def render_pic_bar(summary_df: pd.DataFrame, x_col: str, y_col: str, color_col: str | None, *, detail_df: pd.DataFrame = None, chart_key: str = "pic_bar"):
     if summary_df.empty:
         st.info("Data PIC tidak tersedia.")
         return
@@ -5386,10 +5606,20 @@ def render_pic_bar(summary_df: pd.DataFrame, x_col: str, y_col: str, color_col: 
         uniformtext_minsize=8,
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    export_columns = list(dict.fromkeys(
+        [x_col, y_col] + ([color_col] if color_col and color_col in summary_df.columns else []) + ["Total_Doc"]
+    ))
+    export_detail = assign_unassigned(detail_df, x_col) if detail_df is not None else None
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
+    render_chart_data_download(
+        chart_key, "Transaksi per PIC dan Status",
+        summary_df[export_columns].copy(),
+        detail=export_detail,
+        notes="Nilai per segmen memakai data grafik. Total_Doc adalah jumlah segmen yang digunakan sebagai label total di atas batang; satu dokumen dapat terhitung pada beberapa kelompok bila terdapat beberapa status/PIC.",
+    )
 
 
-def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, doc_col: str, title: str):
+def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, doc_col: str, title: str, *, chart_key: str = "pic_heatmap"):
     if df.empty or pic_col not in df.columns or date_col not in df.columns or doc_col not in df.columns:
         st.info("Data tidak tersedia untuk heatmap aktivitas PIC.")
         return
@@ -5424,7 +5654,12 @@ def render_pic_heatmap(df: pd.DataFrame, pic_col: str, date_col: str, doc_col: s
         margin=dict(l=100, r=40, t=60, b=120),
         height=500
         )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
+    render_chart_data_download(
+        chart_key, title, summary.copy(),
+        detail=working.loc[working["Bulan"].notna()].copy(),
+        notes="Jumlah Transaksi adalah jumlah nomor dokumen unik per PIC dan bulan yang sama dengan sel heatmap. Bulan mengikuti pengelompokan grafik tanpa pemisahan tahun. Baris tanpa tanggal valid tidak masuk heatmap.",
+    )
 
 
     # Tambahkan keterangan di bawah heatmap
@@ -5539,6 +5774,11 @@ def render_aging_bar(df: pd.DataFrame, doc_col: str, chart_key: str = "aging_bar
 
     # ✅ tambahkan key unik di sini
     st.plotly_chart(fig, use_container_width=True, key=chart_key)
+    render_chart_data_download(
+        chart_key, "Distribusi Aging", summary.copy(),
+        detail=df.loc[df["Aging Category"].notna() & df[doc_col].notna()].copy(),
+        notes="Jumlah Transaksi menghitung nomor dokumen unik pada setiap kategori aging. Detail hanya memuat baris dengan kategori dan nomor dokumen yang ikut dihitung.",
+    )
 
 
 def summarize_pic_aging(df: pd.DataFrame, pic_col: str, doc_col: str) -> pd.DataFrame:
@@ -5559,7 +5799,7 @@ def summarize_pic_aging(df: pd.DataFrame, pic_col: str, doc_col: str) -> pd.Data
     )
     return summary
 
-def render_pic_aging_bar(summary_df: pd.DataFrame):
+def render_pic_aging_bar(summary_df: pd.DataFrame, *, detail_df: pd.DataFrame = None, chart_key: str = "pic_aging_bar"):
     if summary_df.empty:
         st.info("Data aging per PIC tidak tersedia.")
         return
@@ -5594,10 +5834,25 @@ def render_pic_aging_bar(summary_df: pd.DataFrame):
     )
 
 
-    st.plotly_chart(fig, use_container_width=True)
+    export_detail = None
+    if detail_df is not None:
+        export_detail = assign_unassigned(detail_df, "PIC Procurement")
+        if "Aging" in export_detail.columns:
+            export_detail = export_detail.loc[export_detail["Aging"].notna()].copy()
+        if "PIC Procurement" in export_detail.columns:
+            export_detail = export_detail.loc[
+                export_detail["PIC Procurement"].isin(summary_df["PIC Procurement"])
+            ].copy()
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
+    render_chart_data_download(
+        chart_key, "Rata-rata Proses per PIC",
+        summary_df[["PIC Procurement", "Average_Aging"]].copy(),
+        detail=export_detail,
+        notes="Average_Aging memakai nilai rata-rata yang sama persis dengan grafik. Perhitungan existing berbasis baris item dengan Aging valid, sehingga satu dokumen dengan beberapa item dapat memiliki bobot lebih besar.",
+    )
 
 
-def render_pr_balance_aging_per_pic(df: pd.DataFrame):
+def render_pr_balance_aging_per_pic(df: pd.DataFrame, *, chart_key: str = "pr_balance_aging_per_pic"):
     """
     Stacked bar PR Balance per PIC berdasarkan kategori aging.
 
@@ -5716,10 +5971,15 @@ def render_pr_balance_aging_per_pic(df: pd.DataFrame):
     st.plotly_chart(
         fig,
         use_container_width=True,
-        key="pr_balance_aging_per_pic",
+        key=chart_key,
+    )
+    render_chart_data_download(
+        chart_key, "PR Balance Aging per PIC Procurement", summary.copy(),
+        detail=working.loc[working["No. PR"].notna()].copy(),
+        notes="Jumlah PR menghitung No. PR unik per PIC Procurement dan kategori aging dari data outstanding yang sama dengan grafik. PIC telah dinormalisasi dengan assign_unassigned; status Complete, Draft, dan Close dikeluarkan. Bucket dengan jumlah nol tidak ditampilkan. Detail mempertahankan baris item penyusun jumlah unik; total label tiap PIC adalah penjumlahan bucket pada grafik.",
     )
 
-def render_sla_gauge(df: pd.DataFrame, threshold: int = 5, title: str = "SLA Compliance"):
+def render_sla_gauge(df: pd.DataFrame, threshold: int = 5, title: str = "SLA Compliance", *, chart_key: str = "sla_gauge"):
     if df.empty or "Aging" not in df.columns:
         st.info("Data aging tidak tersedia untuk SLA.")
         return
@@ -5741,7 +6001,26 @@ def render_sla_gauge(df: pd.DataFrame, threshold: int = 5, title: str = "SLA Com
             ]
         }
     ))
-    st.plotly_chart(fig, use_container_width=True)
+    export_comparison = df["Aging"] <= threshold
+    export_denominator = int(export_comparison.notna().sum())
+    export_met = int(export_comparison.sum())
+    export_summary = pd.DataFrame([{
+        "SLA Compliance (%)": sla_compliance,
+        "Batas SLA (hari)": threshold,
+        "Baris memenuhi SLA": export_met,
+        "Baris tidak memenuhi SLA": export_denominator - export_met,
+        "Baris pembagi": export_denominator,
+        "Baris hasil perbandingan kosong": int(export_comparison.isna().sum()),
+    }])
+    export_detail = df.copy()
+    export_detail["Batas SLA (hari)"] = threshold
+    export_detail["Hasil Perbandingan SLA"] = export_comparison
+    export_detail["Masuk Pembagi SLA"] = export_comparison.notna()
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
+    render_chart_data_download(
+        chart_key, title, export_summary, detail=export_detail,
+        notes="Persentase mengikuti persis mean(Aging <= batas SLA) pada grafik dan berbasis baris item, bukan jumlah dokumen unik. Pembagi menghitung hasil perbandingan yang tidak kosong. Kolom Hasil Perbandingan SLA mempertahankan perilaku nilai kosong dari tipe data Aging yang dipakai grafik.",
+    )
 
 
 def summarize_pic_sla(df: pd.DataFrame, pic_col: str, doc_col: str, threshold: int = 5) -> pd.DataFrame:
@@ -5759,7 +6038,7 @@ def summarize_pic_sla(df: pd.DataFrame, pic_col: str, doc_col: str, threshold: i
     )
     return summary
 
-def render_pic_sla_bar(summary_df: pd.DataFrame):
+def render_pic_sla_bar(summary_df: pd.DataFrame, *, detail_df: pd.DataFrame = None, chart_key: str = "pic_sla_bar"):
     if summary_df.empty:
         st.info("Data SLA per PIC tidak tersedia.")
         return
@@ -5778,10 +6057,21 @@ def render_pic_sla_bar(summary_df: pd.DataFrame):
         textfont=dict(size=14, color="black")
     )
     fig.update_layout(coloraxis_showscale=False)
-    st.plotly_chart(fig, use_container_width=True)
+    export_detail = assign_unassigned(detail_df, "PIC Procurement") if detail_df is not None else None
+    if export_detail is not None and "PIC Procurement" in export_detail.columns:
+        export_detail = export_detail.loc[
+            export_detail["PIC Procurement"].isin(summary_df["PIC Procurement"])
+        ].copy()
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
+    render_chart_data_download(
+        chart_key, "SLA Compliance per PIC",
+        summary_df[["PIC Procurement", "SLA_Compliance"]].copy(),
+        detail=export_detail,
+        notes="SLA_Compliance memakai hasil agregasi yang sama persis dengan grafik. Rumus existing per PIC membagi jumlah baris memenuhi SLA dengan seluruh baris item pada kelompok PIC, bukan jumlah dokumen unik.",
+    )
 
 
-def render_sla_trend(df: pd.DataFrame, threshold: int = 5, date_col: str = "transaction_date"):
+def render_sla_trend(df: pd.DataFrame, threshold: int = 5, date_col: str = "transaction_date", *, chart_key: str = "sla_trend"):
     if df.empty or "Aging" not in df.columns or date_col not in df.columns:
         st.info("Data tidak tersedia untuk trend SLA.")
         return
@@ -5815,7 +6105,16 @@ def render_sla_trend(df: pd.DataFrame, threshold: int = 5, date_col: str = "tran
         yaxis=dict(title="SLA Compliance (%)", range=[0, 100])
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    export_detail = df.loc[df["Bulan"].notna()].copy()
+    export_detail["Batas SLA (hari)"] = threshold
+    export_detail["Hasil Perbandingan SLA"] = export_detail["Aging"] <= threshold
+    export_detail["Masuk Pembagi SLA"] = export_detail["Hasil Perbandingan SLA"].notna()
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
+    render_chart_data_download(
+        chart_key, "Trend SLA Compliance per Bulan", sla_trend.copy(),
+        detail=export_detail,
+        notes=f"Batas SLA: {threshold} hari. Setiap bulan memakai mean(Aging <= batas SLA) yang sama dengan grafik, berbasis baris item. Detail mengikuti bulan dari kolom {date_col}; baris tanpa bulan valid tidak ikut grafik.",
+    )
 
 
 
@@ -6165,7 +6464,7 @@ def _npr_source_controls(end_date, source_start):
         return False
     if not config["token"]:
         st.error(
-            "Token NPR belum tersedia. Isi SIBIMA_NPR_API_TOKEN pada environment "
+            "API key NPR belum tersedia. Isi SIBIMA_NPR_API_TOKEN pada environment "
             "atau token pada [npr_api] di .streamlit/secrets.toml, kemudian restart. "
             "Token ERP existing hanya dipakai otomatis untuk host/path ERP yang sama."
         )
@@ -6416,6 +6715,16 @@ def main():
             options=pic_options,
             index=0
         )
+
+    st.session_state["_procurement_chart_export_context"] = {
+        "Jenis dokumen": selected_doc_type,
+        "Tanggal awal pilihan": str(pd.Timestamp(start_date).date()),
+        "Tanggal akhir pilihan": str(pd.Timestamp(end_date).date()),
+        "Pencarian pada halaman": search_number or "Semua",
+        "Status pada halaman": search_status or "Semua Status",
+        "PIC pada halaman": search_pic,
+        "Sumber": "ERP REST API",
+    }
 
     # ---------- DEFAULT SAFE COPY ----------
     df_pr_f = df_pr.copy()
@@ -6692,85 +7001,18 @@ def main():
 
                 with st.container(border=True):
                     st.subheader("🍩 Proporsi Nominal PR Balance per Status")
-                    render_status_pie(pr_summary, "Persentase Distribusi Nominal PR Balance")
+                    render_status_pie(pr_summary, 'Persentase Distribusi Nominal PR Balance', chart_key='pr_balance_status', detail_df=df_pr_f)
 
             pic_summary_pr = summarize_pic_status(df_pr_f, "PIC Procurement", "No. PR")
             with st.container(border=True):
                 st.subheader("👤 Analisis Transaksi PR Balance per PIC Procurement & per Status")
-                render_pic_bar(
-                    summary_df=pic_summary_pr,
-                    x_col="PIC Procurement",
-                    y_col="Jumlah_Doc",
-                    color_col="Status",
-                )
+                render_pic_bar(summary_df=pic_summary_pr, x_col='PIC Procurement', y_col='Jumlah_Doc', color_col='Status', chart_key='pr_balance_pic_status', detail_df=df_pr_f)
 
             with st.container(border=True):
                 st.subheader("🔥 Heatmap PR Balance - Aktivitas PIC Procurement")
-                render_pic_heatmap(df_pr_f, "PIC Procurement", "transaction_date", "No. PR", "Heatmap Aktivitas PIC Procurement per Bulan")
+                render_pic_heatmap(df_pr_f, 'PIC Procurement', 'transaction_date', 'No. PR', 'Heatmap Aktivitas PIC Procurement per Bulan', chart_key='pr_balance_pic_heatmap')
 
-            # Download PR Balance by status
-            with st.container(border=True):
-                st.subheader("📥 Download Data PR Balance (Periode & Status)")
 
-                if not df_pr_f.empty and "Status" in df_pr_f.columns:
-                    all_statuses = sorted([s for s in df_pr_f["Status"].dropna().astype(str).unique().tolist() if s.strip()])
-                    selected_statuses = st.multiselect(
-                        "Pilih Status untuk di-download:",
-                        all_statuses,
-                        default=all_statuses,
-                        key="pr_balance_status_export"
-                    )
-
-                    df_download_pr_balance = df_pr_f[df_pr_f["Status"].isin(selected_statuses)].copy()
-
-                    if not df_download_pr_balance.empty:
-                        st.download_button(
-                            label=f"⬇️Download {len(df_download_pr_balance):,} Baris Data (Filtered).xlsx",
-                            data=to_excel_bytes(df_download_pr_balance, sheet_name="Data_PR"),
-                            file_name=f"Data_PR_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                        st.caption(f"Menampilkan {len(df_download_pr_balance):,} baris data yang akan di-download.")
-                    else:
-                        st.warning("Tidak ada data yang sesuai dengan filter yang dipilih.")
-                else:
-                    st.info("Data PR Balance tidak tersedia untuk export.")
-
-            # Download per PIC PR Balance
-            with st.container(border=True):
-                st.subheader("📥 Download Data PR Balance per PIC")
-
-                if not df_pr_f.empty and "PIC Procurement" in df_pr_f.columns:
-                    # Filter status hanya Need Approve, Approved, In Progress
-                    df_filtered_status = df_pr_f.copy()
-                    #[
-                        #df_pr_valid["Status"].isin(["Need Approve", "Approved", "In Progress"])
-                    #].copy()
-
-                    # Tambahkan opsi "Semua"
-                    options = ["Semua"] + sorted(
-                        df_filtered_status["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist()
-                    )
-
-                    selected_pic = st.selectbox("Pilih PIC Procurement:", options, key="pr_balance_pic_select")
-
-                    # Jika pilih "Semua", ambil semua data sesuai status
-                    if selected_pic == "Semua":
-                        filtered = df_filtered_status.copy()
-                    else:
-                        filtered = df_filtered_status[
-                            df_filtered_status["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic
-                        ].copy()
-
-                    st.download_button(
-                        label=f"⬇️Download Data {selected_pic}.xlsx",
-                        data=to_excel_bytes(filtered, sheet_name="Data_PR_Balance"),
-                        file_name=f"Data_PR_balance_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                    st.caption(f"Menampilkan {len(filtered):,} baris data yang akan di-download.")
-                else:
-                    st.info("Data tidak tersedia untuk fitur download PR Balance per PIC.")
 
     # =====================================================
     # MID PR
@@ -6800,7 +7042,7 @@ def main():
 
             with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging PR")
-                render_aging_bar(df_pr_final_valid, "transaction_number", chart_key="aging_pr")
+                render_aging_bar(df_pr_final_valid, 'transaction_number', chart_key='aging_pr')
 
             #with st.container(border=True):
                 #st.subheader("⏳ Distribusi Aging PR Balance")
@@ -6812,7 +7054,7 @@ def main():
             with st.container(border=True):
                 st.subheader("👥 Rata-rata Proses PR")
                 #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
-                render_pic_aging_bar(pic_aging_summary_final)
+                render_pic_aging_bar(pic_aging_summary_final, chart_key='pr_average_aging_pic', detail_df=df_pr_final_valid)
 
             with st.container(border=True):
                 st.subheader("📊 PR Balance Aging per PIC Procurement")
@@ -6820,69 +7062,9 @@ def main():
                     "Menampilkan jumlah PR Balance aktif per PIC dan distribusi umurnya "
                     "(0-30, 31-60, 61-90, >90 hari). Total backlog ditampilkan di atas setiap PIC."
                 )
-                render_pr_balance_aging_per_pic(df_pr_valid)
+                render_pr_balance_aging_per_pic(df_pr_valid, chart_key='pr_balance_aging_per_pic')
 
-            # Download per Category PR Aging
-            with st.container(border=True):
-                st.subheader("📥 Download Data Distribusi Aging PR")
 
-                if not df_pr_final_valid.empty:
-                    # Filter data aging PR berdasarkan kategori yang dipilih
-                    selected_category_pr = st.selectbox(
-                        "Pilih kategori aging PR untuk diunduh 📂",
-                        ["Semua", "0-30 hari", "31-60 hari", "61-90 hari", ">90 hari"]
-                    )
-
-                    # Jika bukan 'Semua', filter sesuai kategori
-                    if selected_category_pr != "Semua":
-                        df_pr_filtered = df_pr_final_valid[
-                            df_pr_final_valid["Aging Category"] == selected_category_pr
-                        ].copy()
-                    else:
-                        df_pr_filtered = df_pr_final_valid.copy()
-
-                    # Tombol download
-                    st.download_button(
-                    label=f"⬇️Download Data PR Aging ({selected_category_pr})",
-                    data=to_excel_bytes(df_pr_filtered, sheet_name="PR Aging"),
-                    file_name=f"PR_Aging_{selected_category_pr.replace(' ', '_')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"download_pr_aging_{selected_category_pr}"   # 🔹 key unik
-                    )
-
-                else:
-                    st.info("Data tidak tersedia untuk fitur download per Category Aging PR.")
-
-            # Download per Category PR Balance Aging
-            with st.container(border=True):
-                st.subheader("📥 Download Data Distribusi Aging PR Balance")
-
-                if not df_pr_valid.empty:
-                    # Filter data aging PR berdasarkan kategori yang dipilih
-                    selected_category_balance = st.selectbox(
-                        "Pilih kategori aging PR Balance untuk diunduh 📂",
-                        ["Semua", "0-30 hari", "31-60 hari", "61-90 hari", ">90 hari"]
-                    )
-
-                    # Jika bukan 'Semua', filter sesuai kategori
-                    if selected_category_balance != "Semua":
-                        df_balance_filtered = df_pr_valid[
-                            df_pr_valid["Aging Category"] == selected_category_balance
-                        ].copy()
-                    else:
-                        df_balance_filtered = df_pr_valid.copy()
-
-                    # Tombol download
-                    st.download_button(
-                    label=f"⬇️Download Data PR Balance Aging ({selected_category_balance})",
-                    data=to_excel_bytes(df_balance_filtered, sheet_name="PR Balance Aging"),
-                    file_name=f"PR_Balance_Aging_{selected_category_balance.replace(' ', '_')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"download_pr_balance_{selected_category_balance}"   # 🔹 key unik
-                    )
-
-                else:
-                    st.info("Data tidak tersedia untuk fitur download per Category Aging PR Balance.")
 
 
     # =====================================================
@@ -6891,7 +7073,7 @@ def main():
         with col_kanan:
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance PR")
-                render_sla_gauge(df_pr_final_valid, threshold=2, title="SLA Compliance PR")
+                render_sla_gauge(df_pr_final_valid, threshold=2, title='SLA Compliance PR', chart_key='pr_sla')
 
             #with st.container(border=True):
                 #st.subheader("📏 SLA Compliance PR Balance")
@@ -6902,77 +7084,14 @@ def main():
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance per PIC Procurement")
                 #st.dataframe(pic_sla_summary, use_container_width=True, hide_index=True)
-                render_pic_sla_bar(pic_sla_summary)
+                render_pic_sla_bar(pic_sla_summary, chart_key='pr_sla_pic', detail_df=df_pr_final_valid)
 
             with st.container(border=True):
                 st.subheader("📈 Trend SLA")
-                render_sla_trend(df_pr_final_valid, threshold=2, date_col="transaction_date")
+                render_sla_trend(df_pr_final_valid, threshold=2, date_col='transaction_date', chart_key='pr_sla_trend')
 
 
-            # Download PR by period & status
-            with st.container(border=True):
-                st.subheader("📥 Download Data PR (Periode & Status)")
 
-                if not df_pr_final_real.empty and "Status" in df_pr_final_real.columns:
-                    all_statuses = sorted([s for s in df_pr_final_real["Status"].dropna().astype(str).unique().tolist() if s.strip()])
-                    selected_statuses = st.multiselect(
-                        "Pilih Status untuk di-download:",
-                        all_statuses,
-                        default=all_statuses,
-                        key="pr_status_export"
-                    )
-
-                    df_download = df_pr_final_real[df_pr_final_real["Status"].isin(selected_statuses)].copy()
-
-                    if not df_download.empty:
-                        st.download_button(
-                            label=f"⬇️Download {len(df_download):,} Baris Data (Filtered).xlsx",
-                            data=to_excel_bytes(df_download, sheet_name="Data_PR"),
-                            file_name=f"Data_PR_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key=f"download {len(df_download):,} Baris Data (Filtered)"   # 🔹 key unik
-                        )
-                        st.caption(f"Menampilkan {len(df_download):,} baris data yang akan di-download.")
-                    else:
-                        st.warning("Tidak ada data yang sesuai dengan filter yang dipilih.")
-                else:
-                    st.info("Data PR tidak tersedia untuk export.")
-
-            # Download per PIC PR
-            with st.container(border=True):
-                st.subheader("📥 Download Data PR per PIC")
-
-                if not df_pr_final_real.empty and "PIC Procurement" in df_pr_final_real.columns:
-                    # Filter status hanya Need Approve, Approved, In Progress
-                    df_filtered_status = df_pr_final_real.copy()
-                    #[
-                        #df_pr_final_real["Status"].isin(["Approved", "In Progress", "Complete"])
-                    #].copy()
-
-                    # Tambahkan opsi "Semua"
-                    options = ["Semua"] + sorted(
-                        df_filtered_status["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist()
-                    )
-
-                    selected_pic = st.selectbox("Pilih PIC Procurement:", options, key="pr_pic_select")
-
-                    # Jika pilih "Semua", ambil semua data sesuai status
-                    if selected_pic == "Semua":
-                        filtered = df_filtered_status.copy()
-                    else:
-                        filtered = df_filtered_status[
-                            df_filtered_status["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic
-                        ].copy()
-
-                    st.download_button(
-                        label=f"⬇️Download Data {selected_pic}.xlsx",
-                        data=to_excel_bytes(filtered, sheet_name="Data_PR"),
-                        file_name=f"Data_PR_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                    st.caption(f"Menampilkan {len(filtered):,} baris data yang akan di-download.")
-                else:
-                    st.info("Data tidak tersedia untuk fitur download PR Balance per PIC.")
 
 
     # =====================================================
@@ -7013,82 +7132,18 @@ def main():
 
                 with st.container(border=True):
                     st.subheader("🍩 Proporsi Nominal DO Balance per Status")
-                    render_status_pie(do_summary, "Persentase Distribusi Nominal DO Balance")
+                    render_status_pie(do_summary, 'Persentase Distribusi Nominal DO Balance', chart_key='do_balance_status', detail_df=df_do_f)
 
             pic_summary_do = summarize_pic_status(df_do_f, "PIC Procurement", "No. DO")
             with st.container(border=True):
                 st.subheader("👤 Analisis Transaksi DO Balance per PIC Procurement & per Status")
-                render_pic_bar(
-                    summary_df=pic_summary_do,
-                    x_col="PIC Procurement",
-                    y_col="Jumlah_Doc",
-                    color_col="Status",
-                )
+                render_pic_bar(summary_df=pic_summary_do, x_col='PIC Procurement', y_col='Jumlah_Doc', color_col='Status', chart_key='do_balance_pic_status', detail_df=df_do_f)
 
             with st.container(border=True):
                 st.subheader("🔥 Heatmap DO Balance - Aktivitas PIC Procurement")
-                render_pic_heatmap(df_do_f, "PIC Procurement", "transaction_date", "No. DO", "Heatmap Aktivitas PIC Procurement per Bulan")
+                render_pic_heatmap(df_do_f, 'PIC Procurement', 'transaction_date', 'No. DO', 'Heatmap Aktivitas PIC Procurement per Bulan', chart_key='do_balance_pic_heatmap')
 
-            # Download DO Balance by status
-            with st.container(border=True):
-                st.subheader("📥 Download Data DO Balance (Periode & Status)")
 
-                if not df_do_valid.empty and "Status" in df_do_valid.columns:
-                    all_statuses = sorted([s for s in df_do_valid["Status"].dropna().astype(str).unique().tolist() if s.strip()])
-                    selected_statuses = st.multiselect(
-                        "Pilih Status untuk di-download:",
-                        all_statuses,
-                        default=all_statuses,
-                        key="do_balance_status_export"
-                    )
-
-                    df_download_do_balance = df_do_valid[df_do_valid["Status"].isin(selected_statuses)].copy()
-
-                    if not df_download_do_balance.empty:
-                        st.download_button(
-                            label=f"⬇️Download {len(df_download_do_balance):,} Baris Data (Filtered).xlsx",
-                            data=to_excel_bytes(df_download_do_balance, sheet_name="Data_PR"),
-                            file_name=f"Data_DO_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                        st.caption(f"Menampilkan {len(df_download_do_balance):,} baris data yang akan di-download.")
-                    else:
-                        st.warning("Tidak ada data yang sesuai dengan filter yang dipilih.")
-                else:
-                    st.info("Data DO Balance tidak tersedia untuk export.")
-
-            # Download per PIC PR Balance
-            with st.container(border=True):
-                st.subheader("📥 Download Data DO Balance per PIC")
-
-                if not df_do_valid.empty and "PIC Procurement" in df_do_valid.columns:
-                    # Filter status hanya Need Approve, Approved, In Progress
-                    df_filtered_status = df_do_valid.copy()
-
-                    # Tambahkan opsi "Semua"
-                    options = ["Semua"] + sorted(
-                        df_filtered_status["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist()
-                    )
-
-                    selected_pic = st.selectbox("Pilih PIC Procurement:", options, key="do_balance_pic_select")
-
-                    # Jika pilih "Semua", ambil semua data sesuai status
-                    if selected_pic == "Semua":
-                        filtered = df_filtered_status.copy()
-                    else:
-                        filtered = df_filtered_status[
-                            df_filtered_status["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic
-                        ].copy()
-
-                    st.download_button(
-                        label=f"⬇️Download Data {selected_pic}.xlsx",
-                        data=to_excel_bytes(filtered, sheet_name="Data_DO_Balance"),
-                        file_name=f"Data_DO_balance_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                    st.caption(f"Menampilkan {len(filtered):,} baris data yang akan di-download.")
-                else:
-                    st.info("Data tidak tersedia untuk fitur download DO Balance per PIC.")
 
     # =====================================================
     # MID DO
@@ -7097,11 +7152,11 @@ def main():
 
             with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging DO")
-                render_aging_bar(df_do_final_valid, "transaction_number", chart_key="aging_do")
+                render_aging_bar(df_do_final_valid, 'transaction_number', chart_key='aging_do')
 
             with st.container(border=True):
                 st.subheader("⏳ Distribusi Aging DO Balance")
-                render_aging_bar(df_do_valid, "transaction_number", chart_key="aging_do_outstanding")
+                render_aging_bar(df_do_valid, 'transaction_number', chart_key='aging_do_outstanding')
 
 
                 pic_aging_summary_do = summarize_pic_aging(df_do_valid, "PIC Procurement", "transaction_number")
@@ -7110,75 +7165,15 @@ def main():
             with st.container(border=True):
                 st.subheader("👥 Rata-rata Proses DO")
                 #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
-                render_pic_aging_bar(pic_aging_summary_final_do)
+                render_pic_aging_bar(pic_aging_summary_final_do, chart_key='do_average_aging_pic', detail_df=df_do_final_valid)
 
             with st.container(border=True):
                 st.subheader("👥 Rata-rata Proses DO Balance")
                 #st.dataframe(pic_aging_summary, use_container_width=True, hide_index=True)
-                render_pic_aging_bar(pic_aging_summary_do)
+                render_pic_aging_bar(pic_aging_summary_do, chart_key='do_balance_average_aging_pic', detail_df=df_do_valid)
 
 
-            # Download per Category DO Aging
-            with st.container(border=True):
-                st.subheader("📥 Download Data per Categori Aging DO")
 
-                if not df_do_final_valid.empty:
-                    # Filter data aging DO berdasarkan kategori yang dipilih
-                    selected_category_do = st.selectbox(
-                        "Pilih kategori aging DO untuk diunduh 📂",
-                        ["Semua", "0-30 hari", "31-60 hari", "61-90 hari", ">90 hari"]
-                    )
-
-                    # Jika bukan 'Semua', filter sesuai kategori
-                    if selected_category_do != "Semua":
-                        df_do_filtered = df_do_final_valid[
-                            df_do_final_valid["Aging Category"] == selected_category_do
-                        ].copy()
-                    else:
-                        df_do_filtered = df_do_final_valid.copy()
-
-                    # Tombol download
-                    st.download_button(
-                    label=f"⬇️Download Data DO Aging ({selected_category_do})",
-                    data=to_excel_bytes(df_do_filtered, sheet_name="DO Aging"),
-                    file_name=f"DO_Aging_{selected_category_do.replace(' ', '_')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"download_do_aging_{selected_category_do}"   # 🔹 key unik
-                    )
-
-                else:
-                    st.info("Data tidak tersedia untuk fitur download per Category Aging DO.")
-
-            # Download per Category DO Balance Aging
-            with st.container(border=True):
-                st.subheader("📥 Download Data per Categori Aging DO Balance")
-
-                if not df_do_valid.empty:
-                    # Filter data aging DO berdasarkan kategori yang dipilih
-                    selected_category_do_balance = st.selectbox(
-                        "Pilih kategori aging DO Balance untuk diunduh 📂",
-                        ["Semua", "0-30 hari", "31-60 hari", "61-90 hari", ">90 hari"]
-                    )
-
-                    # Jika bukan 'Semua', filter sesuai kategori
-                    if selected_category_do_balance != "Semua":
-                        df_balance_do_filtered = df_do_valid[
-                            df_do_valid["Aging Category"] == selected_category_do_balance
-                        ].copy()
-                    else:
-                        df_balance_do_filtered = df_do_valid.copy()
-
-                    # Tombol download
-                    st.download_button(
-                    label=f"⬇️Download Data DO Balance Aging ({selected_category_do_balance})",
-                    data=to_excel_bytes(df_balance_do_filtered, sheet_name="DO Balance Aging"),
-                    file_name=f"DO_Balance_Aging_{selected_category_do_balance.replace(' ', '_')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"download_do_balance_{selected_category_do_balance}"   # 🔹 key unik
-                    )
-
-                else:
-                    st.info("Data tidak tersedia untuk fitur download per Category Aging DO Balance.")
 
     # =====================================================
     # RIGHT - DO
@@ -7186,88 +7181,25 @@ def main():
         with col_kanan:
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance DO")
-                render_sla_gauge(df_do_final_valid, 2, title="SLA Compliance DO")
+                render_sla_gauge(df_do_final_valid, 2, title='SLA Compliance DO', chart_key='do_sla')
 
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance DO Balance")
-                render_sla_gauge(df_do_valid, threshold=2, title="SLA Compliance DO Balance")
+                render_sla_gauge(df_do_valid, threshold=2, title='SLA Compliance DO Balance', chart_key='do_balance_sla')
 
             pic_sla_summary_do = summarize_pic_sla(df_do_final_valid, "PIC Procurement", "transaction_number", threshold=2)
 
             with st.container(border=True):
                 st.subheader("📏 SLA Compliance per PIC Procurement")
                 #st.dataframe(pic_sla_summary, use_container_width=True, hide_index=True)
-                render_pic_sla_bar(pic_sla_summary_do)
+                render_pic_sla_bar(pic_sla_summary_do, chart_key='do_sla_pic', detail_df=df_do_final_valid)
 
             with st.container(border=True):
                 st.subheader("📈 Trend SLA")
-                render_sla_trend(df_do_final_valid, threshold=2, date_col="transaction_date")
+                render_sla_trend(df_do_final_valid, threshold=2, date_col='transaction_date', chart_key='do_sla_trend')
 
 
-            # Download DO by period & status
-            with st.container(border=True):
-                st.subheader("📥 Download Data DO (Periode & Status)")
 
-                if not df_do_final_real.empty and "Status" in df_do_final_real.columns:
-                    all_statuses_do = sorted([s for s in df_do_final_real["Status"].dropna().astype(str).unique().tolist() if s.strip()])
-                    selected_statuses_do = st.multiselect(
-                        "Pilih Status untuk di-download:",
-                        all_statuses_do,
-                        default=all_statuses_do,
-                        key="do_status_export"
-                    )
-
-                    df_download_do = df_do_final_real[df_do_final_real["Status"].isin(selected_statuses_do)].copy()
-
-                    if not df_download_do.empty:
-                        st.download_button(
-                            label=f"⬇️Download {len(df_download_do):,} Baris Data (Filtered).xlsx",
-                            data=to_excel_bytes(df_download_do, sheet_name="Data_DO"),
-                            file_name=f"Data_DO_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key=f"download {len(df_download_do):,} Baris Data (Filtered)"   # 🔹 key unik
-                        )
-                        st.caption(f"Menampilkan {len(df_download_do):,} baris data yang akan di-download.")
-                    else:
-                        st.warning("Tidak ada data yang sesuai dengan filter yang dipilih.")
-                else:
-                    st.info("Data DO tidak tersedia untuk export.")
-
-            # Download per PIC DO
-            with st.container(border=True):
-                st.subheader("📥 Download Data DO per PIC")
-
-                if not df_do_final_real.empty and "PIC Procurement" in df_do_final_real.columns:
-                    # Filter status hanya Need Approve, Approved, In Progress
-                    df_filtered_status_do = df_do_final_real.copy()
-                    #[
-                        #df_do_final_real["Status"].isin(["Approve", "In Progress", "Complete"])
-                    #].copy()
-
-                    # Tambahkan opsi "Semua"
-                    options = ["Semua"] + sorted(
-                        df_filtered_status_do["PIC Procurement"].fillna("Unassigned").astype(str).unique().tolist()
-                    )
-
-                    selected_pic_do = st.selectbox("Pilih PIC Procurement:", options, key="pr_pic_select")
-
-                    # Jika pilih "Semua", ambil semua data sesuai status
-                    if selected_pic_do == "Semua":
-                        filtered_do = df_filtered_status_do.copy()
-                    else:
-                        filtered_do = df_filtered_status_do[
-                            df_filtered_status_do["PIC Procurement"].fillna("Unassigned").astype(str) == selected_pic_do
-                        ].copy()
-
-                    st.download_button(
-                        label=f"⬇️Download Data {selected_pic_do}.xlsx",
-                        data=to_excel_bytes(filtered_do, sheet_name="Data_DO"),
-                        file_name=f"Data_DO_{selected_pic}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                    st.caption(f"Menampilkan {len(filtered_do):,} baris data yang akan di-download.")
-                else:
-                    st.info("Data tidak tersedia untuk fitur download DO Balance per PIC.")
 
 
     # ---------- FOOTER INFO ----------
@@ -7399,7 +7331,7 @@ def _npr_get_response_v5(session, url, params, base_url, diagnostic, read_timeou
         diagnostic["request_sent"] = True
         response = None
         try:
-            response = session.get(url, params=params, timeout=(10, max(1, read_timeout)), allow_redirects=False)
+            response = session.get(url, params=params, headers=api_headers(getattr(session, "_sibima_api_key", None)), timeout=(10, max(1, read_timeout)), allow_redirects=False)
         except requests.exceptions.SSLError:
             diagnostic.update(state="SSL_ERROR", error_type="SSLError")
             raise NPRAPIFetchError(diagnostic) from None
